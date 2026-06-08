@@ -1,0 +1,88 @@
+name: Build and Publish Docker Images
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  BACKEND_IMAGE: ghcr.io/ngcaodinh/dcp-backend
+  FRONTEND_IMAGE: ghcr.io/ngcaodinh/dcp-frontend
+
+jobs:
+  build-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract backend metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.BACKEND_IMAGE }}
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short
+
+      - name: Build and push backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./BE
+          file: ./BE/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  build-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract frontend metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.FRONTEND_IMAGE }}
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short
+
+      - name: Build and push frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./FE
+          file: ./FE/Dockerfile
+          push: true
+          build-args: |
+            NEXT_PUBLIC_API_BASE_URL=${{ vars.NEXT_PUBLIC_API_BASE_URL }}
+            NEXT_PUBLIC_GOOGLE_CLIENT_ID=${{ vars.NEXT_PUBLIC_GOOGLE_CLIENT_ID }}
+            NEXT_PUBLIC_AMOY_CHAIN_ID=${{ vars.NEXT_PUBLIC_AMOY_CHAIN_ID }}
+            NEXT_PUBLIC_BLOCKCHAIN_CHAIN_ID=${{ vars.NEXT_PUBLIC_BLOCKCHAIN_CHAIN_ID }}
+            NEXT_PUBLIC_BLOCKCHAIN_EXPLORER_TX_BASE_URL=${{ vars.NEXT_PUBLIC_BLOCKCHAIN_EXPLORER_TX_BASE_URL }}
+            NEXT_PUBLIC_CHARITY_TOKEN_ADDRESS=${{ vars.NEXT_PUBLIC_CHARITY_TOKEN_ADDRESS }}
+            NEXT_PUBLIC_DONATION_RANKING_ADDRESS=${{ vars.NEXT_PUBLIC_DONATION_RANKING_ADDRESS }}
+            NEXT_PUBLIC_DONATION_RANKING_CONTRACT_ADDRESS=${{ vars.NEXT_PUBLIC_DONATION_RANKING_CONTRACT_ADDRESS }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

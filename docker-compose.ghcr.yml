@@ -1,0 +1,125 @@
+services:
+  mongo:
+    image: mongo:7
+    container_name: dcp-mongo
+    restart: unless-stopped
+    command: ["mongod", "--wiredTigerCacheSizeGB", "1"]
+    mem_limit: 1536m
+    env_file:
+      - /opt/dcp/env/mongo.env
+    volumes:
+      - dcp_mongo_data:/data/db
+      - ./deploy/mongo/init-app-user.js:/docker-entrypoint-initdb.d/init-app-user.js:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval \"db.adminCommand('ping').ok\" | grep 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - dcp_internal
+    logging: &default-logging
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  redis:
+    image: redis:7-alpine
+    container_name: dcp-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    mem_limit: 256m
+    volumes:
+      - dcp_redis_data:/data
+    networks:
+      - dcp_internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    logging: *default-logging
+
+  backend:
+    image: ghcr.io/ngcaodinh/dcp-backend:latest
+    container_name: dcp-backend
+    restart: unless-stopped
+    mem_limit: 768m
+    env_file:
+      - /opt/dcp/env/backend.env
+    environment:
+      NODE_ENV: production
+      RUN_WORKERS: "false"
+      REQUEST_BODY_LIMIT: 5mb
+      NODE_OPTIONS: "--max-old-space-size=512"
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:4000:4000"
+    networks:
+      - dcp_internal
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:4000/health').then(response => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging: *default-logging
+
+  backend-worker:
+    image: ghcr.io/ngcaodinh/dcp-backend:latest
+    container_name: dcp-backend-worker
+    restart: unless-stopped
+    mem_limit: 512m
+    env_file:
+      - /opt/dcp/env/backend.env
+    environment:
+      NODE_ENV: production
+      RUN_WORKERS: "true"
+      REQUEST_BODY_LIMIT: 5mb
+      NODE_OPTIONS: "--max-old-space-size=384"
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - dcp_internal
+    logging: *default-logging
+
+  frontend:
+    image: ghcr.io/ngcaodinh/dcp-frontend:latest
+    container_name: dcp-frontend
+    restart: unless-stopped
+    mem_limit: 512m
+    env_file:
+      - /opt/dcp/env/frontend.env
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks:
+      - dcp_internal
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000').then(response => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging: *default-logging
+
+volumes:
+  dcp_mongo_data:
+  dcp_redis_data:
+
+networks:
+  dcp_internal:
+    driver: bridge

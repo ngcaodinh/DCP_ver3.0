@@ -1,0 +1,13 @@
+{
+  "network": "unknown",
+  "deployedAt": "2026-04-23T12:33:40.198Z",
+  "deployerAddress": "0x902130CeaF01D52523C38166fBdbAF31BD40f302",
+  "charityTokenAddress": "0xf273733c1b20Ba472A43ad1413a29FD0E95a4c87",
+  "donationRankingAddress": "0xD5fF3fc85d4769dB2E919A247B37118196809141",
+  "multisigDisbursementAddress": "0x83F8F6Ee78B089387f0C7f8Ce80E773a60ae7136",
+  "signerRoles": {
+    "adminSigner": "0x902130CeaF01D52523C38166fBdbAF31BD40f302",
+    "orgSigner": "0x902130CeaF01D52523C38166fBdbAF31BD40f302",
+    "regulatorySigner": "0x902130CeaF01D52523C38166fBdbAF31BD40f302"
+  }
+}

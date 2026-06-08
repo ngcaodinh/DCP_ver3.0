@@ -1,0 +1,266 @@
+import { Request, Response } from 'express';
+import { ethers } from 'ethers';
+import { createDepositRequest, getDepositTransactionStatus, processDepositWebhook } from '../services/depositService';
+import { listRecentDepositTransactionsByUserId } from '../models/depositModel';
+import { findUserById } from '../models/authModel';
+import { getLogger } from '../config/logger';
+
+const charityTokenAbi = ['function balanceOf(address account) view returns (uint256)'];
+
+const logger = getLogger();
+
+/**
+ * Hàm xử lý tạo payment link cho nghiệp vụ deposit.
+ * Mục đích: validate dữ liệu đầu vào và trả paymentUrl cho frontend redirect.
+ */
+export async function handleCreateDeposit(request: Request, response: Response): Promise<void> {
+  const authenticatedRequest = request as Request & { authenticatedUser?: { userId: string; role: string } };
+
+  if (!authenticatedRequest.authenticatedUser) {
+    response.status(401).json({ message: 'Bạn chưa đăng nhập hoặc phiên đăng nhập không hợp lệ.' });
+    return;
+  }
+
+  const amountVnd = Number(request.body?.amountVnd);
+
+  try {
+    const user = await findUserById(authenticatedRequest.authenticatedUser.userId);
+    if (!user) {
+      response.status(404).json({ message: 'Không tìm thấy thông tin người dùng.' });
+      return;
+    }
+
+    const createResult = await createDepositRequest({
+      userId: user.id,
+      walletAddress: user.walletAddress,
+      amountVnd,
+      correlationId: user.correlationId
+    });
+
+    response.status(201).json(createResult);
+  } catch (error) {
+    logger.error('Tạo payment link deposit thất bại.', { errorMessage: (error as Error).message });
+    response.status(400).json({ message: (error as Error).message || 'Tạo payment link thất bại.' });
+  }
+}
+
+/**
+ * Hàm kiểm tra nhanh endpoint webhook PayOS có hoạt động hay không.
+ * Mục đích: trả HTTP 200 cho request GET/health-check từ dashboard PayOS.
+ */
+export async function handleDepositWebhookHealth(_request: Request, response: Response): Promise<void> {
+  response.status(200).json({ message: 'Webhook URL hoạt động.' });
+}
+
+/**
+ * Hàm xử lý webhook PayOS cho deposit.
+ * Mục đích: verify webhook và thực thi xử lý idempotency theo orderCode.
+ */
+export async function handleDepositWebhook(request: Request, response: Response): Promise<void> {
+  try {
+    const rawPayload = request.body || {};
+    const signatureHeaderValue = String(
+      request.headers['x-payos-signature']
+      || request.headers['x-signature']
+      || request.headers['x-checksum']
+      || ''
+    ).trim();
+    const bodySignatureValue = String(
+      (rawPayload as { signature?: string; checksum?: string }).signature
+      || (rawPayload as { signature?: string; checksum?: string }).checksum
+      || ''
+    ).trim();
+
+    // Ghi chú logic phức tạp: checksum có thể đến từ body hoặc header tùy cấu hình cổng thanh toán.
+    // Cần lưu nguồn checksum để log đối soát và truy vết lỗi checksum mismatch.
+    const normalizedChecksum = bodySignatureValue || signatureHeaderValue || undefined;
+    const checksumSource = bodySignatureValue
+      ? 'body'
+      : (signatureHeaderValue ? 'header' : 'missing');
+
+    const webhookPayload = {
+      ...rawPayload,
+      signature: normalizedChecksum,
+      checksum: normalizedChecksum,
+      checksumSource
+    };
+
+    // Ghi chú logic phức tạp: nhiều hệ thống thanh toán gửi request test không có signature.
+    // Để pass bước verify URL trên dashboard, hệ thống trả 200 và không xử lý nghiệp vụ.
+    const hasSignature = Boolean((webhookPayload as { signature?: string; checksum?: string }).signature
+      || (webhookPayload as { signature?: string; checksum?: string }).checksum);
+    const payloadOrderCode = (webhookPayload as { orderCode?: string | number }).orderCode;
+    const nestedOrderCode = (
+      (webhookPayload as { data?: { orderCode?: string | number } }).data?.orderCode
+    );
+    const hasOrderCode = Boolean(payloadOrderCode || nestedOrderCode);
+
+    // Ghi chú logic phức tạp: một số request verify webhook từ cổng thanh toán có thể có signature
+    // nhưng không có orderCode nghiệp vụ thật. Cần trả 200 để pass verify URL, tránh false-negative 400.
+    if (!hasSignature || !hasOrderCode) {
+      response.status(200).json({ message: 'Webhook URL hoạt động.' });
+      return;
+    }
+
+    const processedTransaction = await processDepositWebhook(webhookPayload);
+    response.status(200).json({
+      message: 'Webhook được xử lý thành công.',
+      orderCode: processedTransaction.orderCode,
+      status: processedTransaction.status,
+      onChainTransactionHash: processedTransaction.onChainTransactionHash
+    });
+  } catch (error) {
+    const errorMessage = (error as Error).message || 'Webhook không hợp lệ.';
+
+    // Ghi chú logic phức tạp: payload verify của cổng thanh toán có thể dùng orderCode mẫu
+    // không tồn tại trong DB thật. Trường hợp này cần trả 200 để pass bước kích hoạt webhook URL.
+    if (errorMessage.includes('Không tìm thấy giao dịch deposit theo orderCode')) {
+      logger.warn('Nhận webhook test với orderCode không tồn tại, bỏ qua xử lý nghiệp vụ.', { errorMessage });
+      response.status(200).json({ message: 'Webhook URL hoạt động.' });
+      return;
+    }
+
+    logger.error('Xử lý webhook deposit thất bại.', { errorMessage });
+    response.status(400).json({ message: errorMessage });
+  }
+}
+
+/**
+ * Hàm lấy trạng thái giao dịch deposit theo orderCode.
+ * Mục đích: cho frontend truy vấn tiến trình thanh toán và mint token.
+ */
+export async function handleGetDepositStatus(request: Request, response: Response): Promise<void> {
+  const authenticatedRequest = request as Request & { authenticatedUser?: { userId: string; role: string } };
+  if (!authenticatedRequest.authenticatedUser) {
+    response.status(401).json({ message: 'Bạn chưa đăng nhập hoặc phiên đăng nhập không hợp lệ.' });
+    return;
+  }
+
+  const orderCode = request.params.orderCode;
+
+  try {
+    const transaction = await getDepositTransactionStatus(orderCode);
+    if (!transaction) {
+      response.status(404).json({ message: 'Không tìm thấy giao dịch theo orderCode.' });
+      return;
+    }
+
+    if (transaction.userId !== authenticatedRequest.authenticatedUser.userId) {
+      response.status(403).json({ message: 'Bạn không có quyền truy cập giao dịch này.' });
+      return;
+    }
+
+    // Ghi chú logic phức tạp: FE cần mốc hết hạn thanh toán để hiển thị bộ đếm ngược 15 phút.
+    // Mốc này được tính từ thời điểm tạo giao dịch ban đầu (createdAt).
+    const paymentExpiredAt = new Date(transaction.createdAt.getTime() + 15 * 60 * 1000);
+
+    response.status(200).json({
+      orderCode: transaction.orderCode,
+      amountVnd: transaction.amountVnd,
+      tokenAmount: transaction.tokenAmount,
+      status: transaction.status,
+      paymentUrl: transaction.paymentUrl,
+      onChainTransactionHash: transaction.onChainTransactionHash,
+      failureReason: transaction.failureReason,
+      createdAt: transaction.createdAt,
+      updatedAt: transaction.updatedAt,
+      paymentExpiredAt
+    });
+  } catch (error) {
+    logger.error('Lấy trạng thái deposit thất bại.', { errorMessage: (error as Error).message });
+    response.status(500).json({ message: 'Không thể lấy trạng thái giao dịch deposit.' });
+  }
+}
+
+/**
+ * Hàm đọc số dư token on-chain theo địa chỉ ví người dùng.
+ * Mục đích: đồng bộ số dư hiển thị với số dư thực tế dùng khi one-click donation.
+ */
+async function getOnChainTokenBalance(walletAddress: string): Promise<number> {
+  const blockchainRpcUrl = String(process.env.BLOCKCHAIN_RPC_URL || '').trim();
+  const charityTokenContractAddress = String(process.env.CHARITY_TOKEN_CONTRACT_ADDRESS || '').trim();
+
+  if (!blockchainRpcUrl || !charityTokenContractAddress || !walletAddress) {
+    return 0;
+  }
+
+  const readOnlyProvider = new ethers.JsonRpcProvider(blockchainRpcUrl);
+  const charityTokenContract = new ethers.Contract(charityTokenContractAddress, charityTokenAbi, readOnlyProvider);
+  const tokenBalanceAsBigInt = await charityTokenContract.balanceOf(walletAddress) as bigint;
+
+  return Number(tokenBalanceAsBigInt);
+}
+
+/**
+ * Hàm lấy dữ liệu sidebar của trang deposit.
+ * Mục đích: trả thông tin hồ sơ, số dư token và lịch sử nạp tiền gần đây theo user hiện tại.
+ */
+export async function handleGetDepositSidebar(request: Request, response: Response): Promise<void> {
+  const authenticatedRequest = request as Request & { authenticatedUser?: { userId: string; role: string } };
+  if (!authenticatedRequest.authenticatedUser) {
+    response.status(401).json({ message: 'Bạn chưa đăng nhập hoặc phiên đăng nhập không hợp lệ.' });
+    return;
+  }
+
+  try {
+    const user = await findUserById(authenticatedRequest.authenticatedUser.userId);
+    if (!user) {
+      response.status(404).json({ message: 'Không tìm thấy thông tin người dùng.' });
+      return;
+    }
+
+    const tokenBalanceOnChain = await getOnChainTokenBalance(user.walletAddress);
+    const recentTransactions = await listRecentDepositTransactionsByUserId(user.id, 5);
+
+    response.status(200).json({
+      profile: {
+        fullName: user.fullName,
+        role: user.role,
+        walletAddress: user.walletAddress
+      },
+      tokenBalance: tokenBalanceOnChain,
+      tokenBalanceOnChain,
+      recentDeposits: recentTransactions.map((transaction) => ({
+        orderCode: transaction.orderCode,
+        amountVnd: transaction.amountVnd,
+        tokenAmount: transaction.tokenAmount,
+        status: transaction.status,
+        onChainTransactionHash: transaction.onChainTransactionHash,
+        createdAt: transaction.createdAt,
+        updatedAt: transaction.updatedAt
+      }))
+    });
+  } catch (error) {
+    logger.error('Lấy dữ liệu sidebar deposit thất bại.', { errorMessage: (error as Error).message });
+    response.status(500).json({ message: 'Không thể lấy dữ liệu sidebar deposit.' });
+  }
+}
+
+/**
+ * Hàm xử lý lấy số dư token on-chain của người dùng hiện tại.
+ * Mục đích: trả về balance để hiển thị trên trang chi tiết dự án.
+ */
+export async function handleGetTokenBalance(request: Request, response: Response): Promise<void> {
+  const authenticatedRequest = request as Request & { authenticatedUser?: { userId: string; role: string } };
+
+  if (!authenticatedRequest.authenticatedUser) {
+    response.status(401).json({ message: 'Bạn chưa đăng nhập hoặc phiên đăng nhập không hợp lệ.' });
+    return;
+  }
+
+  try {
+    const user = await findUserById(authenticatedRequest.authenticatedUser.userId);
+    if (!user) {
+      response.status(404).json({ message: 'Không tìm thấy thông tin người dùng.' });
+      return;
+    }
+
+    const tokenBalanceOnChain = await getOnChainTokenBalance(user.walletAddress);
+
+    response.status(200).json({ tokenBalance: tokenBalanceOnChain });
+  } catch (error) {
+    logger.error('Lấy số dư token thất bại.', { errorMessage: (error as Error).message });
+    response.status(500).json({ message: 'Không thể lấy số dư token.' });
+  }
+}
+

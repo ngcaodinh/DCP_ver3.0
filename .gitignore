@@ -1,0 +1,87 @@
+# =========================
+# Root ignore rules for monorepo DCP
+# =========================
+
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+*.temp
+
+# =========================
+# FE (Next.js)
+# =========================
+FE/.next/
+FE/out/
+FE/coverage/
+FE/.turbo/
+
+# =========================
+# BE (Node.js / Express)
+# =========================
+BE/dist/
+BE/build/
+BE/coverage/
+
+# =========================
+# Blockchain (Hardhat)
+# =========================
+Blockchain/artifacts/
+Blockchain/cache/
+Blockchain/coverage/
+Blockchain/typechain-types/
+Blockchain/ignition/deployments/
+
+# Optional: local generated html/testing outputs
+*.local.html
+
+#document
+document.md
+
+#key
+keygoogle.json
+BE\.env.example
+
+#file setting
+\doan1_hethongbophieu
+CLAUDE.md
+AGENTS.md
+.editorconfig
+
+production-deployment.md
+dcp-terms-of-service.md
+
+\production-deployment-plan.md
+\beginner-docker-vps-deploy-guide.md
+
+docs
+# môi trường framework kiểm thử tự động bằng NUnit + Selenium.
+E2E.Tests
+
+#
+.cursor/
+
+# Agent capabilities
+.agents/
+
+FE/tsconfig.tsbuildinfo

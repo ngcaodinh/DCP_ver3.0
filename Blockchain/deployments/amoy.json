@@ -1,0 +1,13 @@
+{
+  "network": "amoy",
+  "deployedAt": "2026-04-20T17:08:35.412Z",
+  "deployerAddress": "0x902130CeaF01D52523C38166fBdbAF31BD40f302",
+  "charityTokenAddress": "0xf273733c1b20Ba472A43ad1413a29FD0E95a4c87",
+  "donationRankingAddress": "0xD5fF3fc85d4769dB2E919A247B37118196809141",
+  "multisigDisbursementAddress": "0xEf3f500D98eB1f2A921a820A291328ab12985aC6",
+  "signerRoles": {
+    "adminSigner": "0x902130CeaF01D52523C38166fBdbAF31BD40f302",
+    "orgSigner": "0x902130CeaF01D52523C38166fBdbAF31BD40f302",
+    "regulatorySigner": "0x902130CeaF01D52523C38166fBdbAF31BD40f302"
+  }
+}
