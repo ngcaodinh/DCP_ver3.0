@@ -93,7 +93,7 @@ function applyApiResponseTimeHeader(request: Request, response: Response, next: 
 /** Hàm khai báo các tuyến chính của ứng dụng. Mục đích: tách riêng các module theo chuẩn MVC. */
 function registerRoutes(): void {
   application.use('/auth', createAuthRoutes());
-  application.use('/health', createHealthRoutes());
+  application.use(createHealthRoutes()); // → /health, /ready, /live
   application.use('/api/deposit', createDepositRoutes());
   application.use('/projects', createProjectRoutes());
   application.use('/donations', createDonationRoutes());
