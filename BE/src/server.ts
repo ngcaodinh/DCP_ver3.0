@@ -7,6 +7,7 @@ import { startRankingScheduler } from './workers/rankingScheduler';
 import { startRankingReconcileWorker } from './workers/rankingReconcileWorker';
 import { startDonationReconciliationWorker } from './workers/donationReconciliationWorker';
 import { startDisbursementTransferStatusSweepPolling } from './services/disbursementService';
+import { startPayosTransferWorker } from './workers/payosTransferWorker';
 
 const serverPort = Number(process.env.PORT) || 4000;
 
@@ -29,6 +30,8 @@ function startBackgroundWorkers(): void {
   // Donation reconciliation worker: chạy mỗi 15 phút kiểm tra pending donations
   startDonationReconciliationWorker();
   startDisbursementTransferStatusSweepPolling();
+  // PayOS Transfer Worker: xử lý disbursement transfer với Bull queue
+  startPayosTransferWorker();
 }
 
 /**
