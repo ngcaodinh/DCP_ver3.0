@@ -121,6 +121,14 @@ type LogMetadata = {
   userOpHash?: string;
   sender?: string;
   donationTxHash?: string;
+  requestId?: string;
+  checksumPrefix?: string;
+  bodyKeys?: string | string[];
+  relayTxHash?: string;
+  hasNestedData?: boolean;
+  auditId?: string;
+  sourceIp?: string;
+  organizationId?: string;
 };
 
 /**
