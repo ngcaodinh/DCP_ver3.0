@@ -8,6 +8,10 @@ import {
   ORACLE_MAX_FILE_SIZE
 } from '../services/oracleService';
 import {
+  submitOverrideVote,
+  VoteRejectedError
+} from '../services/overrideVotingService';
+import {
   enqueueOracleVerification,
   type OracleVerificationJobData
 } from '../queues/oracleQueue';
@@ -302,6 +306,114 @@ export async function handleUpsertGeofence(
   } catch (error) {
     logger.error('Upsert geofence thất bại.', { projectId, errorMessage: (error as Error)?.message });
     sendErrorFromUnknown(response, error, 'Không thể cập nhật geofence.');
+  }
+}
+
+/**
+ * POST /api/oracle/override-requests/:overrideRequestId/vote
+ * Commissioner (admin hoặc regulatory) vote APPROVE/REJECT cho một override request.
+ *
+ * Yêu cầu:
+ * - Người dùng phải có trong commissionerSnapshot tại thời điểm request tạo (403 nếu không)
+ * - Chưa vote lần nào cho request này (409 nếu đã vote)
+ * - Request phải ở trạng thái PENDING (422 nếu đã resolve)
+ * - Commissioner set không được thay đổi kể từ khi tạo (409 nếu đã thay đổi → EXPIRED)
+ *
+ * Body: { vote: "APPROVE" | "REJECT", reason: string }
+ */
+export async function handleVoteOverrideRequest(
+  request: AuthenticatedRequest,
+  response: Response
+): Promise<void> {
+  if (!request.authenticatedUser) {
+    sendErrorResponse(response, 401, 'Bạn chưa đăng nhập.', 'UNAUTHENTICATED');
+    return;
+  }
+
+  const { overrideRequestId } = request.params;
+  if (!overrideRequestId?.trim()) {
+    sendErrorResponse(response, 400, 'Thiếu overrideRequestId.', 'VALIDATION_ERROR');
+    return;
+  }
+
+  const { vote, reason } = request.body as { vote?: string; reason?: string };
+
+  if (vote !== 'APPROVE' && vote !== 'REJECT') {
+    sendErrorResponse(response, 400, 'vote phải là APPROVE hoặc REJECT.', 'VALIDATION_ERROR');
+    return;
+  }
+  if (!reason?.trim()) {
+    sendErrorResponse(response, 400, 'Thiếu lý do vote (reason).', 'VALIDATION_ERROR');
+    return;
+  }
+
+  const { userId, role } = request.authenticatedUser;
+
+  // Chỉ commissioner (admin hoặc regulatory) mới được vote
+  if (role !== 'admin' && role !== 'regulatory') {
+    sendErrorResponse(response, 403, 'Bạn không có quyền vote override request.', 'FORBIDDEN');
+    return;
+  }
+
+  try {
+    const outcome = await submitOverrideVote(overrideRequestId, userId, role, vote, reason.trim());
+
+    switch (outcome.outcome) {
+      case 'VOTE_RECORDED':
+        sendSuccessResponse(response, 200, 'Đã ghi nhận vote.', {
+          outcome: 'VOTE_RECORDED',
+          pendingVoters: outcome.pendingVoters,
+          totalVoters: outcome.totalVoters
+        });
+        break;
+
+      case 'RESOLVED_APPROVED':
+        sendSuccessResponse(response, 200, 'Override request đã được toàn bộ ủy viên chấp thuận.', {
+          outcome: 'RESOLVED_APPROVED',
+          disbursementAutoApproved: outcome.disbursementAutoApproved
+        });
+        break;
+
+      case 'RESOLVED_REJECTED':
+        sendSuccessResponse(response, 200, 'Override request đã bị từ chối.', {
+          outcome: 'RESOLVED_REJECTED'
+        });
+        break;
+
+      case 'EXPIRED_COMMISSIONER_SET_CHANGED':
+        // 410 Gone — request đã hết hiệu lực vì danh sách commissioner thay đổi, không phải duplicate
+        sendErrorResponse(
+          response, 410,
+          'Danh sách ủy viên đã thay đổi kể từ khi yêu cầu này được tạo. Yêu cầu đã bị hủy, vui lòng tạo lại.',
+          'COMMISSIONER_SET_CHANGED'
+        );
+        break;
+    }
+  } catch (error) {
+    if (error instanceof VoteRejectedError) {
+      switch (error.rejectionReason) {
+        case 'REQUEST_NOT_FOUND':
+          sendErrorResponse(response, 404, 'Không tìm thấy override request.', 'NOT_FOUND');
+          break;
+        case 'NOT_IN_SNAPSHOT':
+          sendErrorResponse(response, 403, 'Bạn không có trong danh sách ủy viên của yêu cầu này.', 'FORBIDDEN');
+          break;
+        case 'ALREADY_VOTED':
+          sendErrorResponse(response, 409, 'Bạn đã vote cho yêu cầu này rồi.', 'ALREADY_VOTED');
+          break;
+        case 'REQUEST_NOT_PENDING':
+          sendErrorResponse(response, 422, 'Yêu cầu không còn ở trạng thái chờ vote.', 'INVALID_STATE');
+          break;
+      }
+      return;
+    }
+
+    logger.error('Vote override request thất bại.', {
+      overrideRequestId,
+      authenticatedUserId: userId,
+      errorMessage: (error as Error)?.message
+    });
+    sendErrorFromUnknown(response, error, 'Không thể xử lý vote.');
   }
 }
 

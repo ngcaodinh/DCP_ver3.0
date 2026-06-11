@@ -158,6 +158,14 @@ type LogMetadata = {
   attemptsMade?: number;
   isInRadius?: boolean;
   gpsFoundInImage?: boolean;
+  // Oracle B2 — override voting
+  commissionerCount?: number;
+  voteOutcome?: string;
+  pendingVoters?: number;
+  totalVoters?: number;
+  disbursementAutoApproved?: boolean;
+  commissionerSetChanged?: boolean;
+  currentStatus?: string;
   // upload-validation.middleware.ts
   fileName?: string;
   originalName?: string;

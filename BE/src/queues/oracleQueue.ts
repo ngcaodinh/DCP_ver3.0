@@ -20,6 +20,7 @@ export type OracleVerificationJobData = {
   evidenceCid: string;
   imageBufferBase64: string;  // Buffer.toString('base64')
   fileSizeBytes: number;
+  disbursementRequestId?: string | null;  // Link để override request có thể auto-approve disbursement
 };
 
 export type OracleVerificationJobResult = {

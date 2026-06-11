@@ -24,7 +24,7 @@ const ORACLE_WORKER_CONCURRENCY = 3; // Tránh overload CPU khi parse EXIF đồ
 export async function processOracleVerificationJob(
   job: Job<OracleVerificationJobData>
 ): Promise<OracleVerificationJobResult> {
-  const { jobId, projectId, organizationId, evidenceCid, imageBufferBase64, fileSizeBytes } = job.data;
+  const { jobId, projectId, organizationId, evidenceCid, imageBufferBase64, fileSizeBytes, disbursementRequestId } = job.data;
 
   logger.info('Oracle verification job bắt đầu.', {
     queueJobId: job.id,
@@ -44,7 +44,10 @@ export async function processOracleVerificationJob(
 
   const imageBuffer = Buffer.from(imageBufferBase64, 'base64');
 
-  const result = await verifyEvidenceImage(imageBuffer, projectId, organizationId, evidenceCid);
+  const result = await verifyEvidenceImage(
+    imageBuffer, projectId, organizationId, evidenceCid,
+    disbursementRequestId ?? null
+  );
 
   logger.info('Oracle verification job hoàn thành.', {
     queueJobId: job.id,
@@ -110,7 +113,8 @@ export function startOracleWorker(): void {
         organizationId: payload.organizationId,
         evidenceCid: payload.evidenceCid,
         imageBufferBase64: payload.imageBufferBase64,
-        fileSizeBytes: payload.fileSizeBytes
+        fileSizeBytes: payload.fileSizeBytes,
+        disbursementRequestId: payload.disbursementRequestId ?? null
       };
       await enqueueOracleVerification(jobData);
     } catch (error) {

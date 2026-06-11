@@ -12,6 +12,8 @@ import {
 import {
   createOracleOverrideRequest
 } from '../models/oracleOverrideRequestModel';
+import { findUsersByRole } from '../models/authModel';
+import { createUserNotification } from './notificationService';
 import {
   oracleEvents,
   type OracleVerifiedEventPayload,
@@ -109,6 +111,16 @@ export function haversineDistance(a: GpsCoordinate, b: GpsCoordinate): number {
 }
 
 /**
+ * Lấy danh sách commissioner hiện tại (role admin + regulatory, chỉ ACTIVE).
+ * Dùng để tạo commissionerSnapshot khi có override request.
+ * Query sau mỗi request để đảm bảo snapshot phản ánh đúng trạng thái hệ thống tại thời điểm tạo.
+ */
+async function fetchCommissionerSnapshot(): Promise<Array<{ userId: string; role: string }>> {
+  const commissioners = await findUsersByRole(['admin', 'regulatory']);
+  return commissioners.map(u => ({ userId: u.id, role: u.role }));
+}
+
+/**
  * Hàm chính: xác minh ảnh minh chứng cho một dự án.
  *
  * Flow:
@@ -116,22 +128,25 @@ export function haversineDistance(a: GpsCoordinate, b: GpsCoordinate): number {
  * 2. Parse EXIF GPS từ buffer ảnh
  * 3. Tính Haversine distance
  * 4. Ghi kết quả theo thứ tự: verification → override → link (verification-first)
- * 5. Emit oracle.verified + override.requested events
+ * 5. Populate commissionerSnapshot vào override request
+ * 6. Emit oracle.verified + override.requested events
  *
  * Thứ tự ghi verification-first giúp crash recovery:
  * - Crash trước khi tạo override → verification orphaned (không hiện trong admin UI)
  * - Crash trước khi link → detectable qua query verificationId trên override collection
  *
- * @param buffer       - Buffer ảnh JPEG/PNG/WebP (max 10MB đã validate ở controller)
- * @param projectId    - ID dự án cần verify
- * @param organizationId - ID tổ chức upload ảnh (userId từ JWT)
- * @param evidenceCid  - IPFS CID của ảnh
+ * @param buffer                - Buffer ảnh JPEG/PNG/WebP (max 10MB đã validate ở controller)
+ * @param projectId             - ID dự án cần verify
+ * @param organizationId        - ID tổ chức upload ảnh (userId từ JWT)
+ * @param evidenceCid           - IPFS CID của ảnh
+ * @param disbursementRequestId - ID yêu cầu giải ngân liên quan (null nếu upload độc lập)
  */
 export async function verifyEvidenceImage(
   buffer: Buffer,
   projectId: string,
   organizationId: string,
-  evidenceCid: string
+  evidenceCid: string,
+  disbursementRequestId: string | null = null
 ): Promise<OracleVerificationResult> {
   const verificationId = randomUUID();
 
@@ -139,7 +154,7 @@ export async function verifyEvidenceImage(
   const geofence = await findGeofenceByProjectId(projectId);
   if (!geofence) {
     logger.warn('Project chưa có geofence. Tạo override NO_GEOFENCE.', { projectId, verificationId });
-    return await handleNoGeofence(verificationId, projectId, organizationId, evidenceCid, buffer);
+    return await handleNoGeofence(verificationId, projectId, organizationId, evidenceCid, buffer, disbursementRequestId);
   }
 
   // Clamp radius: floor 100m và cap 2000m theo spec, bảo vệ khỏi giá trị DB không hợp lệ
@@ -152,7 +167,7 @@ export async function verifyEvidenceImage(
   if (!gpsFromImage) {
     return await handleNoGps(
       verificationId, projectId, organizationId, evidenceCid,
-      projectCentroid, radiusMeters
+      projectCentroid, radiusMeters, disbursementRequestId
     );
   }
 
@@ -176,7 +191,7 @@ export async function verifyEvidenceImage(
   } else {
     return await handleOutOfGeofence(
       verificationId, projectId, organizationId, evidenceCid,
-      gpsFromImage, projectCentroid, distanceMeters, radiusMeters
+      gpsFromImage, projectCentroid, distanceMeters, radiusMeters, disbursementRequestId
     );
   }
 }
@@ -217,7 +232,7 @@ async function handleValid(
 /**
  * Xử lý GPS ngoài phạm vi geofence.
  *
- * Thứ tự ghi: verification trước → override sau → link.
+ * Thứ tự ghi: verification trước → override sau → link → snapshot.
  * Nếu crash sau bước verification: orphaned verification (overrideRequestId=null, không hiện admin UI).
  * Nếu crash sau bước override: missing link — recoverable bằng query override theo verificationId.
  * TODO: cron job kiểm tra oracle_verification_results.overrideRequestId=null & status≠VALID để phát hiện partial writes.
@@ -230,7 +245,8 @@ async function handleOutOfGeofence(
   gpsFromImage: GpsCoordinate,
   gpsFromProject: GpsCoordinate,
   distanceMeters: number,
-  radiusMeters: number
+  radiusMeters: number,
+  disbursementRequestId: string | null
 ): Promise<OracleVerificationResult> {
   // Bước 1: tạo verification (overrideRequestId=null sẽ được link ở bước 3)
   await createOracleVerificationResult({
@@ -247,7 +263,10 @@ async function handleOutOfGeofence(
     processedAt: new Date()
   });
 
-  // Bước 2: tạo override request
+  // Bước 2: fetch commissioner snapshot TRƯỚC khi tạo override để tránh race window (snapshot rỗng)
+  const commissionerSnapshot = await fetchCommissionerSnapshot();
+
+  // Bước 3: tạo override request với snapshot đã populate
   const overrideRequestId = randomUUID();
   await createOracleOverrideRequest({
     overrideRequestId,
@@ -255,15 +274,19 @@ async function handleOutOfGeofence(
     projectId,
     organizationId,
     evidenceCid,
+    disbursementRequestId,
     reason: 'OUT_OF_GEOFENCE',
     gpsFromImage,
     gpsFromProject,
     distanceMeters,
-    commissionerSnapshot: []
+    commissionerSnapshot
   });
 
-  // Bước 3: link override vào verification
+  // Bước 4: link override vào verification
   await linkOverrideRequestToVerification(verificationId, overrideRequestId);
+
+  // Bước 5: notify từng commissioner trong snapshot để họ vào vote
+  await notifyCommissionersOverrideCreated(commissionerSnapshot, overrideRequestId, projectId, 'OUT_OF_GEOFENCE');
 
   logger.warn('Oracle: GPS ngoài phạm vi. Override request đã tạo.', {
     verificationId, projectId,
@@ -275,7 +298,7 @@ async function handleOutOfGeofence(
     verificationId, projectId, organizationId, evidenceCid,
     false, distanceMeters, 'Out of geofence',
     overrideRequestId, gpsFromImage, gpsFromProject, distanceMeters,
-    'OUT_OF_GEOFENCE'
+    'OUT_OF_GEOFENCE', commissionerSnapshot.length
   );
 
   return { isValid: false, distance: distanceMeters, reason: 'Out of geofence', verificationId, overrideRequestId };
@@ -291,7 +314,8 @@ async function handleNoGps(
   organizationId: string,
   evidenceCid: string,
   gpsFromProject: GpsCoordinate,
-  radiusMeters: number
+  radiusMeters: number,
+  disbursementRequestId: string | null
 ): Promise<OracleVerificationResult> {
   await createOracleVerificationResult({
     verificationId,
@@ -307,6 +331,8 @@ async function handleNoGps(
     processedAt: new Date()
   });
 
+  const commissionerSnapshot = await fetchCommissionerSnapshot();
+
   const overrideRequestId = randomUUID();
   await createOracleOverrideRequest({
     overrideRequestId,
@@ -314,14 +340,17 @@ async function handleNoGps(
     projectId,
     organizationId,
     evidenceCid,
+    disbursementRequestId,
     reason: 'GPS_EXIF_MISSING',
     gpsFromImage: null,
     gpsFromProject,
     distanceMeters: null,
-    commissionerSnapshot: []
+    commissionerSnapshot
   });
 
   await linkOverrideRequestToVerification(verificationId, overrideRequestId);
+
+  await notifyCommissionersOverrideCreated(commissionerSnapshot, overrideRequestId, projectId, 'GPS_EXIF_MISSING');
 
   logger.warn('Oracle: Ảnh không có EXIF GPS. Override NO_GPS đã tạo.', {
     verificationId, projectId, overrideRequestId
@@ -331,7 +360,7 @@ async function handleNoGps(
     verificationId, projectId, organizationId, evidenceCid,
     null, null, 'GPS_EXIF_MISSING',
     overrideRequestId, null, gpsFromProject, null,
-    'GPS_EXIF_MISSING'
+    'GPS_EXIF_MISSING', commissionerSnapshot.length
   );
 
   return { isValid: null, distance: null, reason: 'GPS_EXIF_MISSING', verificationId, overrideRequestId };
@@ -347,7 +376,8 @@ async function handleNoGeofence(
   projectId: string,
   organizationId: string,
   evidenceCid: string,
-  buffer: Buffer
+  buffer: Buffer,
+  disbursementRequestId: string | null
 ): Promise<OracleVerificationResult> {
   // Parse EXIF ngay cả khi không có geofence — ghi nhận GPS thực tế để admin có thể review
   const gpsFromImage = extractExifGps(buffer);
@@ -368,6 +398,8 @@ async function handleNoGeofence(
     processedAt: new Date()
   });
 
+  const commissionerSnapshot = await fetchCommissionerSnapshot();
+
   const overrideRequestId = randomUUID();
   await createOracleOverrideRequest({
     overrideRequestId,
@@ -375,14 +407,17 @@ async function handleNoGeofence(
     projectId,
     organizationId,
     evidenceCid,
+    disbursementRequestId,
     reason: 'NO_GEOFENCE',
     gpsFromImage,
     gpsFromProject: placeholderCentroid,
     distanceMeters: null,
-    commissionerSnapshot: []
+    commissionerSnapshot
   });
 
   await linkOverrideRequestToVerification(verificationId, overrideRequestId);
+
+  await notifyCommissionersOverrideCreated(commissionerSnapshot, overrideRequestId, projectId, 'NO_GEOFENCE');
 
   logger.warn('Oracle: Project chưa có geofence. Override NO_GEOFENCE đã tạo.', {
     verificationId, projectId, overrideRequestId,
@@ -393,10 +428,44 @@ async function handleNoGeofence(
     verificationId, projectId, organizationId, evidenceCid,
     null, null, 'NO_GEOFENCE',
     overrideRequestId, gpsFromImage, placeholderCentroid, null,
-    'NO_GEOFENCE'
+    'NO_GEOFENCE', commissionerSnapshot.length
   );
 
   return { isValid: null, distance: null, reason: 'NO_GEOFENCE', verificationId, overrideRequestId };
+}
+
+/**
+ * Gửi notification đến từng commissioner trong snapshot khi override request mới được tạo.
+ * Thất bại gửi notification không block quá trình tạo override — log và tiếp tục.
+ */
+async function notifyCommissionersOverrideCreated(
+  commissionerSnapshot: Array<{ userId: string; role: string }>,
+  overrideRequestId: string,
+  projectId: string,
+  reason: string
+): Promise<void> {
+  const reasonLabel: Record<string, string> = {
+    OUT_OF_GEOFENCE: 'GPS ngoài phạm vi địa lý',
+    GPS_EXIF_MISSING: 'Ảnh thiếu dữ liệu GPS',
+    NO_GEOFENCE: 'Dự án chưa cài đặt vùng địa lý'
+  };
+
+  const notifyPromises = commissionerSnapshot.map(({ userId }) =>
+    createUserNotification({
+      userId,
+      notificationType: 'SYSTEM',
+      title: 'Yêu cầu ghi đè GPS cần biểu quyết',
+      content: `Dự án ${projectId} có yêu cầu ghi đè GPS mới cần biểu quyết: ${reasonLabel[reason] ?? reason}. Vui lòng vào hệ thống để xem xét.`,
+      metadata: { overrideRequestId, projectId, reason },
+      deduplicationKey: `override-created-${overrideRequestId}-${userId}`
+    }).catch((err: Error) => {
+      logger.error('Gửi notification tạo override thất bại cho commissioner.', {
+        overrideRequestId, authenticatedUserId: userId, errorMessage: err.message
+      });
+    })
+  );
+
+  await Promise.allSettled(notifyPromises);
 }
 
 /** Emit cả oracle.verified và override.requested trong một lần gọi. */
@@ -412,7 +481,8 @@ function emitVerifiedAndOverride(
   gpsFromImage: GpsCoordinate | null,
   gpsFromProject: GpsCoordinate,
   distanceMeters: number | null,
-  overrideReason: 'OUT_OF_GEOFENCE' | 'GPS_EXIF_MISSING' | 'NO_GEOFENCE'
+  overrideReason: 'OUT_OF_GEOFENCE' | 'GPS_EXIF_MISSING' | 'NO_GEOFENCE',
+  commissionerCount: number
 ): void {
   oracleEvents.emit('oracle.verified', {
     verificationId, projectId, organizationId, evidenceCid,
@@ -421,6 +491,7 @@ function emitVerifiedAndOverride(
 
   oracleEvents.emit('override.requested', {
     overrideRequestId, projectId, organizationId, evidenceCid,
-    gpsFromImage, gpsFromProject, distance: distanceMeters, reason: overrideReason
+    gpsFromImage, gpsFromProject, distance: distanceMeters,
+    reason: overrideReason, commissionerCount
   } satisfies OverrideRequestedEventPayload);
 }

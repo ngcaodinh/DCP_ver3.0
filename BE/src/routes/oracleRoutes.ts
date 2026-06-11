@@ -8,7 +8,8 @@ import {
   handleVerifyImageBatch,
   handleGetGeofence,
   handleUpsertGeofence,
-  handleGetPendingOverrides
+  handleGetPendingOverrides,
+  handleVoteOverrideRequest
 } from '../controllers/oracleController';
 
 /**
@@ -36,6 +37,8 @@ export function createOracleRoutes(): Router {
   const geofenceReadRateLimit = createRateLimitMiddleware(120, 60 * 1000, { bucketName: 'oracle:geofence-read' });
   const geofenceWriteRateLimit = createRateLimitMiddleware(20, 60 * 1000, { bucketName: 'oracle:geofence-write' });
   const overrideReadRateLimit = createRateLimitMiddleware(60, 60 * 1000, { bucketName: 'oracle:override-read' });
+  // Vote rate limit thấp: mỗi commissioner chỉ vote 1 lần/request, rate limit để chống spam
+  const voteRateLimit = createRateLimitMiddleware(20, 60 * 1000, { bucketName: 'oracle:override-vote' });
 
   // Xác minh ảnh minh chứng — tổ chức upload
   router.post(
@@ -82,6 +85,15 @@ export function createOracleRoutes(): Router {
     adminMiddleware,
     overrideReadRateLimit,
     handleGetPendingOverrides
+  );
+
+  // Vote override request — chỉ admin + regulatory trong commissionerSnapshot (B2)
+  router.post(
+    '/override-requests/:overrideRequestId/vote',
+    authMiddleware,
+    adminMiddleware,
+    voteRateLimit,
+    handleVoteOverrideRequest
   );
 
   return router;

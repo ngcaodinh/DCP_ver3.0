@@ -20,7 +20,12 @@ vi.mock('../../models/oracleVerificationResultModel', () => ({
 
 vi.mock('../../models/oracleOverrideRequestModel', () => ({
   createOracleOverrideRequest: vi.fn().mockResolvedValue({ overrideRequestId: 'mock-override-id' }),
-  deleteOracleOverrideRequestById: vi.fn().mockResolvedValue(undefined)
+  deleteOracleOverrideRequestById: vi.fn().mockResolvedValue(undefined),
+  setCommissionerSnapshot: vi.fn().mockResolvedValue(undefined)
+}));
+
+vi.mock('../../models/authModel', () => ({
+  findUsersByRole: vi.fn().mockResolvedValue([])
 }));
 
 vi.mock('../../events/oracleEvents', () => ({

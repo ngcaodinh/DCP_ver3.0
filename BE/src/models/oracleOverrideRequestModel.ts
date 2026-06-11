@@ -3,11 +3,12 @@ import type { GpsCoordinate } from './projectGeofenceModel';
 
 /**
  * Trạng thái yêu cầu ghi đè GPS.
- * PENDING: chờ 3/3 commissioner vote
- * APPROVED: đủ 3/3 vote APPROVE → cho phép giải ngân
+ * PENDING: chờ tất cả commissioner trong snapshot vote
+ * APPROVED: đủ N/N vote APPROVE → cho phép giải ngân
  * REJECTED: ít nhất 1 vote REJECT → từ chối giải ngân
+ * EXPIRED: commissioner set thay đổi sau khi tạo request → phải tạo lại
  */
-export type OverrideRequestStatus = 'PENDING' | 'APPROVED' | 'REJECTED';
+export type OverrideRequestStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'EXPIRED';
 
 /**
  * Lý do tạo override request.
@@ -28,7 +29,7 @@ export type CommissionerVote = {
 
 /**
  * Yêu cầu ghi đè GPS — tạo khi Oracle phát hiện ảnh ngoài geofence hoặc thiếu EXIF GPS.
- * B2 sẽ implement voting logic (3/3 multisig).
+ * Voting: tất cả commissioner trong snapshot phải vote, cần 100% APPROVE để pass.
  */
 export type OracleOverrideRequestRecord = {
   overrideRequestId: string;            // UUID
@@ -36,15 +37,21 @@ export type OracleOverrideRequestRecord = {
   projectId: string;
   organizationId: string;
   evidenceCid: string;
+  /**
+   * Link disbursement request tương ứng để auto-approve khi tất cả vote APPROVE.
+   * null nếu verification được trigger từ batch endpoint (không liên quan disbursement).
+   */
+  disbursementRequestId: string | null;
   reason: OverrideReason;
   gpsFromImage: GpsCoordinate | null;   // null khi reason=GPS_EXIF_MISSING
   gpsFromProject: GpsCoordinate;
   distanceMeters: number | null;        // null khi reason=GPS_EXIF_MISSING
-  // Snapshot commissioners tại thời điểm tạo request (B2 populate)
+  // Snapshot commissioners tại thời điểm tạo request — dùng để check 403 và detect thay đổi
   commissionerSnapshot: Array<{ userId: string; role: string }>;
   votes: CommissionerVote[];
   status: OverrideRequestStatus;
   resolvedAt: Date | null;
+  expiredAt: Date | null;               // Set khi EXPIRED do commissioner set thay đổi hoặc timeout
   createdAt: Date;
   updatedAt: Date;
 };
@@ -72,6 +79,7 @@ const oracleOverrideRequestSchema = new Schema<OracleOverrideRequestRecord>(
     projectId: { type: String, required: true, index: true },
     organizationId: { type: String, required: true, index: true },
     evidenceCid: { type: String, required: true },
+    disbursementRequestId: { type: String, default: null, index: true, sparse: true },
     reason: { type: String, required: true, enum: ['OUT_OF_GEOFENCE', 'GPS_EXIF_MISSING', 'NO_GEOFENCE'] },
     gpsFromImage: { type: gpsCoordinateSchema, default: null },
     gpsFromProject: { type: gpsCoordinateSchema, required: true },
@@ -84,11 +92,12 @@ const oracleOverrideRequestSchema = new Schema<OracleOverrideRequestRecord>(
     status: {
       type: String,
       required: true,
-      enum: ['PENDING', 'APPROVED', 'REJECTED'],
+      enum: ['PENDING', 'APPROVED', 'REJECTED', 'EXPIRED'],
       default: 'PENDING',
       index: true
     },
-    resolvedAt: { type: Date, default: null }
+    resolvedAt: { type: Date, default: null },
+    expiredAt: { type: Date, default: null }
   },
   { timestamps: true }
 );
@@ -102,9 +111,9 @@ const OracleOverrideRequestMongoModel = mongoose.model<OracleOverrideRequestReco
   'oracle_override_requests'
 );
 
-/** Tạo override request mới (PENDING). */
+/** Tạo override request mới (PENDING). expiredAt, resolvedAt, votes, status được set mặc định. */
 export async function createOracleOverrideRequest(
-  data: Omit<OracleOverrideRequestRecord, 'createdAt' | 'updatedAt' | 'votes' | 'status' | 'resolvedAt'>
+  data: Omit<OracleOverrideRequestRecord, 'createdAt' | 'updatedAt' | 'votes' | 'status' | 'resolvedAt' | 'expiredAt'>
 ): Promise<OracleOverrideRequestRecord> {
   const doc = await OracleOverrideRequestMongoModel.create({
     ...data,
@@ -146,4 +155,68 @@ export async function countPendingOverrideRequests(): Promise<number> {
  */
 export async function deleteOracleOverrideRequestById(overrideRequestId: string): Promise<void> {
   await OracleOverrideRequestMongoModel.deleteOne({ overrideRequestId }).exec();
+}
+
+/**
+ * Thêm vote của một commissioner vào danh sách votes.
+ * Dùng $push atomic để tránh race condition khi nhiều commissioner vote cùng lúc.
+ * Trả về record sau khi cập nhật, null nếu không tìm thấy.
+ */
+export async function addVoteToOverrideRequest(
+  overrideRequestId: string,
+  vote: CommissionerVote
+): Promise<OracleOverrideRequestRecord | null> {
+  const updated = await OracleOverrideRequestMongoModel.findOneAndUpdate(
+    { overrideRequestId, status: 'PENDING' },
+    { $push: { votes: vote } },
+    { returnDocument: 'after' }
+  ).lean<OracleOverrideRequestRecord>().exec();
+  return updated ?? null;
+}
+
+/**
+ * Cập nhật trạng thái override request sang APPROVED hoặc REJECTED khi đủ điều kiện.
+ * Chỉ cập nhật khi status hiện tại vẫn là PENDING (tránh double-resolve).
+ */
+export async function resolveOverrideRequest(
+  overrideRequestId: string,
+  newStatus: 'APPROVED' | 'REJECTED',
+  resolvedAt: Date
+): Promise<OracleOverrideRequestRecord | null> {
+  const updated = await OracleOverrideRequestMongoModel.findOneAndUpdate(
+    { overrideRequestId, status: 'PENDING' },
+    { $set: { status: newStatus, resolvedAt } },
+    { returnDocument: 'after' }
+  ).lean<OracleOverrideRequestRecord>().exec();
+  return updated ?? null;
+}
+
+/**
+ * Expire override request khi phát hiện commissioner set thay đổi.
+ * Chỉ expire nếu status còn PENDING.
+ */
+export async function expireOverrideRequest(
+  overrideRequestId: string,
+  expiredAt: Date
+): Promise<OracleOverrideRequestRecord | null> {
+  const updated = await OracleOverrideRequestMongoModel.findOneAndUpdate(
+    { overrideRequestId, status: 'PENDING' },
+    { $set: { status: 'EXPIRED', expiredAt } },
+    { returnDocument: 'after' }
+  ).lean<OracleOverrideRequestRecord>().exec();
+  return updated ?? null;
+}
+
+/**
+ * Cập nhật commissionerSnapshot sau khi tạo request.
+ * Dùng trong oracleService sau khi query users với role admin/regulatory.
+ */
+export async function setCommissionerSnapshot(
+  overrideRequestId: string,
+  commissionerSnapshot: Array<{ userId: string; role: string }>
+): Promise<void> {
+  await OracleOverrideRequestMongoModel.updateOne(
+    { overrideRequestId },
+    { $set: { commissionerSnapshot } }
+  ).exec();
 }

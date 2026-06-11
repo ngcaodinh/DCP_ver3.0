@@ -11,7 +11,8 @@ oracleEvents.setMaxListeners(100);
 export type OracleEventType =
   | 'evidence.uploaded'
   | 'oracle.verified'
-  | 'override.requested';
+  | 'override.requested'
+  | 'override.executed';
 
 /**
  * Payload cho evidence.uploaded — phát ra khi tổ chức upload ảnh minh chứng.
@@ -25,6 +26,8 @@ export type EvidenceUploadedEventPayload = {
   evidenceCid: string;
   imageBufferBase64: string;
   fileSizeBytes: number;
+  /** Link disbursement request để override request có thể auto-approve khi N/N vote APPROVE. null nếu upload độc lập. */
+  disbursementRequestId?: string | null;
 };
 
 /**
@@ -41,7 +44,7 @@ export type OracleVerifiedEventPayload = {
 };
 
 /**
- * Payload cho override.requested — yêu cầu ghi đè GPS cần 3/3 commissioner vote.
+ * Payload cho override.requested — yêu cầu ghi đè GPS cần N/N commissioner vote.
  */
 export type OverrideRequestedEventPayload = {
   overrideRequestId: string;
@@ -52,4 +55,19 @@ export type OverrideRequestedEventPayload = {
   gpsFromProject: { lat: number; lng: number };
   distance: number | null;
   reason: 'OUT_OF_GEOFENCE' | 'GPS_EXIF_MISSING' | 'NO_GEOFENCE';
+  commissionerCount: number;  // Số lượng commissioner trong snapshot — để FE hiển thị "chờ X người vote"
+};
+
+/**
+ * Payload cho override.executed — phát ra khi tất cả commissioner trong snapshot vote APPROVE.
+ * TODO: Cần oracle smart contract để emit OverrideExecuted event on-chain (nằm ngoài scope B2).
+ */
+export type OverrideExecutedEventPayload = {
+  overrideRequestId: string;
+  projectId: string;
+  organizationId: string;
+  evidenceCid: string;
+  disbursementRequestId: string | null;  // null nếu không link disbursement
+  totalVoters: number;
+  executedAt: Date;
 };
