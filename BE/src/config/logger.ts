@@ -122,6 +122,13 @@ type LogMetadata = {
   sender?: string;
   donationTxHash?: string;
   requestId?: string;
+  checksumPrefix?: string;
+  bodyKeys?: string | string[];
+  relayTxHash?: string;
+  hasNestedData?: boolean;
+  auditId?: string;
+  sourceIp?: string;
+  organizationId?: string;
   disbursementRequestId?: string;
   payosTransferId?: string;
   transferId?: string;
@@ -137,10 +144,6 @@ type LogMetadata = {
   idempotencyKey?: string;
   finalTransferId?: string;
   bankCode?: string;
-  checksumPrefix?: string;
-  bodyKeys?: string[];
-  relayTxHash?: string;
-  hasNestedData?: boolean;
 };
 
 

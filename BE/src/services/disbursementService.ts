@@ -112,6 +112,7 @@ export type DisbursementResult = {
   requestId: string;
   onChainRequestId: number;
   projectId: string;
+  organizationId: string;
   beneficiaryWalletAddress: string;
   beneficiaryBankAccount: {
     bankName: string;
@@ -547,6 +548,7 @@ function mapDisbursementRecordToResult(record: DisbursementRecord): Disbursement
     requestId: record.requestId,
     onChainRequestId: record.onChainRequestId,
     projectId: record.projectId,
+    organizationId: record.organizationId,
     beneficiaryWalletAddress: record.beneficiaryWalletAddress,
     beneficiaryBankAccount: record.beneficiaryBankAccount,
     requestMode: record.requestMode,

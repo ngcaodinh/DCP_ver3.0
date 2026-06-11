@@ -8,6 +8,7 @@ import { startRankingReconcileWorker } from './workers/rankingReconcileWorker';
 import { startDonationReconciliationWorker } from './workers/donationReconciliationWorker';
 import { startDisbursementTransferStatusSweepPolling } from './services/disbursementService';
 import { startPayosTransferWorker } from './workers/payosTransferWorker';
+import { initializeNotificationBridge } from './services/notificationBridge.service';
 
 const serverPort = Number(process.env.PORT) || 4000;
 
@@ -45,6 +46,9 @@ async function startServer(): Promise<void> {
   if (shouldRunWorkers()) {
     startBackgroundWorkers();
   }
+
+  // Khoi dong notification bridge de lang nghe webhook events
+  initializeNotificationBridge();
 
   application.listen(serverPort, () => {
     console.log(`Server running on port ${serverPort}`);

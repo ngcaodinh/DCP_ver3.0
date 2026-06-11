@@ -13,6 +13,7 @@ import { createDisbursementRoutes } from './routes/disbursementRoutes';
 import { createAdminDashboardRoutes } from './routes/adminDashboardRoutes';
 import { createNotificationRoutes } from './routes/notificationRoutes';
 import { createGuestRoutes } from './routes/guestRoutes';
+import { createPayosWebhookRoutes } from './routes/webhooks/payos.webhook';
 import { validateGuestJwtConfig } from './config/guestJsonWebToken';
 import { applySeoAndCacheHeaders } from './middleware/seoCacheMiddleware';
 import { API_GUEST_PREFIX } from './config/apiPrefixes';
@@ -102,6 +103,7 @@ function registerRoutes(): void {
   application.use('/api/disbursement', createDisbursementRoutes());
   application.use('/api/admin/dashboard', createAdminDashboardRoutes());
   application.use('/api/notifications', createNotificationRoutes());
+  application.use('/api/webhooks/payos', createPayosWebhookRoutes());
   application.use(API_GUEST_PREFIX, createGuestRoutes());
 }
 
