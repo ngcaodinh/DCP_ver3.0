@@ -4,6 +4,7 @@ import { ApplicationError } from '../utils/applicationError';
 import {
   findDisbursementByRequestId,
   updateDisbursementByRequestId,
+  updateDisbursementByRequestIdWithCondition,
   findDisbursementsInManualReview,
   DisbursementRecord
 } from '../models/disbursementModel';
@@ -95,41 +96,49 @@ export async function getManualReviewDetail(requestId: string): Promise<Transfer
  * Reset attemptCount về 0 để worker bắt đầu lại từ đầu với idempotency key mới.
  */
 export async function manualApprove(requestId: string, adminUserId: string): Promise<void> {
-  const disbursement = await findDisbursementByRequestId(requestId);
-  if (!disbursement) {
+  // Đọc trước để lấy giá trị cũ phục vụ rollback + audit log
+  const previousDisbursement = await findDisbursementByRequestId(requestId);
+  if (!previousDisbursement) {
     throw new ApplicationError(`Disbursement ${requestId} không tìm thấy.`, 404, 'NOT_FOUND');
   }
-  if (disbursement.payosTransferStatus !== 'MANUAL_REVIEW') {
+
+  await removePendingJobsByRequestId(requestId);
+
+  const newIdempotencyKey = `manual-approve-${requestId}-${Date.now()}`;
+
+  // Atomic check-and-update: chỉ thành công nếu vẫn còn MANUAL_REVIEW.
+  // Ngăn 2 admin approve cùng lúc gây double-transfer.
+  const updated = await updateDisbursementByRequestIdWithCondition(
+    requestId,
+    { payosTransferStatus: 'MANUAL_REVIEW' },
+    {
+      payosTransferStatus: 'PROCESSING',
+      payosTransferAttemptCount: 0,
+      payosTransferLastError: null,
+      transferIdempotencyKey: newIdempotencyKey
+    }
+  );
+  if (!updated) {
     throw new ApplicationError(
-      `Disbursement ${requestId} không ở trạng thái MANUAL_REVIEW (hiện tại: ${disbursement.payosTransferStatus ?? 'null'}).`,
-      400,
+      `Disbursement ${requestId} đã được xử lý bởi admin khác hoặc không còn ở trạng thái MANUAL_REVIEW.`,
+      409,
       'INVALID_STATUS_TRANSITION'
     );
   }
 
-  // Dọn dẹp job cũ nếu còn
-  await removePendingJobsByRequestId(requestId);
-
-  // Idempotency key mới để tránh duplicate với lần transfer trước
-  const newIdempotencyKey = `manual-approve-${requestId}-${Date.now()}`;
-
-  // Reset trạng thái transfer để worker xử lý lại từ đầu
-  await updateDisbursementByRequestId(requestId, {
-    payosTransferStatus: 'PROCESSING',
-    payosTransferAttemptCount: 0,
-    payosTransferLastError: null,
-    transferIdempotencyKey: newIdempotencyKey
-  });
-
   const { enqueued } = await enqueueDisbursementTransfer(requestId, 1, newIdempotencyKey);
   if (!enqueued) {
-    // Rollback trạng thái nếu không enqueue được
-    await updateDisbursementByRequestId(requestId, {
-      payosTransferStatus: 'MANUAL_REVIEW',
-      payosTransferAttemptCount: disbursement.payosTransferAttemptCount,
-      payosTransferLastError: disbursement.payosTransferLastError,
-      transferIdempotencyKey: disbursement.transferIdempotencyKey
-    });
+    // Rollback chỉ khi chính mình vừa set — tránh ghi đè nếu có thay đổi khác
+    await updateDisbursementByRequestIdWithCondition(
+      requestId,
+      { payosTransferStatus: 'PROCESSING', transferIdempotencyKey: newIdempotencyKey },
+      {
+        payosTransferStatus: 'MANUAL_REVIEW',
+        payosTransferAttemptCount: previousDisbursement.payosTransferAttemptCount,
+        payosTransferLastError: previousDisbursement.payosTransferLastError,
+        transferIdempotencyKey: previousDisbursement.transferIdempotencyKey
+      }
+    );
     throw new ApplicationError(
       'Không thể đẩy job vào queue. Redis có thể không khả dụng.',
       503,
@@ -146,8 +155,8 @@ export async function manualApprove(requestId: string, adminUserId: string): Pro
     reason: null,
     metadata: {
       newIdempotencyKey,
-      previousAttemptCount: disbursement.payosTransferAttemptCount,
-      previousError: disbursement.payosTransferLastError
+      previousAttemptCount: previousDisbursement.payosTransferAttemptCount,
+      previousError: previousDisbursement.payosTransferLastError
     }
   });
 
@@ -189,12 +198,28 @@ export async function manualReject(
 
   await removePendingJobsByRequestId(requestId);
 
-  // Spec output: status = REJECTED, payosTransferStatus = FAILED
-  await updateDisbursementByRequestId(requestId, {
-    status: 'REJECTED',
-    payosTransferStatus: 'FAILED',
-    payosTransferLastError: `Admin reject: ${reason}`
-  });
+  // Atomic check-and-update: chỉ thành công nếu vẫn còn MANUAL_REVIEW.
+  // Ngăn 2 admin reject cùng lúc gây duplicate audit log và duplicate notification.
+  const updated = await updateDisbursementByRequestIdWithCondition(
+    requestId,
+    { payosTransferStatus: 'MANUAL_REVIEW' },
+    {
+      status: 'REJECTED',
+      payosTransferStatus: 'FAILED',
+      payosTransferLastError: `Admin reject: ${reason}`
+    }
+  );
+  if (!updated) {
+    const existing = await findDisbursementByRequestId(requestId);
+    if (!existing) {
+      throw new ApplicationError(`Disbursement ${requestId} không tìm thấy.`, 404, 'NOT_FOUND');
+    }
+    throw new ApplicationError(
+      `Disbursement ${requestId} đã được xử lý bởi admin khác hoặc không còn ở trạng thái MANUAL_REVIEW.`,
+      409,
+      'INVALID_STATUS_TRANSITION'
+    );
+  }
 
   await createAdminAuditLog({
     auditId: randomUUID(),
@@ -203,8 +228,8 @@ export async function manualReject(
     targetRequestId: requestId,
     reason,
     metadata: {
-      previousAttemptCount: disbursement.payosTransferAttemptCount,
-      previousError: disbursement.payosTransferLastError
+      previousAttemptCount: updated.payosTransferAttemptCount,
+      previousError: updated.payosTransferLastError
     }
   });
 
@@ -218,7 +243,7 @@ export async function manualReject(
 
   // Notify tổ chức (NGO) — họ cần biết disbursement bị từ chối để xử lý tiếp
   // Donor cá nhân không liên kết trực tiếp với disbursement (linked qua project), chỉ notify org
-  const { organizationId } = disbursement;
+  const { organizationId } = updated;
   await createUserNotification({
     userId: organizationId,
     notificationType: 'SYSTEM',

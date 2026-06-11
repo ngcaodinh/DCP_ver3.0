@@ -18,8 +18,12 @@ export function createManualReviewRoutes(): Router {
   const router = Router();
   const authMiddleware = createAuthenticationMiddleware();
   const adminRoleMiddleware = createRoleAuthorizationMiddleware(['admin']);
-  const rateLimit = createRateLimitMiddleware(60, 60 * 1000, {
-    bucketName: 'admin-manual-review'
+  // Tách 2 bucket: read (refresh liên tục không ảnh hưởng) và action (approve/reject)
+  const rateLimitRead = createRateLimitMiddleware(120, 60 * 1000, {
+    bucketName: 'admin-manual-review-read'
+  });
+  const rateLimitAction = createRateLimitMiddleware(20, 60 * 1000, {
+    bucketName: 'admin-manual-review-action'
   });
 
   // GET  /api/disbursements/pending-review — danh sách chờ xử lý tay
@@ -27,7 +31,7 @@ export function createManualReviewRoutes(): Router {
     '/pending-review',
     authMiddleware,
     adminRoleMiddleware,
-    rateLimit,
+    rateLimitRead,
     handleGetPendingManualReview
   );
 
@@ -37,7 +41,7 @@ export function createManualReviewRoutes(): Router {
     '/:id/detail',
     authMiddleware,
     adminRoleMiddleware,
-    rateLimit,
+    rateLimitRead,
     handleGetManualReviewDetail
   );
 
@@ -46,7 +50,7 @@ export function createManualReviewRoutes(): Router {
     '/:id/manual-approve',
     authMiddleware,
     adminRoleMiddleware,
-    rateLimit,
+    rateLimitAction,
     handleManualApprove
   );
 
@@ -55,7 +59,7 @@ export function createManualReviewRoutes(): Router {
     '/:id/manual-reject',
     authMiddleware,
     adminRoleMiddleware,
-    rateLimit,
+    rateLimitAction,
     handleManualReject
   );
 

@@ -97,8 +97,19 @@ export function shutdownSocketServer(): void {
 /**
  * Polling bridge phát hiện disbursement mới vào MANUAL_REVIEW qua worker path.
  * Worker set MANUAL_REVIEW không emit event → polling là cách duy nhất không sửa code worker.
+ * Seed knownManualReviewIds lần đầu để tránh flood notification khi server restart.
  */
 function startManualReviewPollingBridge(): void {
+  // Seed ngay lập tức để các item đã tồn tại trước khi khởi động không bị emit lại
+  void (async () => {
+    try {
+      const existing = await findDisbursementsInManualReview();
+      knownManualReviewIds = new Set(existing.map(d => d.requestId));
+    } catch {
+      // Không block startup nếu DB chưa sẵn sàng — lần poll tiếp theo sẽ seed lại
+    }
+  })();
+
   pollingIntervalId = setInterval(() => {
     void (async () => {
       try {

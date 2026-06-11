@@ -80,8 +80,10 @@ async function checkAndEscalate(): Promise<void> {
       // deduplicationKey chứa tier để escalate riêng từng mức nếu item leo thang qua 2 tier
       const deduplicationKey = `ESCALATION_${tierLabel}:${item.requestId}`;
 
+      // Ưu tiên env var để dễ cấu hình theo môi trường; fallback 'admin' chỉ cho local dev
+      const superAdminUserId = process.env.SUPER_ADMIN_USER_ID ?? 'admin';
       await createUserNotification({
-        userId: 'admin', // Super-admin user ID — trong hệ thống hiện tại admin dùng userId='admin'
+        userId: superAdminUserId,
         notificationType: 'SYSTEM',
         title: isEmergency
           ? `🚨 KHẨN CẤP: Disbursement ${item.requestId.slice(0, 8)}... chờ xử lý hơn ${hoursOverdue}h`

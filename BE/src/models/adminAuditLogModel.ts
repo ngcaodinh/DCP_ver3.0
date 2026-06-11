@@ -32,9 +32,8 @@ const adminAuditLogSchema = new Schema<AdminAuditLogRecord>({
   },
   targetRequestId: { type: String, required: true, index: true },
   reason: { type: String, default: null },
-  metadata: { type: Schema.Types.Mixed, default: {} },
-  createdAt: { type: Date, required: true }
-});
+  metadata: { type: Schema.Types.Mixed, default: {} }
+}, { timestamps: { createdAt: true, updatedAt: false } });
 
 adminAuditLogSchema.index({ targetRequestId: 1, createdAt: -1 });
 
@@ -48,7 +47,7 @@ const AdminAuditLogMongoModel = mongoose.model<AdminAuditLogRecord>(
 export async function createAdminAuditLog(
   data: Omit<AdminAuditLogRecord, 'createdAt'>
 ): Promise<AdminAuditLogRecord> {
-  return AdminAuditLogMongoModel.create({ ...data, createdAt: new Date() });
+  return AdminAuditLogMongoModel.create(data);
 }
 
 /** Lấy tất cả audit log cho một disbursement requestId theo thứ tự mới nhất trước. */

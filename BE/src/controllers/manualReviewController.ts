@@ -26,6 +26,10 @@ export async function handleGetPendingManualReview(req: Request, res: Response):
  */
 export async function handleGetManualReviewDetail(req: Request, res: Response): Promise<void> {
   const { id } = req.params;
+  if (!id || !id.trim()) {
+    res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Thiếu request ID.' } });
+    return;
+  }
   try {
     const detail = await getManualReviewDetail(id);
     sendSuccessResponse(res, 200, 'Lấy chi tiết manual review thành công.', detail);
@@ -41,6 +45,10 @@ export async function handleGetManualReviewDetail(req: Request, res: Response): 
  */
 export async function handleManualApprove(req: Request, res: Response): Promise<void> {
   const { id } = req.params;
+  if (!id || !id.trim()) {
+    res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Thiếu request ID.' } });
+    return;
+  }
   const adminUserId = (req as any).authenticatedUser?.userId as string ?? 'unknown';
   try {
     await manualApprove(id, adminUserId);
@@ -57,6 +65,10 @@ export async function handleManualApprove(req: Request, res: Response): Promise<
  */
 export async function handleManualReject(req: Request, res: Response): Promise<void> {
   const { id } = req.params;
+  if (!id || !id.trim()) {
+    res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Thiếu request ID.' } });
+    return;
+  }
   const adminUserId = (req as any).authenticatedUser?.userId as string ?? 'unknown';
   const { reason } = req.body as { reason?: string };
 
