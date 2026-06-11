@@ -1,5 +1,6 @@
 import { ethers } from 'ethers';
 import { encodeFunctionData } from 'viem';
+import { randomUUID } from 'crypto';
 import { getLogger } from '../config/logger';
 import { ApplicationError } from '../utils/applicationError';
 import {
@@ -13,19 +14,18 @@ import {
   findDisbursementsByStatus,
   findLatestDisbursements,
   findPendingDisbursementByBeneficiary,
-  updateDisbursementByRequestId,
-  updateDisbursementByRequestIdWithCondition
+  updateDisbursementByRequestId
 } from '../models/disbursementModel';
 import { AuthUser, findUserById, updateUser } from '../models/authModel';
-import { findSubmissionsByOrganizationId } from '../models/organizationKycModel';
 import { findProjectById } from '../repositories/projectRepository';
 import { createUserNotification } from './notificationService';
 import { createKernelClientFromEncryptedOwnerKey } from './zeroDevService';
 import {
-  createPayosTransfer,
   getPayosTransferStatusByReferenceId,
   verifyPayosTransferWebhookChecksum
 } from './payosService';
+import { removePendingJobsByRequestId } from '../queues/disbursementTransferQueue';
+import { triggerPayosTransferForApprovedDisbursement } from '../workers/payosTransferWorker';
 
 // ============ ABI ============
 
@@ -85,57 +85,11 @@ const requestCreatedEventInterface = new ethers.Interface([
 
 const logger = getLogger();
 
-const maximumTransferRetryCount = 5;
-const transferRetryDelayMilliseconds = [2000, 4000, 8000, 16000, 32000] as const;
-const transferStatusPollIntervalMilliseconds = 15000;
-const transferStatusPollAttemptCount = 40;
 const transferStatusSweepIntervalMilliseconds = 60000;
 const transferStatusSweepBatchLimitCount = 20;
 const minimumPayosTransferAmountVnd = readPositiveIntegerEnv(process.env.PAYOS_TRANSFER_MIN_AMOUNT_VND, 10000);
 const activeTransferSyncRequestIdSet = new Set<string>();
 let isTransferStatusSweepStarted = false;
-
-const vietnameseBankBinCodeByAlias: Record<string, string> = {
-  VIETCOMBANK: '970436',
-  BIDV: '970418',
-  VIETINBANK: '970415',
-  AGRIBANK: '970405',
-  ACB: '970416',
-  TECHCOMBANK: '970407',
-  MBBANK: '970422',
-  MB: '970422',
-  VPBANK: '970432',
-  SACOMBANK: '970403',
-  TPBANK: '970423',
-  OCB: '970448',
-  HDBANK: '970437',
-  VIB: '970441',
-  SHB: '970443',
-  MSB: '970426',
-  SEABANK: '970440',
-  LPBANK: '970449',
-  PVCOMBANK: '970412',
-  EXIMBANK: '970431',
-  BACABANK: '970409',
-  NAMABANK: '970428',
-  ABBANK: '970425',
-  BVBANK: '970454',
-  VIETBANK: '970433',
-  SCB: '970429',
-  DONGABANK: '970406',
-  PGBANK: '970430',
-  SAIGONBANK: '970400',
-  KIENLONGBANK: '970452',
-  BAOVIETBANK: '970438',
-  OCEANBANK: '970414',
-  GPBANK: '970408',
-  CBBANK: '970444',
-  HSBC: '458761',
-  SHINHANBANK: '970424',
-  STANDARDCHARTERED: '970410',
-  UOB: '970458',
-  PUBLICBANK: '970439'
-};
 
 // ============ TYPES ============
 
@@ -274,11 +228,6 @@ type ProcessDisbursementTransferWebhookOptions = {
 
 // ============ HELPERS ============
 
-/** Hàm tạm dừng bất đồng bộ theo mili giây. Mục đích: dùng cho retry backoff của FR8. */
-function sleep(milliseconds: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, milliseconds));
-}
-
 /** Hàm đọc số nguyên dương từ biến môi trường. Mục đích: cấu hình polling an toàn với fallback mặc định. */
 function readPositiveIntegerEnv(environmentValue: string | undefined, fallbackValue: number): number {
   const parsedValue = Number(environmentValue);
@@ -297,21 +246,6 @@ function readPositiveIntegerEnv(environmentValue: string | undefined, fallbackVa
 /** Hàm tạo idempotency key cố định cho mỗi request. Mục đích: chống tạo lệnh chuyển khoản trùng lặp. */
 function buildTransferIdempotencyKey(requestId: string): string {
   return `disbursement-${requestId}`;
-}
-
-/** Hàm chuẩn hóa idempotency key gửi PayOS. Mục đích: thay key legacy có ký tự không hợp lệ để tránh PayOS trả lỗi 605. */
-function normalizeTransferIdempotencyKey(requestId: string, currentIdempotencyKey: string | null): string {
-  const safeCurrentIdempotencyKey = String(currentIdempotencyKey || '').trim();
-  if (/^[A-Za-z0-9_-]+$/.test(safeCurrentIdempotencyKey)) {
-    return safeCurrentIdempotencyKey;
-  }
-
-  return buildTransferIdempotencyKey(requestId);
-}
-
-/** Hàm kiểm tra PayOS có trả định danh giao dịch thật hay không. Mục đích: tránh chờ webhook/polling bằng id fallback không thể đối soát an toàn. */
-function hasReliablePayosTransferIdentifier(transferId: string, providerTransactionId: string, idempotencyKey: string): boolean {
-  return transferId.trim() !== idempotencyKey || providerTransactionId.trim() !== idempotencyKey;
 }
 
 /** Hàm ánh xạ role user sang signer role. Mục đích: thống nhất role lưu trong mảng approvals. */
@@ -409,31 +343,6 @@ function mapRequestModeToContractValue(requestMode: 'NORMAL' | 'EMERGENCY'): num
   return requestMode === 'EMERGENCY' ? 1 : 0;
 }
 
-/** Hàm chuẩn hóa mã ngân hàng từ tên ngân hàng. Mục đích: đảm bảo payload transfer đạt định dạng ổn định. */
-function normalizeBankCode(bankName: string): string {
-  const normalizedBankName = bankName
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .trim()
-    .toUpperCase()
-    .replace(/[^A-Z0-9]/g, '');
-
-  if (!normalizedBankName) {
-    return '';
-  }
-
-  if (/^\d{6,11}$/.test(normalizedBankName)) {
-    return normalizedBankName;
-  }
-
-  const mappedBankBinCode = vietnameseBankBinCodeByAlias[normalizedBankName];
-  if (mappedBankBinCode) {
-    return mappedBankBinCode;
-  }
-
-  return normalizedBankName.slice(0, 32);
-}
-
 /** Hàm chuyển provider transaction id về uint256. Mục đích: truyền tham số finalizeDisbursement đúng kiểu on-chain. */
 function mapProviderTransactionIdToUint256(providerTransactionId: string): bigint {
   const normalizedProviderTransactionId = providerTransactionId.trim();
@@ -447,37 +356,6 @@ function mapProviderTransactionIdToUint256(providerTransactionId: string): bigin
   // ngay cả khi cổng thanh toán trả transaction id dạng chuỗi ký tự không phải số.
   const hashedValue = ethers.keccak256(ethers.toUtf8Bytes(normalizedProviderTransactionId || String(Date.now())));
   return BigInt(hashedValue);
-}
-
-/** Hàm chuẩn hóa chuỗi để so khớp dữ liệu text. Mục đích: giảm sai lệch do khác biệt hoa/thường và khoảng trắng khi verify tài khoản ngân hàng. */
-function normalizeTextForComparison(textValue: string | null | undefined): string {
-  return String(textValue || '')
-    .trim()
-    .replace(/\s+/g, ' ')
-    .toUpperCase();
-}
-
-/** Hàm kiểm tra tài khoản thụ hưởng đã được KYC phê duyệt. Mục đích: đảm bảo FR8 chỉ chuyển khoản vào tài khoản ngân hàng đã xác minh. */
-async function ensureApprovedBeneficiaryBankAccount(record: DisbursementRecord): Promise<void> {
-  const organizationSubmissionList = await findSubmissionsByOrganizationId(record.organizationId);
-  const hasApprovedMatchingBankAccount = organizationSubmissionList.some(submissionItem => {
-    if (submissionItem.status !== 'APPROVED' || !submissionItem.beneficiaryBankAccount) {
-      return false;
-    }
-
-    return (
-      normalizeTextForComparison(submissionItem.beneficiaryBankAccount.bankAccountNumber)
-        === normalizeTextForComparison(record.beneficiaryBankAccount.bankAccountNumber)
-      && normalizeTextForComparison(submissionItem.beneficiaryBankAccount.accountHolderName)
-        === normalizeTextForComparison(record.beneficiaryBankAccount.accountHolderName)
-      && normalizeTextForComparison(submissionItem.beneficiaryBankAccount.bankName)
-        === normalizeTextForComparison(record.beneficiaryBankAccount.bankName)
-    );
-  });
-
-  if (!hasApprovedMatchingBankAccount) {
-    throw new Error('Tài khoản ngân hàng thụ hưởng chưa được KYC phê duyệt hoặc không khớp hồ sơ đã duyệt.');
-  }
 }
 
 /** Hàm chuyển giá trị bất kỳ về chuỗi nullable. Mục đích: tránh lặp logic trim/check rỗng khi parse payload webhook transfer. */
@@ -1104,61 +982,6 @@ async function synchronizeDisbursementTransferStatusByReferenceId(requestId: str
   }
 }
 
-/** Hàm poll chủ động sau khi tạo payout thành công. Mục đích: giảm phụ thuộc callback ngoài và tránh trạng thái PROCESSING kéo dài vô hạn. */
-async function pollDisbursementTransferStatusUntilFinal(requestId: string): Promise<void> {
-  const pollIntervalMilliseconds = readPositiveIntegerEnv(
-    process.env.DISBURSEMENT_TRANSFER_POLL_INTERVAL_MS,
-    transferStatusPollIntervalMilliseconds
-  );
-  const maximumPollAttemptCount = readPositiveIntegerEnv(
-    process.env.DISBURSEMENT_TRANSFER_POLL_ATTEMPTS,
-    transferStatusPollAttemptCount
-  );
-
-  for (let pollAttemptIndex = 0; pollAttemptIndex < maximumPollAttemptCount; pollAttemptIndex += 1) {
-    const currentRecord = await findDisbursementByRequestId(requestId);
-    if (!currentRecord) {
-      return;
-    }
-
-    const isFinalStatus = currentRecord.status === 'COMPLETED'
-      || currentRecord.payosTransferStatus === 'SUCCESS'
-      || currentRecord.payosTransferStatus === 'MANUAL_REVIEW';
-    if (isFinalStatus) {
-      return;
-    }
-
-    await synchronizeDisbursementTransferStatusByReferenceId(requestId);
-
-    const updatedRecord = await findDisbursementByRequestId(requestId);
-    const isReachedFinalState = Boolean(
-      updatedRecord
-      && (
-        updatedRecord.status === 'COMPLETED'
-        || updatedRecord.payosTransferStatus === 'SUCCESS'
-        || updatedRecord.payosTransferStatus === 'MANUAL_REVIEW'
-      )
-    );
-    if (isReachedFinalState) {
-      return;
-    }
-
-    const isLastPollAttempt = pollAttemptIndex >= maximumPollAttemptCount - 1;
-    if (isLastPollAttempt) {
-      await updateDisbursementByRequestId(requestId, {
-        status: 'APPROVED',
-        payosTransferStatus: 'MANUAL_REVIEW',
-        payosTransferLastError: 'Không nhận được trạng thái cuối cùng từ PayOS sau thời gian polling tự động. Vui lòng kiểm tra và retry thủ công.',
-        transferIdempotencyKey: updatedRecord?.transferIdempotencyKey || buildTransferIdempotencyKey(requestId)
-      });
-      logger.warn(`Polling transfer hết thời gian chờ. requestId=${requestId}`);
-      return;
-    }
-
-    await sleep(pollIntervalMilliseconds);
-  }
-}
-
 /** Hàm quét một lượt các record EXECUTING. Mục đích: tự phục hồi trạng thái transfer cho các request tồn đọng sau restart hoặc rớt callback. */
 async function sweepExecutingDisbursementsOnce(): Promise<void> {
   const [allExecutingRecordList, allApprovedRecordList] = await Promise.all([
@@ -1210,168 +1033,6 @@ export function startDisbursementTransferStatusSweepPolling(): void {
   }, sweepIntervalMilliseconds);
 }
 
-/** Hàm trigger auto-transfer FR8 theo requestId. Mục đích: thực thi chuyển khoản có idempotency và retry giới hạn. */
-async function triggerAutoTransferForApprovedRequest(requestId: string): Promise<void> {
-  const currentRecord = await findDisbursementByRequestId(requestId);
-  if (!currentRecord) {
-    return;
-  }
-
-  if (currentRecord.status !== 'APPROVED') {
-    return;
-  }
-
-  if (currentRecord.payosTransferStatus === 'SUCCESS') {
-    return;
-  }
-
-  const idempotencyKey = normalizeTransferIdempotencyKey(currentRecord.requestId, currentRecord.transferIdempotencyKey);
-  const processingRecord = await updateDisbursementByRequestIdWithCondition(
-    currentRecord.requestId,
-    {
-      status: 'APPROVED',
-      $or: [
-        { payosTransferStatus: null },
-        { payosTransferStatus: 'FAILED' },
-        { payosTransferStatus: 'MANUAL_REVIEW' }
-      ]
-    },
-    {
-      status: 'EXECUTING',
-      payosTransferStatus: 'PROCESSING',
-      transferIdempotencyKey: idempotencyKey,
-      payosTransferLastError: null
-    }
-  );
-
-  if (!processingRecord) {
-    return;
-  }
-
-  try {
-    await ensureApprovedBeneficiaryBankAccount(processingRecord);
-  } catch (error) {
-    await updateDisbursementByRequestId(processingRecord.requestId, {
-      status: 'APPROVED',
-      payosTransferStatus: 'MANUAL_REVIEW',
-      payosTransferLastError: (error as Error)?.message || 'Không thể xác thực tài khoản ngân hàng thụ hưởng.',
-      transferIdempotencyKey: idempotencyKey
-    });
-    return;
-  }
-
-  const bankCode = normalizeBankCode(processingRecord.beneficiaryBankAccount.bankName);
-  if (!bankCode) {
-    await updateDisbursementByRequestId(processingRecord.requestId, {
-      status: 'APPROVED',
-      payosTransferStatus: 'MANUAL_REVIEW',
-      payosTransferLastError: 'Không thể chuẩn hóa mã ngân hàng từ bankName.'
-    });
-    return;
-  }
-
-  for (let transferAttemptIndex = 0; transferAttemptIndex < maximumTransferRetryCount; transferAttemptIndex += 1) {
-    const transferAttemptCount = transferAttemptIndex + 1;
-
-    try {
-      await updateDisbursementByRequestId(processingRecord.requestId, {
-        payosTransferAttemptCount: transferAttemptCount,
-        payosTransferStatus: 'PROCESSING',
-        payosTransferLastError: null
-      });
-
-      const transferResult = await createPayosTransfer({
-        requestId: processingRecord.requestId,
-        amountVnd: processingRecord.amount,
-        bankCode,
-        bankAccountNumber: processingRecord.beneficiaryBankAccount.bankAccountNumber,
-        accountHolderName: processingRecord.beneficiaryBankAccount.accountHolderName,
-        description: `DISBURSEMENT-${processingRecord.requestId}`,
-        idempotencyKey
-      });
-
-      await updateDisbursementByRequestId(processingRecord.requestId, {
-        payosTransferId: transferResult.transferId,
-        payosTransferStatus: 'PROCESSING',
-        transferIdempotencyKey: idempotencyKey,
-        payosTransferLastError: null
-      });
-
-      if (transferResult.transferStatus === 'FAILED') {
-        throw new Error('PayOS transfer trả trạng thái FAILED.');
-      }
-
-      if (transferResult.transferStatus === 'SUCCESS') {
-        await processDisbursementTransferWebhook(buildInternalTransferStatusPayload(
-          processingRecord.requestId,
-          {
-            found: true,
-            transferId: transferResult.transferId,
-            providerTransactionId: transferResult.providerTransactionId,
-            transferStatus: 'SUCCESS',
-            errorMessage: null,
-            rawPayload: transferResult.rawPayload
-          },
-          transferResult.transferId
-        ), {
-          skipChecksumVerify: true,
-          source: 'internal_poll'
-        });
-        return;
-      }
-
-      if (!hasReliablePayosTransferIdentifier(transferResult.transferId, transferResult.providerTransactionId, idempotencyKey)) {
-        const transferStatusSnapshot = await getPayosTransferStatusByReferenceId(processingRecord.requestId);
-        if (transferStatusSnapshot.found) {
-          await processDisbursementTransferWebhook(buildInternalTransferStatusPayload(
-            processingRecord.requestId,
-            transferStatusSnapshot,
-            transferResult.transferId
-          ), {
-            skipChecksumVerify: true,
-            source: 'internal_poll'
-          });
-          return;
-        }
-
-        await updateDisbursementByRequestId(processingRecord.requestId, {
-          status: 'APPROVED',
-          payosTransferStatus: 'MANUAL_REVIEW',
-          payosTransferLastError: 'PayOS đã nhận yêu cầu payout nhưng không trả transferId/providerTransactionId thật và truy vấn lại theo referenceId chưa tìm thấy payout. Cần kiểm tra cấu hình payout endpoint/credential trên PayOS.',
-          transferIdempotencyKey: idempotencyKey
-        });
-        logger.warn(`PayOS transfer thiếu định danh thật, chuyển manual review. requestId=${processingRecord.requestId} idempotencyKey=${idempotencyKey}`);
-        return;
-      }
-
-      logger.info(
-        `PayOS transfer đã khởi tạo thành công, chờ webhook xác nhận. requestId=${processingRecord.requestId} transferId=${transferResult.transferId} providerTransactionId=${transferResult.providerTransactionId}`
-      );
-
-      void pollDisbursementTransferStatusUntilFinal(processingRecord.requestId).catch(error => {
-        logger.error(`Polling transfer sau khi tạo payout thất bại. requestId=${processingRecord.requestId} error=${(error as Error)?.message}`);
-      });
-      return;
-    } catch (error) {
-      const errorMessage = (error as Error)?.message || 'Không xác định';
-      logger.error(`Auto-transfer thất bại. requestId=${processingRecord.requestId} attempt=${transferAttemptCount} error=${errorMessage}`);
-
-      const isLastTransferAttempt = transferAttemptCount >= maximumTransferRetryCount;
-      if (isLastTransferAttempt) {
-        await updateDisbursementByRequestId(processingRecord.requestId, {
-          status: 'APPROVED',
-          payosTransferStatus: 'MANUAL_REVIEW',
-          payosTransferLastError: errorMessage,
-          transferIdempotencyKey: idempotencyKey
-        });
-        return;
-      }
-
-      const delayMilliseconds = transferRetryDelayMilliseconds[transferAttemptIndex] || 32000;
-      await sleep(delayMilliseconds);
-    }
-  }
-}
 
 /** Hàm xử lý webhook chuyển khoản FR8 từ PayOS. Mục đích: xác thực checksum, cập nhật trạng thái transfer, và finalize on-chain khi nhận SUCCESS. */
 export async function processDisbursementTransferWebhook(
@@ -1462,6 +1123,9 @@ export async function processDisbursementTransferWebhook(
       transferIdempotencyKey: disbursementRecord.transferIdempotencyKey || buildTransferIdempotencyKey(disbursementRecord.requestId)
     });
 
+    // Dọn dẹp các job đang chờ để tránh duplicate transfer sau khi chuyển manual review
+    await removePendingJobsByRequestId(disbursementRecord.requestId);
+
     return mapDisbursementRecordToResult(manualReviewRecord || disbursementRecord);
   }
 
@@ -1493,6 +1157,10 @@ export async function processDisbursementTransferWebhook(
     logger.info(
       `Webhook transfer SUCCESS đã finalize on-chain. requestId=${completedRecord.requestId} transferId=${completedRecord.payosTransferId || ''} txHash=${finalizeTransactionHash}`
     );
+
+    // Dọn dẹp các job đang chờ để tránh duplicate transfer sau khi finalize thành công
+    await removePendingJobsByRequestId(completedRecord.requestId);
+
     return mapDisbursementRecordToResult(completedRecord);
   } catch (error) {
     const errorMessage = (error as Error)?.message || 'Không xác định';
@@ -1505,6 +1173,7 @@ export async function processDisbursementTransferWebhook(
     });
 
     if (manualReviewRecord) {
+      await removePendingJobsByRequestId(manualReviewRecord.requestId);
       return mapDisbursementRecordToResult(manualReviewRecord);
     }
 
@@ -1613,7 +1282,7 @@ export async function createDisbursementRequest(
 
   const currentTimestamp = new Date();
   const newRecord: DisbursementRecord = {
-    requestId: `DS-${Date.now()}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`,
+    requestId: `DS-${Date.now()}-${randomUUID().replace(/-/g, '').slice(0, 5).toUpperCase()}`,
     onChainRequestId: requestCreatedEventData.onChainRequestId,
     projectId: payload.projectId,
     onChainProjectId,
@@ -1760,7 +1429,7 @@ export async function signDisbursementRequest(
   await createDisbursementSignatureNotification(updatedRecord, signerRole);
 
   if (updatedRecord.status === 'APPROVED') {
-    void triggerAutoTransferForApprovedRequest(updatedRecord.requestId)
+    void triggerPayosTransferForApprovedDisbursement(updatedRecord.requestId)
       .catch(error => {
         logger.error(`Trigger auto-transfer thất bại. requestId=${updatedRecord.requestId} error=${(error as Error)?.message}`);
       });
@@ -1989,7 +1658,11 @@ export async function getLatestDisbursementApprovalLogs(
   return approvalLogWithSortValueList
     .sort((leftApprovalLogItem, rightApprovalLogItem) => rightApprovalLogItem.actionTimestampValue - leftApprovalLogItem.actionTimestampValue)
     .slice(0, normalizedLimitCount)
-    .map(({ actionTimestampValue, ...approvalLogItem }) => approvalLogItem);
+    .map((item) => {
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { actionTimestampValue: _actionTimestampValue, ...approvalLogItem } = item;
+      return approvalLogItem;
+    });
 }
 
 /** Hàm lấy chi tiết request. Mục đích: cấp dữ liệu thật cho drawer chi tiết ký duyệt. */

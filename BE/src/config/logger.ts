@@ -121,22 +121,28 @@ type LogMetadata = {
   userOpHash?: string;
   sender?: string;
   donationTxHash?: string;
+  requestId?: string;
+  disbursementRequestId?: string;
+  payosTransferId?: string;
+  transferId?: string;
+  attemptNumber?: number;
+  durationMs?: number;
+  transferStatus?: string;
+  jobId?: string | number;
+  delay?: number;
+  removedCount?: number;
+  enqueued?: boolean;
+  deadline?: string;
+  transferIdempotencyKey?: string;
+  idempotencyKey?: string;
+  finalTransferId?: string;
+  bankCode?: string;
+  checksumPrefix?: string;
+  bodyKeys?: string[];
+  relayTxHash?: string;
+  hasNestedData?: boolean;
 };
 
-/**
- * Hàm extract message từ error object của Redis client.
- * Redis client error có thể là string hoặc object dạng {errorMessage: ''} thay vì {message: ''}.
- * Mục đích: tránh trường hợp log hiển thị '{ errorMessage: '' }' khi không extract được message.
- */
-function extractErrorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (typeof error === 'string') return error;
-  if (error && typeof error === 'object') {
-    const msg = (error as Record<string, unknown>).message ?? (error as Record<string, unknown>).errorMessage;
-    if (typeof msg === 'string') return msg;
-  }
-  return String(error);
-}
 
 const logger = {
   /**
