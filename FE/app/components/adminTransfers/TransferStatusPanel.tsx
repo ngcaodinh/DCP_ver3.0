@@ -32,7 +32,8 @@ type TransferItem = {
   nextRetryAt: null;
 };
 
-type TabKey = 'ALL' | 'PROCESSING' | 'FAILED' | 'MANUAL_REVIEW';
+// Endpoint pending-review chỉ trả MANUAL_REVIEW items — tab chỉ lọc theo mode
+type TabKey = 'ALL' | 'EMERGENCY' | 'NORMAL';
 
 type DialogState = { requestId: string; projectId: string; amount: number; mode: 'approve' | 'reject' } | null;
 
@@ -40,9 +41,8 @@ type DialogState = { requestId: string; projectId: string; amount: number; mode:
 
 const TAB_OPTIONS: { key: TabKey; label: string }[] = [
   { key: 'ALL', label: 'Tất cả' },
-  { key: 'PROCESSING', label: 'Đang chờ' },
-  { key: 'FAILED', label: 'Thất bại' },
-  { key: 'MANUAL_REVIEW', label: 'Manual Review' }
+  { key: 'EMERGENCY', label: 'Khẩn cấp' },
+  { key: 'NORMAL', label: 'Thường' }
 ];
 
 function getStatusBadge(status: TransferStatus | null) {
@@ -129,10 +129,10 @@ export default function TransferStatusPanel({ onPushToast }: TransferStatusPanel
     });
   }, [onPushToast]);
 
-  // Filter theo tab
+  // Filter theo tab — lọc theo requestMode vì data chỉ có MANUAL_REVIEW items
   const filtered = activeTab === 'ALL'
     ? items
-    : items.filter(i => i.payosTransferStatus === activeTab);
+    : items.filter(i => i.requestMode === activeTab);
 
   // EMERGENCY items nổi lên đầu
   const sorted = [...filtered].sort((a, b) => {
@@ -194,7 +194,7 @@ export default function TransferStatusPanel({ onPushToast }: TransferStatusPanel
             {tab.label}
             {tab.key !== 'ALL' && (
               <span className="ml-1.5 rounded-full bg-white/20 px-1.5 py-0.5 text-[10px]">
-                {items.filter(i => i.payosTransferStatus === tab.key).length}
+                {items.filter(i => i.requestMode === tab.key).length}
               </span>
             )}
           </button>

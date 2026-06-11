@@ -38,8 +38,14 @@ export default function CountdownTimer({ updatedAt, attemptCount }: CountdownTim
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
+    if (nextRetryAt - Date.now() <= 0) return; // Đã hết giờ, không cần interval
     intervalRef.current = setInterval(() => {
-      setRemaining(nextRetryAt - Date.now());
+      const rem = nextRetryAt - Date.now();
+      setRemaining(rem);
+      if (rem <= 0 && intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
     }, 1000);
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);

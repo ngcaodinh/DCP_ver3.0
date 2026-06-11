@@ -6,7 +6,7 @@
 // Reject: textarea reason (≥ 10 ký tự, bắt buộc)
 // =============================================================================
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { fetchApi, buildApiUrl } from '@/app/utils/apiClient';
 import { readAuthSession } from '@/app/utils/authSession';
 
@@ -39,9 +39,34 @@ export default function ManualReviewDialog({
   const [reason, setReason] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const firstFocusRef = useRef<HTMLButtonElement>(null);
 
   const isApprove = mode === 'approve';
   const reasonValid = isApprove || reason.trim().length >= 10;
+
+  // Escape để đóng + focus element đầu tiên khi mở
+  useEffect(() => {
+    firstFocusRef.current?.focus();
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { onClose(); return; }
+      // Focus trap: giữ Tab trong dialog
+      if (e.key === 'Tab' && dialogRef.current) {
+        const focusable = Array.from(
+          dialogRef.current.querySelectorAll<HTMLElement>('button:not([disabled]), textarea, input')
+        );
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault(); last?.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault(); first?.focus();
+        }
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [onClose]);
 
   const handleSubmit = useCallback(async () => {
     if (!reasonValid) {
@@ -76,17 +101,22 @@ export default function ManualReviewDialog({
   }, [isApprove, reason, reasonValid, requestId, mode, onClose, onSuccess, onError]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 px-4">
-      <div className="w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 px-4"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="dialog-title"
+    >
+      <div ref={dialogRef} className="w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
         {/* Header */}
         <div className="flex items-start justify-between gap-3">
           <div>
-            <h3 className={`text-base font-bold ${isApprove ? 'text-emerald-700' : 'text-red-700'}`}>
+            <h3 id="dialog-title" className={`text-base font-bold ${isApprove ? 'text-emerald-700' : 'text-red-700'}`}>
               {isApprove ? 'Xác nhận Approve thủ công' : 'Xác nhận Reject disbursement'}
             </h3>
             <p className="mt-0.5 font-mono text-xs text-slate-500">{requestId}</p>
           </div>
-          <button type="button" onClick={onClose} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100">
+          <button ref={firstFocusRef} type="button" onClick={onClose} aria-label="Đóng dialog" className="rounded-lg p-1 text-slate-400 hover:bg-slate-100">
             <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
             </svg>
