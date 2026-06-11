@@ -11,6 +11,7 @@ import { startPayosTransferWorker } from './workers/payosTransferWorker';
 import { initializeNotificationBridge } from './services/notificationBridge.service';
 import { initSocketServer, shutdownSocketServer } from './config/socketServer';
 import { startManualReviewEscalationWorker, stopManualReviewEscalationWorker } from './workers/manualReviewEscalationWorker';
+import { startOracleWorker, stopOracleWorker } from './workers/oracle.worker';
 
 const serverPort = Number(process.env.PORT) || 4000;
 
@@ -37,6 +38,8 @@ function startBackgroundWorkers(): void {
   startPayosTransferWorker();
   // Manual Review Escalation Worker: cảnh báo admin khi disbursement MANUAL_REVIEW quá hạn SLA
   startManualReviewEscalationWorker();
+  // Oracle Worker: xác minh EXIF GPS ảnh minh chứng (concurrency 3)
+  startOracleWorker();
 }
 
 /**
@@ -63,8 +66,8 @@ async function startServer(): Promise<void> {
   initSocketServer(httpServer);
 
   // Graceful shutdown: đóng Socket.io và dừng workers trước khi process tắt
-  process.once('SIGTERM', () => { shutdownSocketServer(); stopManualReviewEscalationWorker(); });
-  process.once('SIGINT', () => { shutdownSocketServer(); stopManualReviewEscalationWorker(); });
+  process.once('SIGTERM', () => { shutdownSocketServer(); stopManualReviewEscalationWorker(); void stopOracleWorker(); });
+  process.once('SIGINT', () => { shutdownSocketServer(); stopManualReviewEscalationWorker(); void stopOracleWorker(); });
 }
 
 startServer().catch((error: Error) => {

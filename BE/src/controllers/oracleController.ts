@@ -1,0 +1,342 @@
+import { Response } from 'express';
+import { randomUUID } from 'crypto';
+import { getLogger } from '../config/logger';
+import { sendSuccessResponse, sendErrorResponse, sendErrorFromUnknown } from '../utils/apiResponse';
+import type { AuthenticatedRequest } from '../middleware/authenticationMiddleware';
+import {
+  verifyEvidenceImage,
+  ORACLE_MAX_FILE_SIZE
+} from '../services/oracleService';
+import {
+  enqueueOracleVerification,
+  type OracleVerificationJobData
+} from '../queues/oracleQueue';
+import { findGeofenceByProjectId, upsertProjectGeofence } from '../models/projectGeofenceModel';
+import { findPendingOverrideRequests, countPendingOverrideRequests } from '../models/oracleOverrideRequestModel';
+import { findProjectById } from '../repositories/projectRepository';
+
+const logger = getLogger();
+
+/**
+ * POST /api/oracle/verify-image
+ * Xác minh một ảnh minh chứng (synchronous — trực tiếp, không qua queue).
+ * Dùng cho trường hợp cần kết quả ngay (FE upload + hiển thị GPS indicator real-time).
+ *
+ * Body: multipart/form-data
+ *   - image: File (JPEG/PNG/WebP, max 10MB)
+ *   - projectId: string
+ *   - evidenceCid: string (IPFS CID của ảnh đã upload)
+ */
+export async function handleVerifyImage(
+  request: AuthenticatedRequest,
+  response: Response
+): Promise<void> {
+  if (!request.authenticatedUser) {
+    sendErrorResponse(response, 401, 'Bạn chưa đăng nhập.', 'UNAUTHENTICATED');
+    return;
+  }
+
+  const file = request.file;
+  if (!file) {
+    sendErrorResponse(response, 400, 'Thiếu file ảnh minh chứng.', 'VALIDATION_ERROR');
+    return;
+  }
+
+  const { projectId, evidenceCid } = request.body as { projectId?: string; evidenceCid?: string };
+
+  if (!projectId?.trim()) {
+    sendErrorResponse(response, 400, 'Thiếu projectId.', 'VALIDATION_ERROR');
+    return;
+  }
+  if (!evidenceCid?.trim()) {
+    sendErrorResponse(response, 400, 'Thiếu evidenceCid.', 'VALIDATION_ERROR');
+    return;
+  }
+
+  if (file.size > ORACLE_MAX_FILE_SIZE) {
+    sendErrorResponse(response, 413, `File vượt quá 10MB.`, 'PAYLOAD_TOO_LARGE');
+    return;
+  }
+
+  const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/webp'];
+  if (!allowedMimeTypes.includes(file.mimetype)) {
+    sendErrorResponse(response, 415, 'Chỉ chấp nhận JPEG, PNG, WebP.', 'UNSUPPORTED_MEDIA_TYPE');
+    return;
+  }
+
+  try {
+    const result = await verifyEvidenceImage(
+      file.buffer,
+      projectId,
+      request.authenticatedUser.userId,
+      evidenceCid
+    );
+
+    logger.info('Oracle verify-image hoàn thành.', {
+      projectId,
+      evidenceCid,
+      verificationId: result.verificationId,
+      isValid: result.isValid
+    });
+
+    sendSuccessResponse(response, 200, 'Xác minh ảnh minh chứng thành công.', result);
+  } catch (error) {
+    logger.error('Oracle verify-image thất bại.', {
+      projectId,
+      evidenceCid,
+      errorMessage: (error as Error)?.message
+    });
+    sendErrorFromUnknown(response, error, 'Không thể xác minh ảnh minh chứng.');
+  }
+}
+
+/**
+ * POST /api/oracle/verify-image/batch
+ * Xác minh nhiều ảnh minh chứng bất đồng bộ qua Bull queue (concurrency 3).
+ * Dùng khi tổ chức upload nhiều ảnh cùng lúc (disbursement evidence).
+ *
+ * Body: multipart/form-data
+ *   - images[]: File[] (JPEG/PNG/WebP, mỗi file max 10MB)
+ *   - projectId: string
+ *   - evidenceCids: JSON array string (["cid1", "cid2", ...], độ dài = số ảnh)
+ */
+export async function handleVerifyImageBatch(
+  request: AuthenticatedRequest,
+  response: Response
+): Promise<void> {
+  if (!request.authenticatedUser) {
+    sendErrorResponse(response, 401, 'Bạn chưa đăng nhập.', 'UNAUTHENTICATED');
+    return;
+  }
+
+  const files = request.files as Express.Multer.File[] | undefined;
+  if (!files || files.length === 0) {
+    sendErrorResponse(response, 400, 'Thiếu file ảnh.', 'VALIDATION_ERROR');
+    return;
+  }
+  if (files.length > 10) {
+    sendErrorResponse(response, 400, 'Tối đa 10 ảnh mỗi batch.', 'VALIDATION_ERROR');
+    return;
+  }
+
+  const { projectId, evidenceCids: evidenceCidsRaw } = request.body as {
+    projectId?: string;
+    evidenceCids?: string;
+  };
+
+  if (!projectId?.trim()) {
+    sendErrorResponse(response, 400, 'Thiếu projectId.', 'VALIDATION_ERROR');
+    return;
+  }
+
+  let evidenceCids: string[];
+  try {
+    evidenceCids = JSON.parse(evidenceCidsRaw ?? '[]') as string[];
+  } catch {
+    sendErrorResponse(response, 400, 'evidenceCids phải là JSON array hợp lệ.', 'VALIDATION_ERROR');
+    return;
+  }
+
+  if (evidenceCids.length !== files.length) {
+    sendErrorResponse(
+      response, 400,
+      'Số lượng evidenceCids phải bằng số ảnh upload.',
+      'VALIDATION_ERROR'
+    );
+    return;
+  }
+
+  const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/webp'];
+  const oversizedFiles = files.filter(f => f.size > ORACLE_MAX_FILE_SIZE);
+  const invalidTypeFiles = files.filter(f => !allowedMimeTypes.includes(f.mimetype));
+
+  if (oversizedFiles.length > 0) {
+    sendErrorResponse(response, 413, `${oversizedFiles.length} file vượt quá 10MB.`, 'PAYLOAD_TOO_LARGE');
+    return;
+  }
+  if (invalidTypeFiles.length > 0) {
+    sendErrorResponse(response, 415, 'Chỉ chấp nhận JPEG, PNG, WebP.', 'UNSUPPORTED_MEDIA_TYPE');
+    return;
+  }
+
+  const jobIds: Array<{ fileName: string; evidenceCid: string; jobId: string | number | undefined; enqueued: boolean }> = [];
+
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    const evidenceCid = evidenceCids[i];
+    if (!file || !evidenceCid) continue;
+
+    const jobData: OracleVerificationJobData = {
+      jobId: randomUUID(),
+      projectId,
+      organizationId: request.authenticatedUser.userId,
+      evidenceCid,
+      imageBufferBase64: file.buffer.toString('base64'),
+      fileSizeBytes: file.size
+    };
+
+    const { jobId, enqueued } = await enqueueOracleVerification(jobData);
+    jobIds.push({
+      fileName: file.originalname,
+      evidenceCid,
+      jobId,
+      enqueued
+    });
+  }
+
+  const enqueuedCount = jobIds.filter(j => j.enqueued).length;
+  const failedCount = jobIds.filter(j => !j.enqueued).length;
+
+  logger.info('Oracle batch verify enqueued.', {
+    projectId,
+    totalFiles: files.length,
+    enqueuedCount,
+    failedCount
+  });
+
+  // [S4] Thông báo rõ khi enqueue thất bại — client biết job nào bị mất để retry
+  if (enqueuedCount === 0) {
+    sendErrorResponse(response, 503, 'Không thể đưa bất kỳ ảnh nào vào hàng đợi. Redis có thể tạm thời không khả dụng.', 'SERVICE_UNAVAILABLE');
+    return;
+  }
+
+  // 207 Multi-Status khi một số job enqueue thất bại
+  const statusCode = failedCount > 0 ? 207 : 202;
+  sendSuccessResponse(response, statusCode, 'Đã đưa vào hàng đợi xác minh.', { jobs: jobIds, enqueuedCount, failedCount });
+}
+
+/**
+ * GET /api/oracle/geofence/:projectId
+ * Lấy dữ liệu geofence của một dự án.
+ * Dùng cho FE hiển thị bản đồ (B3 GeofenceMap component).
+ */
+export async function handleGetGeofence(
+  request: AuthenticatedRequest,
+  response: Response
+): Promise<void> {
+  if (!request.authenticatedUser) {
+    sendErrorResponse(response, 401, 'Bạn chưa đăng nhập.', 'UNAUTHENTICATED');
+    return;
+  }
+
+  const { projectId } = request.params;
+  if (!projectId?.trim()) {
+    sendErrorResponse(response, 400, 'Thiếu projectId.', 'VALIDATION_ERROR');
+    return;
+  }
+
+  try {
+    const geofence = await findGeofenceByProjectId(projectId);
+    if (!geofence) {
+      sendErrorResponse(response, 404, 'Dự án chưa có geofence.', 'NOT_FOUND');
+      return;
+    }
+    sendSuccessResponse(response, 200, 'Lấy geofence thành công.', geofence);
+  } catch (error) {
+    logger.error('Lấy geofence thất bại.', { projectId, errorMessage: (error as Error)?.message });
+    sendErrorFromUnknown(response, error, 'Không thể lấy dữ liệu geofence.');
+  }
+}
+
+/**
+ * POST /api/oracle/geofence/:projectId
+ * Tạo hoặc cập nhật geofence của dự án (upsert).
+ * Dùng cho B5 GeofenceEditor (tổ chức vẽ polygon).
+ *
+ * Body: { polygon: [{lat, lng}, ...], radiusMeters: number }
+ */
+export async function handleUpsertGeofence(
+  request: AuthenticatedRequest,
+  response: Response
+): Promise<void> {
+  if (!request.authenticatedUser) {
+    sendErrorResponse(response, 401, 'Bạn chưa đăng nhập.', 'UNAUTHENTICATED');
+    return;
+  }
+
+  const { projectId } = request.params;
+  if (!projectId?.trim()) {
+    sendErrorResponse(response, 400, 'Thiếu projectId.', 'VALIDATION_ERROR');
+    return;
+  }
+
+  const { polygon, radiusMeters } = request.body as {
+    polygon?: Array<{ lat: number; lng: number }>;
+    radiusMeters?: number;
+  };
+
+  if (!Array.isArray(polygon) || polygon.length < 3) {
+    sendErrorResponse(response, 400, 'Polygon phải có ít nhất 3 điểm.', 'VALIDATION_ERROR');
+    return;
+  }
+
+  const invalidPoint = polygon.find(
+    p => typeof p.lat !== 'number' || typeof p.lng !== 'number' ||
+         p.lat < -90 || p.lat > 90 || p.lng < -180 || p.lng > 180
+  );
+  if (invalidPoint) {
+    sendErrorResponse(response, 400, 'Tọa độ polygon không hợp lệ.', 'VALIDATION_ERROR');
+    return;
+  }
+
+  const radius = typeof radiusMeters === 'number' ? radiusMeters : 500;
+  if (radius < 100 || radius > 2000) {
+    sendErrorResponse(response, 400, 'radiusMeters phải trong khoảng 100-2000.', 'VALIDATION_ERROR');
+    return;
+  }
+
+  try {
+    // [B1] Kiểm tra quyền sở hữu: chỉ tổ chức sở hữu project mới được cập nhật geofence
+    const project = await findProjectById(projectId);
+    if (!project) {
+      sendErrorResponse(response, 404, 'Dự án không tồn tại.', 'NOT_FOUND');
+      return;
+    }
+    if (project.organizationId !== request.authenticatedUser.userId) {
+      sendErrorResponse(response, 403, 'Bạn không có quyền chỉnh sửa geofence của dự án này.', 'FORBIDDEN');
+      return;
+    }
+
+    const geofence = await upsertProjectGeofence(projectId, polygon, radius);
+    sendSuccessResponse(response, 200, 'Cập nhật geofence thành công.', geofence);
+  } catch (error) {
+    logger.error('Upsert geofence thất bại.', { projectId, errorMessage: (error as Error)?.message });
+    sendErrorFromUnknown(response, error, 'Không thể cập nhật geofence.');
+  }
+}
+
+/**
+ * GET /api/oracle/pending-overrides
+ * Lấy danh sách override request đang PENDING (dùng cho B4 Admin UI).
+ */
+export async function handleGetPendingOverrides(
+  request: AuthenticatedRequest,
+  response: Response
+): Promise<void> {
+  if (!request.authenticatedUser) {
+    sendErrorResponse(response, 401, 'Bạn chưa đăng nhập.', 'UNAUTHENTICATED');
+    return;
+  }
+
+  const limitRaw = request.query['limit'];
+  const skipRaw = request.query['skip'];
+  const limit = typeof limitRaw === 'string' ? Math.min(parseInt(limitRaw, 10) || 20, 100) : 20;
+  const skip = typeof skipRaw === 'string' ? parseInt(skipRaw, 10) || 0 : 0;
+
+  try {
+    const [items, total] = await Promise.all([
+      findPendingOverrideRequests(limit, skip),
+      countPendingOverrideRequests()
+    ]);
+
+    sendSuccessResponse(response, 200, 'Lấy danh sách override request thành công.', {
+      items,
+      total,
+      limit,
+      skip
+    });
+  } catch (error) {
+    logger.error('Lấy pending overrides thất bại.', { errorMessage: (error as Error)?.message });
+    sendErrorFromUnknown(response, error, 'Không thể lấy danh sách override request.');
+  }
+}

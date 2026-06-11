@@ -144,6 +144,36 @@ type LogMetadata = {
   idempotencyKey?: string;
   finalTransferId?: string;
   bankCode?: string;
+  // Oracle AI (B1) — EXIF GPS verification
+  evidenceCid?: string;
+  verificationId?: string;
+  overrideRequestId?: string;
+  queueJobId?: string | number;
+  distanceMeters?: string | number;
+  radiusMeters?: number;
+  isValid?: boolean | null;
+  fileSizeBytes?: number;
+  totalFiles?: number;
+  enqueuedCount?: number;
+  attemptsMade?: number;
+  isInRadius?: boolean;
+  gpsFoundInImage?: boolean;
+  // upload-validation.middleware.ts
+  fileName?: string;
+  originalName?: string;
+  fieldName?: string;
+  declaredMimeType?: string;
+  detectedMimeType?: string;
+  detectedExtension?: string;
+  actualSize?: string | number;
+  sizeLimit?: string | number;
+  fileSize?: string | number;
+  size?: string | number;
+  failedCount?: number;
+  failedFiles?: string[];
+  types?: string | string[];
+  rowCount?: number;
+  maxRows?: number;
 };
 
 

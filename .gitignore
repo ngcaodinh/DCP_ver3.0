@@ -10,6 +10,8 @@ node_modules/
 .env
 .env.*
 !.env.example
+!.env.sample
+!.env.template
 
 # Logs
 *.log
@@ -27,6 +29,9 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+
+# Cấu hình Claude Code cá nhân
+.claude/settings.local.json
 
 # =========================
 # FE (Next.js)
