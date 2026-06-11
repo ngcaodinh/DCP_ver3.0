@@ -9,6 +9,8 @@ import { startDonationReconciliationWorker } from './workers/donationReconciliat
 import { startDisbursementTransferStatusSweepPolling } from './services/disbursementService';
 import { startPayosTransferWorker } from './workers/payosTransferWorker';
 import { initializeNotificationBridge } from './services/notificationBridge.service';
+import { initSocketServer, shutdownSocketServer } from './config/socketServer';
+import { startManualReviewEscalationWorker, stopManualReviewEscalationWorker } from './workers/manualReviewEscalationWorker';
 
 const serverPort = Number(process.env.PORT) || 4000;
 
@@ -33,6 +35,8 @@ function startBackgroundWorkers(): void {
   startDisbursementTransferStatusSweepPolling();
   // PayOS Transfer Worker: xử lý disbursement transfer với Bull queue
   startPayosTransferWorker();
+  // Manual Review Escalation Worker: cảnh báo admin khi disbursement MANUAL_REVIEW quá hạn SLA
+  startManualReviewEscalationWorker();
 }
 
 /**
@@ -50,9 +54,17 @@ async function startServer(): Promise<void> {
   // Khoi dong notification bridge de lang nghe webhook events
   initializeNotificationBridge();
 
-  application.listen(serverPort, () => {
+  // Capture HTTP server để Socket.io attach vào cùng port (không mở port riêng)
+  const httpServer = application.listen(serverPort, () => {
     console.log(`Server running on port ${serverPort}`);
   });
+
+  // Khởi tạo Socket.io sau khi HTTP server sẵn sàng
+  initSocketServer(httpServer);
+
+  // Graceful shutdown: đóng Socket.io và dừng workers trước khi process tắt
+  process.once('SIGTERM', () => { shutdownSocketServer(); stopManualReviewEscalationWorker(); });
+  process.once('SIGINT', () => { shutdownSocketServer(); stopManualReviewEscalationWorker(); });
 }
 
 startServer().catch((error: Error) => {
