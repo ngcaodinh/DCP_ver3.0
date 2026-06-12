@@ -19,6 +19,8 @@ import {
   formatTransactionHash,
   mapDonationErrorMessage,
   mapTransactionStatusToVietnamese,
+  mapGuestTransactionStatusToVietnamese,
+  resolveGuestDisplayStatusRaw,
   isCampaignBeforeDeadline,
 } from './DonationModal.helpers';
 import type {
@@ -68,6 +70,7 @@ export default function DonationModal({ campaignItem, onClose, onDonationSuccess
   // ============================================================
   const {
     initState,
+    donationState,
     bootstrapGuestWallet,
   } = useGuestWallet();
 
@@ -379,14 +382,16 @@ export default function DonationModal({ campaignItem, onClose, onDonationSuccess
       <GuestReadyView
       campaignItem={campaignItem}
       initState={initState}
+      donationState={donationState}
+      isGuestDonationInProgress={!['IDLE', 'SUCCESS', 'FAILED'].includes(donationState.donationStatus)}
+      guestDonationSuccess={donationState.donationStatus === 'SUCCESS'}
+      guestDisplayStatusValue={resolveGuestDisplayStatusRaw(donationState.donationStatus)}
       donationAmountInput={donationAmountInput}
       setDonationAmountInput={setDonationAmountInput}
       isSubmitting={isSubmitting}
       isConfirmModalOpen={isConfirmModalOpen}
       pendingDonationAmount={pendingDonationAmount}
       statusMessage={statusMessage}
-      successNoticeMessage={successNoticeMessage}
-      isSuccessNoticeVisible={isSuccessNoticeVisible}
       onOpenConfirmModal={() => handleOpenConfirmModal(MIN_AMOUNT_PER_DONATION, MAX_AMOUNT_PER_DONATION)}
       onCloseConfirmModal={handleCloseConfirmModal}
       onGuestSubmit={handleGuestDonationSubmit}
