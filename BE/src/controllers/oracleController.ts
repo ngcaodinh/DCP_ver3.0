@@ -69,6 +69,17 @@ export async function handleVerifyImage(
   }
 
   try {
+    // [B1-fix #2] Kiểm tra quyền sở hữu: chỉ tổ chức sở hữu project mới được verify ảnh — ngăn IDOR
+    const project = await findProjectById(projectId);
+    if (!project) {
+      sendErrorResponse(response, 404, 'Dự án không tồn tại.', 'NOT_FOUND');
+      return;
+    }
+    if (project.organizationId !== request.authenticatedUser.userId) {
+      sendErrorResponse(response, 403, 'Bạn không có quyền xác minh ảnh cho dự án này.', 'FORBIDDEN');
+      return;
+    }
+
     const result = await verifyEvidenceImage(
       file.buffer,
       projectId,
@@ -163,6 +174,17 @@ export async function handleVerifyImageBatch(
     return;
   }
 
+  // [B1-fix #2] Kiểm tra quyền sở hữu một lần cho cả batch — ngăn IDOR
+  const project = await findProjectById(projectId);
+  if (!project) {
+    sendErrorResponse(response, 404, 'Dự án không tồn tại.', 'NOT_FOUND');
+    return;
+  }
+  if (project.organizationId !== request.authenticatedUser.userId) {
+    sendErrorResponse(response, 403, 'Bạn không có quyền xác minh ảnh cho dự án này.', 'FORBIDDEN');
+    return;
+  }
+
   const jobIds: Array<{ fileName: string; evidenceCid: string; jobId: string | number | undefined; enqueued: boolean }> = [];
 
   for (let i = 0; i < files.length; i++) {
@@ -170,12 +192,12 @@ export async function handleVerifyImageBatch(
     const evidenceCid = evidenceCids[i];
     if (!file || !evidenceCid) continue;
 
+    // [B1-fix #1] Chỉ lưu CID vào job — worker tự fetch buffer từ IPFS thay vì nhét base64 vào Redis
     const jobData: OracleVerificationJobData = {
       jobId: randomUUID(),
       projectId,
       organizationId: request.authenticatedUser.userId,
       evidenceCid,
-      imageBufferBase64: file.buffer.toString('base64'),
       fileSizeBytes: file.size
     };
 

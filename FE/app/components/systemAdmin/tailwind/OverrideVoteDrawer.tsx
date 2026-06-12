@@ -12,6 +12,8 @@ import { buildApiUrl, fetchApi } from '@/app/utils/apiClient';
 import { readAuthSession } from '@/app/utils/authSession';
 import { formatVietnameseDateTime } from './helpers';
 import type { ToastItem } from './types';
+import { GeofenceMapLazy } from '@/app/components/oracle/GeofenceMapLazy';
+import type { GeofenceMarker } from '@/app/components/oracle/GeofenceMap';
 
 // =============================================================================
 // TYPES
@@ -86,6 +88,22 @@ function mapRoleToLabel(role: string): string {
   if (role === 'admin') return 'Quản trị viên';
   if (role === 'regulatory') return 'Cơ quan giám sát';
   return role;
+}
+
+/** Chuyển override request thành danh sách markers cho GeofenceMap. */
+function buildMarkersFromItem(item: PendingOverrideItem): GeofenceMarker[] {
+  if (!item.gpsFromImage) return [];
+  const status = item.reason === 'OUT_OF_GEOFENCE' ? 'INVALID' : 'NO_GPS';
+  return [{
+    lat: item.gpsFromImage.lat,
+    lng: item.gpsFromImage.lng,
+    status,
+    label: item.evidenceCid ? `CID: ${item.evidenceCid.slice(0, 20)}…` : undefined,
+    // TODO: truyền distanceMeters: item.distanceMeters ?? undefined và timestamp: item.createdAt
+    // sau khi GeofenceMarker type được mở rộng để hỗ trợ Popup enhancements
+    // TODO: truyền thumbnailUrl: `${process.env.NEXT_PUBLIC_IPFS_GATEWAY_URL}/${item.evidenceCid}`
+    // sau khi NEXT_PUBLIC_IPFS_GATEWAY_URL được thêm vào .env.example và FE env
+  }];
 }
 
 // =============================================================================
@@ -424,6 +442,15 @@ function DetailView({
         <div className="rounded-lg border border-orange-200 bg-orange-50 px-3 py-2">
           <p className="text-xs font-medium text-orange-700">Lý do cảnh báo: {mapReasonToText(item.reason)}</p>
         </div>
+
+        {/* Geofence map — hiển thị vùng + GPS ảnh để commissioner đánh giá trực quan */}
+        {item.reason !== 'NO_GEOFENCE' && (
+          <GeofenceMapLazy
+            projectId={item.projectId}
+            markers={buildMarkersFromItem(item)}
+            className="mt-1"
+          />
+        )}
       </section>
 
       {/* Vote progress */}

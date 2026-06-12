@@ -78,6 +78,11 @@ describe('LoginPage redirect behavior', () => {
 
     render(<LoginPage />);
 
+    // Chờ LoginContent mount xong sau Suspense boundary trước khi đọc mock calls
+    await waitFor(() => {
+      expect(mockGoogleAccounts.initialize).toHaveBeenCalled();
+    });
+
     const initializeOptions = mockGoogleAccounts.initialize.mock.calls.at(-1)?.[0] as
       | { callback?: (response: { credential?: string }) => void }
       | undefined;

@@ -106,7 +106,7 @@ export function useTransferSocket({ onEvent, onConnectionChange }: UseTransferSo
       socket.disconnect();
       socketRef.current = null;
     };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps — chỉ mount một lần
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps -- chỉ mount một lần
 
   return { isConnected, isUsingFallback };
 }

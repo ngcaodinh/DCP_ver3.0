@@ -15,6 +15,22 @@ import {
 
 const logger = getLogger();
 const ORACLE_WORKER_CONCURRENCY = 3; // Tránh overload CPU khi parse EXIF đồng thời
+const IPFS_FETCH_TIMEOUT_MS = 30_000;
+
+/**
+ * Fetch buffer ảnh từ IPFS gateway dùng CID.
+ * Dùng env IPFS_GATEWAY_URL (mặc định: https://ipfs.io/ipfs) để tránh nhét buffer vào Redis job.
+ */
+async function fetchBufferFromIpfs(cid: string): Promise<Buffer> {
+  const gateway = (process.env.IPFS_GATEWAY_URL ?? 'https://ipfs.io/ipfs').replace(/\/$/, '');
+  const url = `${gateway}/${cid}`;
+
+  const response = await fetch(url, { signal: AbortSignal.timeout(IPFS_FETCH_TIMEOUT_MS) });
+  if (!response.ok) {
+    throw new Error(`IPFS fetch thất bại: ${response.status} ${response.statusText} (CID: ${cid})`);
+  }
+  return Buffer.from(await response.arrayBuffer());
+}
 
 /**
  * Processor xử lý job xác minh ảnh minh chứng.
@@ -24,7 +40,7 @@ const ORACLE_WORKER_CONCURRENCY = 3; // Tránh overload CPU khi parse EXIF đồ
 export async function processOracleVerificationJob(
   job: Job<OracleVerificationJobData>
 ): Promise<OracleVerificationJobResult> {
-  const { jobId, projectId, organizationId, evidenceCid, imageBufferBase64, fileSizeBytes, disbursementRequestId } = job.data;
+  const { jobId, projectId, organizationId, evidenceCid, fileSizeBytes, disbursementRequestId } = job.data;
 
   logger.info('Oracle verification job bắt đầu.', {
     queueJobId: job.id,
@@ -35,14 +51,14 @@ export async function processOracleVerificationJob(
     attemptsMade: job.attemptsMade
   });
 
-  // Validate kích thước buffer trước khi decode — tránh allocate memory lớn nếu job data bị tamper
+  // Pre-flight size check dùng metadata đã lưu — tránh fetch ảnh quá lớn từ IPFS
   if (fileSizeBytes > ORACLE_MAX_FILE_SIZE) {
     throw new Error(
-      `Buffer size ${fileSizeBytes} vượt giới hạn ${ORACLE_MAX_FILE_SIZE} bytes. Job bị reject.`
+      `File size ${fileSizeBytes} vượt giới hạn ${ORACLE_MAX_FILE_SIZE} bytes. Job bị reject.`
     );
   }
 
-  const imageBuffer = Buffer.from(imageBufferBase64, 'base64');
+  const imageBuffer = await fetchBufferFromIpfs(evidenceCid);
 
   const result = await verifyEvidenceImage(
     imageBuffer, projectId, organizationId, evidenceCid,
@@ -112,7 +128,6 @@ export function startOracleWorker(): void {
         projectId: payload.projectId,
         organizationId: payload.organizationId,
         evidenceCid: payload.evidenceCid,
-        imageBufferBase64: payload.imageBufferBase64,
         fileSizeBytes: payload.fileSizeBytes,
         disbursementRequestId: payload.disbursementRequestId ?? null
       };
