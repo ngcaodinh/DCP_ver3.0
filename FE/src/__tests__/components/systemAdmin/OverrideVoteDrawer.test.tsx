@@ -20,6 +20,13 @@ vi.mock('@/app/utils/authSession', () => ({
   readAuthSession: vi.fn(),
 }));
 
+// GeofenceMapLazy dùng next/dynamic — trong Vitest/jsdom không lazy-load,
+// render thẳng GeofenceMap → useGeofence → cần QueryClientProvider.
+// Mock để tránh dependency phức tạp trong unit test của OverrideVoteDrawer.
+vi.mock('@/app/components/oracle/GeofenceMapLazy', () => ({
+  GeofenceMapLazy: () => <div data-testid="geofence-map-mock" />,
+}));
+
 import { fetchApi } from '@/app/utils/apiClient';
 import { readAuthSession } from '@/app/utils/authSession';
 import OverrideVoteDrawer from '@/app/components/systemAdmin/tailwind/OverrideVoteDrawer';
