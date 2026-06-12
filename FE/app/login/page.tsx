@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { persistAuthSession } from '../utils/authSession';
 
@@ -65,11 +65,6 @@ const HoneycombOverlay = () => (
 );
 
 
-/**
- * Hàm trang đăng nhập.
- * Mục đích: hiển thị giao diện đăng nhập theo mẫu DCP.
- */
-
 /** Hàm chuẩn hóa role để mapping điều hướng ổn định giữa dữ liệu role mới và legacy. */
 function normalizeUserRole(userRoleValue: string | undefined | null): string {
   if (!userRoleValue) {
@@ -127,7 +122,8 @@ function resolveSafeReturnToPath(returnToValue: string | null): string | null {
   return returnToValue;
 }
 
-export default function LoginPage() {
+// useSearchParams() phải nằm trong Suspense boundary — Next.js 14 yêu cầu khi dùng App Router
+function LoginContent() {
   const [isInfoCollapsed, setIsInfoCollapsed] = useState(false);
   const [isProgressLoading, setIsProgressLoading] = useState(false);
   const [isSuccessVisible, setIsSuccessVisible] = useState(false);
@@ -527,6 +523,18 @@ export default function LoginPage() {
         }
       `}</style>
     </main>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense fallback={
+      <main className="grid min-h-screen place-items-center bg-[#f8fafb]">
+        <div className="h-8 w-8 animate-spin rounded-full border-4 border-[#0e7c6b] border-t-transparent" />
+      </main>
+    }>
+      <LoginContent />
+    </Suspense>
   );
 }
 
