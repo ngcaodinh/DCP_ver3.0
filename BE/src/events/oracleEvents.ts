@@ -59,7 +59,9 @@ export type OverrideRequestedEventPayload = {
 };
 
 /**
- * Payload cho override.executed — phát ra khi tất cả commissioner trong snapshot vote APPROVE.
+ * Payload cho override.executed — phát ra khi override request được resolve (APPROVED hoặc REJECTED).
+ * APPROVED: toàn bộ N/N commissioner vote APPROVE.
+ * REJECTED: bất kỳ commissioner nào vote REJECT (kết thúc ngay lập tức).
  * TODO: Cần oracle smart contract để emit OverrideExecuted event on-chain (nằm ngoài scope B2).
  */
 export type OverrideExecutedEventPayload = {
@@ -70,4 +72,5 @@ export type OverrideExecutedEventPayload = {
   disbursementRequestId: string | null;  // null nếu không link disbursement
   totalVoters: number;
   executedAt: Date;
+  status: 'APPROVED' | 'REJECTED';  // kết quả cuối — để FE/socket forward đúng status
 };

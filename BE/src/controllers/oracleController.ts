@@ -346,6 +346,10 @@ export async function handleVoteOverrideRequest(
     sendErrorResponse(response, 400, 'Thiếu lý do vote (reason).', 'VALIDATION_ERROR');
     return;
   }
+  if (reason.trim().length < 10) {
+    sendErrorResponse(response, 400, 'Lý do vote phải tối thiểu 10 ký tự.', 'VALIDATION_ERROR');
+    return;
+  }
 
   const { userId, role } = request.authenticatedUser;
 
