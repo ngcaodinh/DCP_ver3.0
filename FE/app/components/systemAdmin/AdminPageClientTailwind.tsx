@@ -16,12 +16,14 @@ import UrgentTable from './tailwind/UrgentTable';
 import DisbursementStatusCard from './tailwind/DisbursementStatusCard';
 import AuditTable from './tailwind/AuditTable';
 import RequestDrawer from './tailwind/RequestDrawer';
+import OverrideVoteDrawer from './tailwind/OverrideVoteDrawer';
 import ToastStack from './tailwind/ToastStack';
 import NonDashboardPanel from './tailwind/NonDashboardPanel';
 import { getNavigationItems } from './tailwind/data';
 import { readAuthSession, clearAuthSession } from '@/app/utils/authSession';
 import { fetchApi, buildApiUrl } from '@/app/utils/apiClient';
 import { getPageTitle } from './tailwind/helpers';
+import { useOverrideSocket } from '@/app/hooks/useOverrideSocket';
 import type { PageKey, ToastItem, UrgentRequestItem, DrawerTabKey } from './tailwind/types';
 import type { AuditLogItem } from './tailwind/types';
 
@@ -83,9 +85,14 @@ export default function AdminPageClientTailwind() {
   // Toast notifications
   const [toasts, setToasts] = useState<ToastItem[]>([]);
 
-  // Drawer state
+  // Disbursement drawer state
   const [selectedUrgentRequestItem, setSelectedUrgentRequestItem] = useState<UrgentRequestItem | null>(null);
   const [drawerTabKey, setDrawerTabKey] = useState<DrawerTabKey>('overview');
+
+  // Override vote drawer state (B4)
+  const [isOverrideDrawerOpen, setIsOverrideDrawerOpen] = useState(false);
+  const [overrideDrawerInitialId, setOverrideDrawerInitialId] = useState<string | null>(null);
+  const [pendingOverridesCount, setPendingOverridesCount] = useState(0);
 
   // Dashboard real API state
   const [dashboardMetrics, setDashboardMetrics] = useState<MetricCardData[]>([]);
@@ -103,6 +110,8 @@ export default function AdminPageClientTailwind() {
   const [userDisplayName, setUserDisplayName] = useState('Quản trị viên');
   const [userEmail, setUserEmail] = useState('');
   const [userWalletAddress, setUserWalletAddress] = useState('');
+  const [currentUserId, setCurrentUserId] = useState('');
+  const [currentUserRole, setCurrentUserRole] = useState('');
 
   const router = useRouter();
 
@@ -126,10 +135,12 @@ export default function AdminPageClientTailwind() {
         return;
       }
 
-      // Lưu thông tin user từ session để hiển thị trên Topbar
+      // Lưu thông tin user từ session để hiển thị trên Topbar và truyền cho OverrideVoteDrawer
       setUserDisplayName(session.userFullName || 'Quản trị viên');
       setUserEmail(session.userEmail || '');
       setUserWalletAddress(session.userWalletAddress || '');
+      setCurrentUserId(session.userId || '');
+      setCurrentUserRole(session.userRole || '');
 
       setAuthVerified(true);
       setAuthLoading(false);
@@ -304,6 +315,31 @@ export default function AdminPageClientTailwind() {
   }, []);
 
   // =============================================================================
+  // OVERRIDE SOCKET (B4) — lắng nghe override:new, gọi sau khi addToast đã được định nghĩa
+  // =============================================================================
+
+  useOverrideSocket({
+    onEvent: useCallback((event) => {
+      if (event.type === 'override:new') {
+        // '__poll__' là polling signal từ fallback interval — không mở drawer
+        if (event.overrideRequestId === '__poll__') return;
+        // Không increment thủ công — count sẽ được đồng bộ từ API khi drawer mở và gọi loadItems()
+        // Tránh double-count khi socket reconnect phát lại event
+        setOverrideDrawerInitialId(event.overrideRequestId);
+        setIsOverrideDrawerOpen(true);
+        addToast({
+          titleText: 'Yêu cầu ghi đè GPS mới',
+          bodyText: `Dự án ${event.projectId} cần biểu quyết.`,
+          tone: 'info'
+        });
+      } else if (event.type === 'override:resolved') {
+        // Decrement optimistic — loadItems() sẽ đồng bộ lại khi drawer refresh tiếp theo
+        setPendingOverridesCount((prev) => Math.max(0, prev - 1));
+      }
+    }, [addToast])
+  });
+
+  // =============================================================================
   // DRAWER HANDLERS
   // =============================================================================
 
@@ -469,12 +505,34 @@ export default function AdminPageClientTailwind() {
           />
 
           <div className="space-y-5 p-4 lg:p-7">
-            <div>
-              <h1 className="text-2xl font-bold text-slate-900">{getPageTitle(activePage)}</h1>
-              <p className="mt-1 text-xs text-slate-500">từng quan h? th?ng</p>
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h1 className="text-2xl font-bold text-slate-900">{getPageTitle(activePage)}</h1>
+                <p className="mt-1 text-xs text-slate-500">Tổng quan hệ thống</p>
+              </div>
+              {/* B4: Nút mở Override Vote Drawer — hiển thị badge số yêu cầu đang chờ */}
+              <button
+                type="button"
+                onClick={() => {
+                  setOverrideDrawerInitialId(null);
+                  setIsOverrideDrawerOpen(true);
+                }}
+                className="relative shrink-0 flex items-center gap-2 rounded-lg border border-orange-200 bg-orange-50 px-3 py-2 text-xs font-semibold text-orange-700 transition hover:bg-orange-100"
+              >
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M15 10.5a3 3 0 11-6 0 3 3 0 016 0z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z" />
+                </svg>
+                Ghi đè GPS
+                {pendingOverridesCount > 0 && (
+                  <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-orange-500 px-1 text-[10px] font-bold text-white">
+                    {pendingOverridesCount}
+                  </span>
+                )}
+              </button>
             </div>
 
-            {/* Metric cards — từ API th?t */}
+            {/* Metric cards — từ API thật */}
             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
               {dashboardLoading ? (
                 Array.from({ length: 4 }).map((_, idx) => (
@@ -550,6 +608,17 @@ export default function AdminPageClientTailwind() {
           />
         )}
 
+        {/* B4: Override Vote Drawer */}
+        <OverrideVoteDrawer
+          isOpen={isOverrideDrawerOpen}
+          onClose={() => setIsOverrideDrawerOpen(false)}
+          initialRequestId={overrideDrawerInitialId}
+          currentUserId={currentUserId}
+          currentUserRole={currentUserRole}
+          onToast={addToast}
+          onItemsCountChange={setPendingOverridesCount}
+        />
+
         <ToastStack toastItemList={toasts} onCloseToast={removeToast} />
       </main>
     );
@@ -606,6 +675,17 @@ export default function AdminPageClientTailwind() {
           onReject={handleRejectFromDrawer}
         />
       )}
+
+      {/* B4: Override Vote Drawer — render ở global scope để không unmount khi đổi page */}
+      <OverrideVoteDrawer
+        isOpen={isOverrideDrawerOpen}
+        onClose={() => setIsOverrideDrawerOpen(false)}
+        initialRequestId={overrideDrawerInitialId}
+        currentUserId={currentUserId}
+        currentUserRole={currentUserRole}
+        onToast={addToast}
+        onItemsCountChange={setPendingOverridesCount}
+      />
 
       <ToastStack toastItemList={toasts} onCloseToast={removeToast} />
     </main>

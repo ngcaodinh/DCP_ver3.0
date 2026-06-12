@@ -170,6 +170,17 @@ async function evaluateVoteOutcome(
     const resolved = await resolveOverrideRequest(request.overrideRequestId, 'REJECTED', new Date());
     if (resolved) {
       await notifyOrganizationOverrideResult(resolved, false);
+      // Emit để socket bridge thông báo commissioner request đã bị từ chối
+      oracleEvents.emit('override.executed', {
+        overrideRequestId: resolved.overrideRequestId,
+        projectId: resolved.projectId,
+        organizationId: resolved.organizationId,
+        evidenceCid: resolved.evidenceCid,
+        disbursementRequestId: resolved.disbursementRequestId,
+        totalVoters,
+        executedAt: new Date(),
+        status: 'REJECTED'
+      } satisfies OverrideExecutedEventPayload);
     }
     logger.info('Override request bị REJECTED.', {
       overrideRequestId: request.overrideRequestId,
@@ -201,7 +212,8 @@ async function evaluateVoteOutcome(
       evidenceCid: resolved.evidenceCid,
       disbursementRequestId: resolved.disbursementRequestId,
       totalVoters,
-      executedAt: new Date()
+      executedAt: new Date(),
+      status: 'APPROVED'
     } satisfies OverrideExecutedEventPayload);
 
     await notifyOrganizationOverrideResult(resolved, true);

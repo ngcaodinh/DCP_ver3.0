@@ -4,6 +4,8 @@ import jwt from 'jsonwebtoken';
 import { getJsonWebTokenSecret, getJsonWebTokenConfig } from './jsonWebToken';
 import { getLogger } from './logger';
 import { webhookEvents } from '../events/webhookEvents';
+import { oracleEvents } from '../events/oracleEvents';
+import type { OverrideRequestedEventPayload, OverrideExecutedEventPayload } from '../events/oracleEvents';
 import { findDisbursementsInManualReview } from '../models/disbursementModel';
 
 const logger = getLogger();
@@ -14,6 +16,10 @@ let io: SocketIOServer | null = null;
 // Theo dõi các requestId đã biết để phát hiện item mới
 let knownManualReviewIds = new Set<string>();
 let pollingIntervalId: ReturnType<typeof setInterval> | null = null;
+
+// Lưu reference listener để có thể removeListener khi hot-reload tránh tích lũy
+let _overrideRequestedListener: ((p: OverrideRequestedEventPayload) => void) | null = null;
+let _overrideExecutedListener: ((p: OverrideExecutedEventPayload) => void) | null = null;
 
 /**
  * Khởi tạo Socket.io server gắn vào HTTP server.
@@ -40,7 +46,8 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
         issuer: cfg.issuer,
         audience: cfg.audience
       }) as JwtClaims;
-      if (payload.role !== 'admin') return next(new Error('FORBIDDEN'));
+      // Cho phép cả admin và regulatory kết nối — cả hai đều là commissioner có thể vote override
+      if (payload.role !== 'admin' && payload.role !== 'regulatory') return next(new Error('FORBIDDEN'));
       socket.data.userId = payload.userId;
       socket.data.role = payload.role;
       next();
@@ -50,13 +57,18 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
   });
 
   io.on('connection', (socket) => {
-    void socket.join('admin');
-    logger.info('Admin connected via Socket.io.', {
-      userId: socket.data.userId as string
+    const role = socket.data.role as string;
+    // Admin tham gia cả 'admin' room (nhận transfer alerts) và 'commissioners' (nhận override alerts)
+    // Regulatory chỉ tham gia 'commissioners' — không cần transfer alerts
+    if (role === 'admin') void socket.join('admin');
+    void socket.join('commissioners');
+    logger.info('User connected via Socket.io.', {
+      userId: socket.data.userId as string,
+      context: { role }
     });
     socket.on('disconnect', (reason) => {
-      logger.info('Admin disconnected from Socket.io.', {
-        reason
+      logger.info('User disconnected from Socket.io.', {
+        context: { reason, role }
       });
     });
   });
@@ -70,6 +82,31 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
       timestamp: new Date().toISOString()
     });
   });
+
+  // Bridge 2b: oracleEvents → socket (override vote notifications cho commissioners)
+  // Xoá listener cũ trước khi đăng ký mới — tránh tích lũy khi initSocketServer bị gọi lại (hot-reload)
+  if (_overrideRequestedListener) oracleEvents.removeListener('override.requested', _overrideRequestedListener);
+  if (_overrideExecutedListener) oracleEvents.removeListener('override.executed', _overrideExecutedListener);
+
+  _overrideRequestedListener = (payload: OverrideRequestedEventPayload) => {
+    io?.to('commissioners').emit('override:new', {
+      overrideRequestId: payload.overrideRequestId,
+      projectId: payload.projectId,
+      reason: payload.reason,
+      timestamp: new Date().toISOString()
+    });
+  };
+
+  _overrideExecutedListener = (payload: OverrideExecutedEventPayload) => {
+    io?.to('commissioners').emit('override:resolved', {
+      overrideRequestId: payload.overrideRequestId,
+      status: payload.status,  // APPROVED hoặc REJECTED — không hardcode
+      timestamp: new Date().toISOString()
+    });
+  };
+
+  oracleEvents.on('override.requested', _overrideRequestedListener);
+  oracleEvents.on('override.executed', _overrideExecutedListener);
 
   // Bridge 2: polling 15s — bắt trường hợp worker set MANUAL_REVIEW không qua webhook
   startManualReviewPollingBridge();
@@ -88,6 +125,14 @@ export function shutdownSocketServer(): void {
   if (pollingIntervalId) {
     clearInterval(pollingIntervalId);
     pollingIntervalId = null;
+  }
+  if (_overrideRequestedListener) {
+    oracleEvents.removeListener('override.requested', _overrideRequestedListener);
+    _overrideRequestedListener = null;
+  }
+  if (_overrideExecutedListener) {
+    oracleEvents.removeListener('override.executed', _overrideExecutedListener);
+    _overrideExecutedListener = null;
   }
   io?.close();
   io = null;

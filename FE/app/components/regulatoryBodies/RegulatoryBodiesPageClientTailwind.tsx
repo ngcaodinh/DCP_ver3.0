@@ -16,6 +16,9 @@ import ToastStack from './tailwind/ToastStack';
 import Topbar from './tailwind/Topbar';
 import type { AuditLogItem, DrawerTabKey, PageKey, ToastItem, UrgentRequestItem } from './tailwind/types';
 import UrgentTable from './tailwind/UrgentTable';
+import OverrideVoteDrawer from '../systemAdmin/tailwind/OverrideVoteDrawer';
+import { useOverrideSocket } from '@/app/hooks/useOverrideSocket';
+import type { OverrideSocketEvent } from '@/app/hooks/useOverrideSocket';
 
 type DashboardMetricItem = {
   valueText: string;
@@ -241,6 +244,12 @@ export default function RegulatoryBodiesPageClientTailwind() {
   const [disbursementSummaryItemList, setDisbursementSummaryItemList] = useState<DisbursementSummaryItem[]>([]);
   const [auditLogItemList, setAuditLogItemList] = useState<AuditLogItem[]>([]);
 
+  // Override vote drawer state (B4)
+  const [isOverrideDrawerOpen, setIsOverrideDrawerOpen] = useState(false);
+  const [overrideDrawerInitialId, setOverrideDrawerInitialId] = useState<string | null>(null);
+  const [pendingOverridesCount, setPendingOverridesCount] = useState(0);
+  const [currentUserId, setCurrentUserId] = useState('');
+
   const metricItemList = useMemo(
     () => buildMetricItemList(disbursementSummaryItemList),
     [disbursementSummaryItemList]
@@ -289,6 +298,23 @@ export default function RegulatoryBodiesPageClientTailwind() {
     }, 3000);
   }
 
+  /** Override socket — regulatory commissioner nhận event ghi đè GPS realtime (B4). */
+  const handleOverrideEvent = useCallback((event: OverrideSocketEvent) => {
+    if (event.type === 'override:new') {
+      // '__poll__' là signal từ polling fallback khi socket ngắt — không mở drawer, chỉ để hook biết refresh
+      if (event.overrideRequestId === '__poll__') return;
+      setOverrideDrawerInitialId(event.overrideRequestId);
+      setIsOverrideDrawerOpen(true);
+      pushToast('Yêu cầu ghi đè GPS mới', `Dự án ${event.projectId} cần biểu quyết.`, 'info');
+    } else if (event.type === 'override:resolved') {
+      // Decrement optimistic — loadItems() đồng bộ lại khi drawer refresh tiếp theo
+      setPendingOverridesCount((prev) => Math.max(0, prev - 1));
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // Deps rỗng an toàn: pushToast và setters chỉ dùng setToastItemList (stable); onEventRef pattern trong hook cập nhật callback mới nhất
+
+  useOverrideSocket({ onEvent: handleOverrideEvent });
+
   /** Hàm kiểm tra quyền truy cập regulatory kết hợp xác thực server để chống bypass role ở client. */
   const verifyRegulatoryAccess = useCallback(async () => {
     const sessionPayload = readAuthSession();
@@ -301,6 +327,7 @@ export default function RegulatoryBodiesPageClientTailwind() {
     setUserDisplayName(sessionPayload.userFullName || 'Người dùng');
     setUserEmail(sessionPayload.userEmail || '');
     setUserWalletAddress(sessionPayload.userWalletAddress || '');
+    setCurrentUserId(sessionPayload.userId || '');
 
     if (sessionPayload.userRole && !isRegulatoryRole(sessionPayload.userRole)) {
       clearAuthSession();
@@ -548,9 +575,31 @@ export default function RegulatoryBodiesPageClientTailwind() {
         />
 
         <div className="space-y-5 p-4 lg:p-7">
-          <div>
-            <h1 className="text-2xl font-bold">{getPageTitle(selectedPageKey)}</h1>
-            <p className="mt-1 text-xs text-slate-500">Cập nhật lúc {new Date().toLocaleString('vi-VN')}</p>
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h1 className="text-2xl font-bold">{getPageTitle(selectedPageKey)}</h1>
+              <p className="mt-1 text-xs text-slate-500">Cập nhật lúc {new Date().toLocaleString('vi-VN')}</p>
+            </div>
+            {/* B4: Nút mở Override Vote Drawer — regulatory commissioner */}
+            <button
+              type="button"
+              onClick={() => {
+                setOverrideDrawerInitialId(null);
+                setIsOverrideDrawerOpen(true);
+              }}
+              className="relative shrink-0 flex items-center gap-2 rounded-lg border border-orange-200 bg-orange-50 px-3 py-2 text-xs font-semibold text-orange-700 transition hover:bg-orange-100"
+            >
+              <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M15 10.5a3 3 0 11-6 0 3 3 0 016 0z" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z" />
+              </svg>
+              Ghi đè GPS
+              {pendingOverridesCount > 0 && (
+                <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-orange-500 px-1 text-[10px] font-bold text-white">
+                  {pendingOverridesCount}
+                </span>
+              )}
+            </button>
           </div>
 
           {shouldRenderSigningDashboard ? (
@@ -611,6 +660,21 @@ export default function RegulatoryBodiesPageClientTailwind() {
         onChangeTab={setSelectedDrawerTabKey}
         onReject={handleRejectFromDrawer}
         onApprove={handleApproveFromDrawer}
+      />
+
+      {/* B4: Override Vote Drawer — regulatory commissioner biểu quyết ghi đè GPS */}
+      <OverrideVoteDrawer
+        isOpen={isOverrideDrawerOpen}
+        onClose={() => setIsOverrideDrawerOpen(false)}
+        initialRequestId={overrideDrawerInitialId}
+        currentUserId={currentUserId}
+        currentUserRole="regulatory"
+        onToast={(t) => {
+          // tone 'warning' không có trong regulatory ToastItem — map về 'info'
+          const tone = t.tone === 'warning' ? 'info' : t.tone;
+          pushToast(t.titleText, t.bodyText, tone);
+        }}
+        onItemsCountChange={setPendingOverridesCount}
       />
 
       <ToastStack
