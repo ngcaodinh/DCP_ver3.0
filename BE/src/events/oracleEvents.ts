@@ -17,14 +17,12 @@ export type OracleEventType =
 /**
  * Payload cho evidence.uploaded — phát ra khi tổ chức upload ảnh minh chứng.
  * Oracle worker lắng nghe event này để tự động trigger verification.
- * imageBufferBase64 chứa buffer ảnh encode base64 (max 10MB).
- * TODO: Khi có IPFS fetch support, thay imageBufferBase64 bằng evidenceCid và worker tự fetch.
+ * Worker tự fetch buffer ảnh từ IPFS gateway dùng evidenceCid — không truyền buffer qua event.
  */
 export type EvidenceUploadedEventPayload = {
   projectId: string;
   organizationId: string;
   evidenceCid: string;
-  imageBufferBase64: string;
   fileSizeBytes: number;
   /** Link disbursement request để override request có thể auto-approve khi N/N vote APPROVE. null nếu upload độc lập. */
   disbursementRequestId?: string | null;

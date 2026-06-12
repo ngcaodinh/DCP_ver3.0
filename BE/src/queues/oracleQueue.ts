@@ -7,19 +7,16 @@ const ORACLE_QUEUE_NAME = 'oracle-verification';
 
 /**
  * Dữ liệu job xác minh ảnh minh chứng.
- * imageBuffer được encode base64 vì Bull serialize job data sang JSON.
- *
- * TODO: Lưu base64 ảnh 10MB vào Redis là anti-pattern (~13.3MB per job, concurrency=3 → ~40MB).
- * Khi IPFS fetch được hỗ trợ, thay imageBufferBase64 bằng evidenceCid và worker tự fetch từ IPFS
- * để tránh bão hòa Redis memory. Xem EvidenceUploadedEventPayload trong oracleEvents.ts.
+ * Worker tự fetch buffer ảnh từ IPFS gateway dùng evidenceCid thay vì nhận base64 qua Redis
+ * để tránh bão hòa Redis memory (~13.3MB per job khi dùng base64, concurrency=3 → ~40MB).
+ * IPFS_GATEWAY_URL env var cấu hình gateway (mặc định: https://ipfs.io/ipfs).
  */
 export type OracleVerificationJobData = {
   jobId: string;           // UUID — dùng để trace log
   projectId: string;
   organizationId: string;
-  evidenceCid: string;
-  imageBufferBase64: string;  // Buffer.toString('base64')
-  fileSizeBytes: number;
+  evidenceCid: string;     // Worker fetch buffer từ IPFS dùng CID này
+  fileSizeBytes: number;   // Pre-flight size check — tránh fetch ảnh quá lớn
   disbursementRequestId?: string | null;  // Link để override request có thể auto-approve disbursement
 };
 

@@ -207,16 +207,3 @@ export async function expireOverrideRequest(
   return updated ?? null;
 }
 
-/**
- * Cập nhật commissionerSnapshot sau khi tạo request.
- * Dùng trong oracleService sau khi query users với role admin/regulatory.
- */
-export async function setCommissionerSnapshot(
-  overrideRequestId: string,
-  commissionerSnapshot: Array<{ userId: string; role: string }>
-): Promise<void> {
-  await OracleOverrideRequestMongoModel.updateOne(
-    { overrideRequestId },
-    { $set: { commissionerSnapshot } }
-  ).exec();
-}

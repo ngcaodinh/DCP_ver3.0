@@ -164,6 +164,12 @@ export async function verifyEvidenceImage(
   // Bước 2: Trích xuất EXIF GPS
   const gpsFromImage = extractExifGps(buffer);
 
+  // THIẾT KẾ — Circular approximation: xác minh dùng khoảng cách Haversine từ GPS ảnh tới centroid.
+  // Geofence.polygon chỉ dùng để hiển thị trên bản đồ (B3 GeofenceMap), không dùng cho verification.
+  // Điều này có nghĩa: điểm trong polygon nhưng ngoài vòng tròn → INVALID (và ngược lại).
+  // Chấp nhận sai số này vì polygon thường là convex quanh centroid và radius được chọn bao phủ polygon.
+  // Nếu cần chính xác hơn: implement point-in-polygon (ray casting) thay thế.
+
   if (!gpsFromImage) {
     return await handleNoGps(
       verificationId, projectId, organizationId, evidenceCid,
