@@ -24,7 +24,8 @@ vi.mock('../../models/oracleOverrideRequestModel', () => ({
 }));
 
 vi.mock('../../models/authModel', () => ({
-  findUsersByRole: vi.fn().mockResolvedValue([])
+  // [B2-fix #5] oracleService đã đổi sang findActiveCommissioners (lọc isSybil=false)
+  findActiveCommissioners: vi.fn().mockResolvedValue([])
 }));
 
 vi.mock('../../events/oracleEvents', () => ({

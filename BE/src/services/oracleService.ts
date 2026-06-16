@@ -12,7 +12,7 @@ import {
 import {
   createOracleOverrideRequest
 } from '../models/oracleOverrideRequestModel';
-import { findUsersByRole } from '../models/authModel';
+import { findActiveCommissioners } from '../models/authModel';
 import { createUserNotification } from './notificationService';
 import {
   oracleEvents,
@@ -116,7 +116,7 @@ export function haversineDistance(a: GpsCoordinate, b: GpsCoordinate): number {
  * Query sau mỗi request để đảm bảo snapshot phản ánh đúng trạng thái hệ thống tại thời điểm tạo.
  */
 async function fetchCommissionerSnapshot(): Promise<Array<{ userId: string; role: string }>> {
-  const commissioners = await findUsersByRole(['admin', 'regulatory']);
+  const commissioners = await findActiveCommissioners();
   return commissioners.map(u => ({ userId: u.id, role: u.role }));
 }
 

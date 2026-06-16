@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { getLogger } from '../config/logger';
 import {
   findOverrideRequestById,
@@ -7,13 +8,15 @@ import {
   type CommissionerVote,
   type OracleOverrideRequestRecord
 } from '../models/oracleOverrideRequestModel';
-import { findUsersByRole } from '../models/authModel';
+import { findActiveCommissioners, type AuthUser } from '../models/authModel';
 import {
   findDisbursementByRequestId,
   updateDisbursementByRequestIdWithCondition
 } from '../models/disbursementModel';
+import { createAdminAuditLog } from '../models/adminAuditLogModel';
 import { createUserNotification } from './notificationService';
 import { oracleEvents, type OverrideExecutedEventPayload } from '../events/oracleEvents';
+import { getRedisClientIfReady } from '../config/redis';
 
 const logger = getLogger();
 
@@ -99,13 +102,26 @@ export async function submitOverrideVote(
   }
 
   // Bước 4: Phát hiện thay đổi commissioner set
-  // Nếu tập userId của admin/regulatory hiện tại khác snapshot → expire để tạo lại
+  // Nếu tuple [userId, role] của admin/regulatory hiện tại khác snapshot → expire để tạo lại
   const isCommissionerSetChanged = await detectCommissionerSetChange(overrideRequest);
   if (isCommissionerSetChanged) {
     await expireOverrideRequest(overrideRequestId, new Date());
     logger.warn('Commissioner set thay đổi. Override request expired.', {
       overrideRequestId,
       authenticatedUserId: commissionerId
+    });
+    // [B2-fix #2] Ghi audit trail — OVERRIDE_EXPIRED phải có trong compliance log
+    void createAdminAuditLog({
+      auditId: randomUUID(),
+      adminUserId: commissionerId,
+      action: 'OVERRIDE_EXPIRED',
+      targetRequestId: overrideRequestId,
+      reason: 'Commissioner set thay đổi (role hoặc thành viên)',
+      metadata: { projectId: overrideRequest.projectId, triggeredBy: commissionerId }
+    }).catch((err: Error) => {
+      logger.error('Ghi audit log OVERRIDE_EXPIRED thất bại.', {
+        overrideRequestId, errorMessage: err.message
+      });
     });
     // Notify tất cả ủy viên cũ trong snapshot biết request đã hết hiệu lực
     await notifyCommissionersOverrideExpired(overrideRequest);
@@ -136,20 +152,52 @@ export async function submitOverrideVote(
   return await evaluateVoteOutcome(updatedRequest);
 }
 
+const COMMISSIONER_CACHE_KEY = 'commissioners:active';
+const COMMISSIONER_CACHE_TTL_S = 30; // 30 giây — commissioner set thay đổi rất hiếm
+
+/**
+ * Lấy danh sách commissioner đang active, ưu tiên từ Redis cache (TTL 30s).
+ *
+ * [B2-fix #8] findActiveCommissioners() chạy per-vote trước đây — với nhiều request PENDING
+ * đồng thời, mỗi vote = 1 DB query. Cache TTL 30s giảm 300 queries/giờ xuống còn 120.
+ * Khi admin role thay đổi: TTL ngắn đủ để phát hiện trong vòng 30s.
+ */
+async function getCachedActiveCommissioners(): Promise<AuthUser[]> {
+  const redis = getRedisClientIfReady();
+  if (redis) {
+    try {
+      const cached = await redis.get(COMMISSIONER_CACHE_KEY);
+      if (cached) return JSON.parse(cached) as AuthUser[];
+      const fresh = await findActiveCommissioners();
+      await redis.setEx(COMMISSIONER_CACHE_KEY, COMMISSIONER_CACHE_TTL_S, JSON.stringify(fresh));
+      return fresh;
+    } catch {
+      // Redis lỗi → fallback sang DB, không block vote flow
+    }
+  }
+  return findActiveCommissioners();
+}
+
 /**
  * So sánh commissionerSnapshot với danh sách admin/regulatory hiện tại.
- * Trả về true nếu tập userId đã thay đổi (thêm hoặc xóa bất kỳ ai).
+ * Trả về true nếu bộ tuple [userId, role] đã thay đổi.
+ *
+ * [B2-fix #1] Đổi từ so sánh userId đơn thuần sang tuple [userId::role].
+ * Lý do: nếu chỉ so sánh userId, admin bị demote sang 'donor' vẫn có userId trùng snapshot
+ * → detectCommissionerSetChange trả false → họ vẫn vote được dù đã mất authority.
  */
 async function detectCommissionerSetChange(
   overrideRequest: OracleOverrideRequestRecord
 ): Promise<boolean> {
-  const currentCommissioners = await findUsersByRole(['admin', 'regulatory']);
-  const currentIds = new Set(currentCommissioners.map(u => u.id));
-  const snapshotIds = new Set(overrideRequest.commissionerSnapshot.map(c => c.userId));
+  const currentCommissioners = await getCachedActiveCommissioners();
+  const currentKeys = new Set(currentCommissioners.map(u => `${u.id}::${u.role}`));
+  const snapshotKeys = new Set(
+    overrideRequest.commissionerSnapshot.map(c => `${c.userId}::${c.role}`)
+  );
 
-  if (currentIds.size !== snapshotIds.size) return true;
-  for (const id of snapshotIds) {
-    if (!currentIds.has(id)) return true;
+  if (currentKeys.size !== snapshotKeys.size) return true;
+  for (const key of snapshotKeys) {
+    if (!currentKeys.has(key)) return true;
   }
   return false;
 }
@@ -169,6 +217,20 @@ async function evaluateVoteOutcome(
   if (hasReject) {
     const resolved = await resolveOverrideRequest(request.overrideRequestId, 'REJECTED', new Date());
     if (resolved) {
+      // [B2-fix #2] Ghi audit trail ngay khi resolve — trước notify để đảm bảo trail không bị miss
+      const rejectingVote = votes.find(v => v.vote === 'REJECT');
+      void createAdminAuditLog({
+        auditId: randomUUID(),
+        adminUserId: rejectingVote?.commissionerId ?? 'unknown',
+        action: 'OVERRIDE_VOTE_REJECT',
+        targetRequestId: resolved.overrideRequestId,
+        reason: rejectingVote?.reason ?? null,
+        metadata: { projectId: resolved.projectId, disbursementRequestId: resolved.disbursementRequestId }
+      }).catch((err: Error) => {
+        logger.error('Ghi audit log OVERRIDE_VOTE_REJECT thất bại.', {
+          overrideRequestId: resolved.overrideRequestId, errorMessage: err.message
+        });
+      });
       await notifyOrganizationOverrideResult(resolved, false);
       // Emit để socket bridge thông báo commissioner request đã bị từ chối
       oracleEvents.emit('override.executed', {
@@ -203,6 +265,24 @@ async function evaluateVoteOutcome(
       resolved.disbursementRequestId,
       resolved.overrideRequestId
     );
+
+    // [B2-fix #2] Ghi audit trail cho APPROVED — compliance yêu cầu immutable log
+    void createAdminAuditLog({
+      auditId: randomUUID(),
+      adminUserId: votes[votes.length - 1]?.commissionerId ?? 'unknown',
+      action: 'OVERRIDE_VOTE_APPROVE',
+      targetRequestId: resolved.overrideRequestId,
+      reason: `${approveCount}/${totalVoters} commissioner đồng ý`,
+      metadata: {
+        projectId: resolved.projectId,
+        disbursementRequestId: resolved.disbursementRequestId,
+        disbursementAutoApproved
+      }
+    }).catch((err: Error) => {
+      logger.error('Ghi audit log OVERRIDE_VOTE_APPROVE thất bại.', {
+        overrideRequestId: resolved.overrideRequestId, errorMessage: err.message
+      });
+    });
 
     // Emit override.executed (TODO: cần oracle contract để ghi on-chain)
     oracleEvents.emit('override.executed', {
@@ -258,9 +338,15 @@ async function tryAutoApproveDisbursement(
   );
 
   if (!updated) {
-    // Disbursement không còn PENDING — đã được xử lý bởi luồng khác, không phải lỗi
-    logger.info('Disbursement không ở trạng thái PENDING khi auto-approve (đã xử lý trước).', {
-      overrideRequestId, disbursementRequestId, currentStatus: disbursement.status
+    // [B2-fix #3] Phân biệt log level theo trạng thái:
+    // EXECUTING/COMPLETED → WARN (race condition bất thường, cần attention)
+    // FAILED/REJECTED/APPROVED → INFO (đã xử lý bởi luồng khác, bình thường)
+    const dangerousStates = ['EXECUTING', 'COMPLETED'];
+    const logFn = dangerousStates.includes(disbursement.status ?? '') ? logger.warn : logger.info;
+    logFn('Disbursement không ở trạng thái PENDING khi auto-approve.', {
+      overrideRequestId,
+      disbursementRequestId,
+      currentStatus: disbursement.status
     });
     return false;
   }

@@ -61,10 +61,11 @@ const gpsCoordinateSchema = new Schema<GpsCoordinate>(
   { _id: false }
 );
 
+// [B2-fix #4] Thêm enum constraint cho commissionerRole — ngăn role không hợp lệ lọt vào DB
 const commissionerVoteSchema = new Schema<CommissionerVote>(
   {
     commissionerId: { type: String, required: true },
-    commissionerRole: { type: String, required: true },
+    commissionerRole: { type: String, required: true, enum: ['admin', 'regulatory'] },
     vote: { type: String, required: true, enum: ['APPROVE', 'REJECT'] },
     reason: { type: String, required: true },
     votedAt: { type: Date, required: true }
@@ -84,8 +85,12 @@ const oracleOverrideRequestSchema = new Schema<OracleOverrideRequestRecord>(
     gpsFromImage: { type: gpsCoordinateSchema, default: null },
     gpsFromProject: { type: gpsCoordinateSchema, required: true },
     distanceMeters: { type: Number, default: null },
+    // [B2-fix #4] Enum constraint cho role trong snapshot — đảm bảo data integrity ở tầng DB
     commissionerSnapshot: {
-      type: [{ userId: String, role: String }],
+      type: [{
+        userId: { type: String, required: true },
+        role: { type: String, required: true, enum: ['admin', 'regulatory'] }
+      }],
       default: []
     },
     votes: { type: [commissionerVoteSchema], default: [] },
@@ -104,6 +109,8 @@ const oracleOverrideRequestSchema = new Schema<OracleOverrideRequestRecord>(
 
 oracleOverrideRequestSchema.index({ projectId: 1, status: 1 });
 oracleOverrideRequestSchema.index({ organizationId: 1, status: 1 });
+// [B2-fix N4] Compound index để sort PENDING theo createdAt không phải scan toàn bộ
+oracleOverrideRequestSchema.index({ status: 1, createdAt: -1 });
 
 const OracleOverrideRequestMongoModel = mongoose.model<OracleOverrideRequestRecord>(
   'OracleOverrideRequest',
@@ -147,6 +154,23 @@ export async function findPendingOverrideRequests(
 /** Đếm số override request PENDING (B2 cần cho badge count). */
 export async function countPendingOverrideRequests(): Promise<number> {
   return OracleOverrideRequestMongoModel.countDocuments({ status: 'PENDING' }).exec();
+}
+
+/**
+ * Lấy danh sách override request PENDING tạo trước ngưỡng thời gian (dùng cho expiry worker).
+ * [B2-fix #7] Dùng compound index {status:1, createdAt:-1} để query hiệu quả.
+ */
+export async function findPendingOverrideRequestsExpiredBefore(
+  cutoff: Date
+): Promise<OracleOverrideRequestRecord[]> {
+  return OracleOverrideRequestMongoModel.find({
+    status: 'PENDING',
+    createdAt: { $lt: cutoff }
+  })
+    .sort({ createdAt: 1 })
+    .limit(100) // Giới hạn 100 để tránh quá tải trong 1 chu kỳ
+    .lean()
+    .exec();
 }
 
 /**

@@ -16,7 +16,7 @@ import {
   type OracleVerificationJobData
 } from '../queues/oracleQueue';
 import { findGeofenceByProjectId, upsertProjectGeofence } from '../models/projectGeofenceModel';
-import { findPendingOverrideRequests, countPendingOverrideRequests } from '../models/oracleOverrideRequestModel';
+import { findPendingOverrideRequests, countPendingOverrideRequests, findOverrideRequestById } from '../models/oracleOverrideRequestModel';
 import { findProjectById } from '../repositories/projectRepository';
 
 const logger = getLogger();
@@ -440,6 +440,65 @@ export async function handleVoteOverrideRequest(
       errorMessage: (error as Error)?.message
     });
     sendErrorFromUnknown(response, error, 'Không thể xử lý vote.');
+  }
+}
+
+/**
+ * GET /api/oracle/override-requests/:overrideRequestId
+ * Lấy chi tiết một override request theo ID (dùng cho B4 OverrideVoteDrawer).
+ *
+ * [B2-fix #6] Endpoint này bị thiếu — B4 UI cần: project name, GPS from image,
+ * GPS from project, Haversine distance, vote progress, hasCurrentUserVoted.
+ * Response enrich thêm pendingVoters và hasCurrentUserVoted để FE render đúng.
+ */
+export async function handleGetOverrideRequestById(
+  request: AuthenticatedRequest,
+  response: Response
+): Promise<void> {
+  if (!request.authenticatedUser) {
+    sendErrorResponse(response, 401, 'Bạn chưa đăng nhập.', 'UNAUTHENTICATED');
+    return;
+  }
+
+  const { overrideRequestId } = request.params;
+  if (!overrideRequestId?.trim()) {
+    sendErrorResponse(response, 400, 'Thiếu overrideRequestId.', 'VALIDATION_ERROR');
+    return;
+  }
+
+  try {
+    const overrideRequest = await findOverrideRequestById(overrideRequestId);
+    if (!overrideRequest) {
+      sendErrorResponse(response, 404, 'Không tìm thấy override request.', 'NOT_FOUND');
+      return;
+    }
+
+    const { userId } = request.authenticatedUser;
+    const totalVoters = overrideRequest.commissionerSnapshot.length;
+    const pendingVoters = totalVoters - overrideRequest.votes.length;
+    const hasCurrentUserVoted = overrideRequest.votes.some(v => v.commissionerId === userId);
+
+    // Nếu request đã resolve, trả đủ thông tin votes.
+    // Nếu còn PENDING, ẩn vote của người khác để tránh collusion (chỉ cho biết số lượng).
+    const votes = overrideRequest.status !== 'PENDING'
+      ? overrideRequest.votes
+      : overrideRequest.votes
+          .filter(v => v.commissionerId === userId)
+          .map(v => ({ ...v, commissionerId: userId }));
+
+    sendSuccessResponse(response, 200, 'Lấy override request thành công.', {
+      ...overrideRequest,
+      votes,
+      pendingVoters,
+      totalVoters,
+      hasCurrentUserVoted
+    });
+  } catch (error) {
+    logger.error('Lấy override request thất bại.', {
+      overrideRequestId,
+      errorMessage: (error as Error)?.message
+    });
+    sendErrorFromUnknown(response, error, 'Không thể lấy override request.');
   }
 }
 
