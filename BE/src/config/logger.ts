@@ -139,6 +139,7 @@ type LogMetadata = {
   delay?: number;
   removedCount?: number;
   enqueued?: boolean;
+  enqueuedBy?: string;
   deadline?: string;
   transferIdempotencyKey?: string;
   idempotencyKey?: string;
@@ -182,6 +183,51 @@ type LogMetadata = {
   types?: string | string[];
   rowCount?: number;
   maxRows?: number;
+  // SBT Auto-Mint (C2)
+  sbtId?: string;
+  mintRequestId?: string;
+  tokenId?: string | number;
+  onChainTokenId?: string | number;
+  beneficiaryAddress?: string;
+  toAddress?: string;
+  gpsCoordinates?: string;
+  imageCid?: string;
+  tokenUri?: string;
+  sbtMintAttemptNumber?: number;
+  sbtMaxAttempts?: number;
+  sbtMintNextDelayMs?: number;
+  sbtMintStatus?: 'PENDING' | 'SUBMITTED' | 'CONFIRMED' | 'FAILED' | 'DLQ';
+  sbtMintErrorMessage?: string;
+  sbtReRunBy?: string;
+  sbtDlqRecoveredAt?: string;
+  activeJobId?: string;
+  blockNumber?: number;
+  nextAttempt?: number;
+  previousAttemptNumber?: number;
+  reRunBy?: string;
+  reRunAt?: string;
+  lastRunAgoMs?: number;
+  recoveredAt?: string;
+  recoveredBy?: string;
+  nextDelayMs?: number;
+  previousStatus?: string;
+  stuckSeconds?: number;
+  candidatesFound?: number;
+  enqueuedAt?: string;
+  dlqEntryCreated?: boolean;
+  thresholdMinutes?: number;
+  stuckMs?: number;
+  activeJobIdempotencyKey?: string;
+  stuckMintTxHash?: string;
+  stuckSecondsMs?: number;
+  // Additional SBT C2 fields
+  olderThanMinutes?: number;
+  projectIdNumeric?: number;
+  milestone?: number;
+  beneficiaryCount?: number;
+  tokenIdRaw?: string;
+  dlqAt?: string;
+  minIntervalMs?: number;
 };
 
 

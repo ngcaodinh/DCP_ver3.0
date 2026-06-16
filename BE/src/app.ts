@@ -14,6 +14,7 @@ import { createAdminDashboardRoutes } from './routes/adminDashboardRoutes';
 import { createManualReviewRoutes } from './routes/manualReviewRoutes';
 import { createNotificationRoutes } from './routes/notificationRoutes';
 import { createOracleRoutes } from './routes/oracleRoutes';
+import { createSbtRoutes } from './routes/sbt.routes';
 import { createGuestRoutes } from './routes/guestRoutes';
 import { createPayosWebhookRoutes } from './routes/webhooks/payos.webhook';
 import { validateGuestJwtConfig } from './config/guestJsonWebToken';
@@ -106,6 +107,7 @@ function registerRoutes(): void {
   application.use('/api/admin/dashboard', createAdminDashboardRoutes());
   application.use('/api/disbursements', createManualReviewRoutes());
   application.use('/api/oracle', createOracleRoutes());
+  application.use('/api/sbt', createSbtRoutes());
   application.use('/api/notifications', createNotificationRoutes());
   application.use('/api/webhooks/payos', createPayosWebhookRoutes());
   application.use(API_GUEST_PREFIX, createGuestRoutes());
