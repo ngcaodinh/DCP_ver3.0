@@ -8,6 +8,7 @@ import {
   handleVerifyImageBatch,
   handleGetGeofence,
   handleUpsertGeofence,
+  handleGetOverrideRequestById,
   handleGetPendingOverrides,
   handleVoteOverrideRequest
 } from '../controllers/oracleController';
@@ -85,6 +86,15 @@ export function createOracleRoutes(): Router {
     adminMiddleware,
     overrideReadRateLimit,
     handleGetPendingOverrides
+  );
+
+  // [B2-fix #6] Chi tiết một override request — B4 OverrideVoteDrawer cần để render vote panel
+  router.get(
+    '/override-requests/:overrideRequestId',
+    authMiddleware,
+    adminMiddleware,
+    overrideReadRateLimit,
+    handleGetOverrideRequestById
   );
 
   // Vote override request — chỉ admin + regulatory trong commissionerSnapshot (B2)

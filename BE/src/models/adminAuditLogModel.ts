@@ -4,8 +4,18 @@ import mongoose, { Schema } from 'mongoose';
  * Loại hành động admin cần ghi audit.
  * MANUAL_APPROVE: admin approve manual review → retry PayOS
  * MANUAL_REJECT: admin reject disbursement
+ *
+ * [B2-fix #2] Bổ sung các action cho override voting — phải có trong trail để đáp ứng compliance.
+ * OVERRIDE_VOTE_APPROVE: commissioner vote APPROVE cho override request
+ * OVERRIDE_VOTE_REJECT: commissioner vote REJECT cho override request
+ * OVERRIDE_EXPIRED: override request hết hạn do commissioner set thay đổi hoặc timeout
  */
-export type AdminAuditAction = 'MANUAL_APPROVE' | 'MANUAL_REJECT';
+export type AdminAuditAction =
+  | 'MANUAL_APPROVE'
+  | 'MANUAL_REJECT'
+  | 'OVERRIDE_VOTE_APPROVE'
+  | 'OVERRIDE_VOTE_REJECT'
+  | 'OVERRIDE_EXPIRED';
 
 /**
  * Bản ghi audit log cho hành động admin trên disbursement.
@@ -27,7 +37,7 @@ const adminAuditLogSchema = new Schema<AdminAuditLogRecord>({
   action: {
     type: String,
     required: true,
-    enum: ['MANUAL_APPROVE', 'MANUAL_REJECT'],
+    enum: ['MANUAL_APPROVE', 'MANUAL_REJECT', 'OVERRIDE_VOTE_APPROVE', 'OVERRIDE_VOTE_REJECT', 'OVERRIDE_EXPIRED'],
     index: true
   },
   targetRequestId: { type: String, required: true, index: true },
@@ -36,6 +46,8 @@ const adminAuditLogSchema = new Schema<AdminAuditLogRecord>({
 }, { timestamps: { createdAt: true, updatedAt: false } });
 
 adminAuditLogSchema.index({ targetRequestId: 1, createdAt: -1 });
+// Index để query nhanh các override actions (cho E8 audit log page)
+adminAuditLogSchema.index({ action: 1, createdAt: -1 });
 
 const AdminAuditLogMongoModel = mongoose.model<AdminAuditLogRecord>(
   'AdminAuditLog',

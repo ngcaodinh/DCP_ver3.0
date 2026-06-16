@@ -12,6 +12,7 @@ import { initializeNotificationBridge } from './services/notificationBridge.serv
 import { initSocketServer, shutdownSocketServer } from './config/socketServer';
 import { startManualReviewEscalationWorker, stopManualReviewEscalationWorker } from './workers/manualReviewEscalationWorker';
 import { startOracleWorker, stopOracleWorker } from './workers/oracle.worker';
+import { startOverrideExpiryWorker, stopOverrideExpiryWorker } from './workers/overrideExpiryWorker';
 
 const serverPort = Number(process.env.PORT) || 4000;
 
@@ -40,6 +41,8 @@ function startBackgroundWorkers(): void {
   startManualReviewEscalationWorker();
   // Oracle Worker: xác minh EXIF GPS ảnh minh chứng (concurrency 3)
   startOracleWorker();
+  // Override Expiry Worker: expire override request PENDING quá 7 ngày không đủ vote
+  startOverrideExpiryWorker();
 }
 
 /**
@@ -66,8 +69,8 @@ async function startServer(): Promise<void> {
   initSocketServer(httpServer);
 
   // Graceful shutdown: đóng Socket.io và dừng workers trước khi process tắt
-  process.once('SIGTERM', () => { shutdownSocketServer(); stopManualReviewEscalationWorker(); void stopOracleWorker(); });
-  process.once('SIGINT', () => { shutdownSocketServer(); stopManualReviewEscalationWorker(); void stopOracleWorker(); });
+  process.once('SIGTERM', () => { shutdownSocketServer(); stopManualReviewEscalationWorker(); stopOverrideExpiryWorker(); void stopOracleWorker(); });
+  process.once('SIGINT', () => { shutdownSocketServer(); stopManualReviewEscalationWorker(); stopOverrideExpiryWorker(); void stopOracleWorker(); });
 }
 
 startServer().catch((error: Error) => {

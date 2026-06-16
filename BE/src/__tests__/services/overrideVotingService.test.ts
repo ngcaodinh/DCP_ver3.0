@@ -14,7 +14,12 @@ vi.mock('../../models/oracleOverrideRequestModel', () => ({
 }));
 
 vi.mock('../../models/authModel', () => ({
-  findUsersByRole: vi.fn()
+  findActiveCommissioners: vi.fn()
+}));
+
+// Redis không cần trong test — mock để getCachedActiveCommissioners fallback về findActiveCommissioners
+vi.mock('../../config/redis', () => ({
+  getRedisClientIfReady: () => null
 }));
 
 vi.mock('../../models/disbursementModel', () => ({
@@ -36,7 +41,7 @@ import {
   resolveOverrideRequest,
   expireOverrideRequest
 } from '../../models/oracleOverrideRequestModel';
-import { findUsersByRole } from '../../models/authModel';
+import { findActiveCommissioners } from '../../models/authModel';
 import {
   findDisbursementByRequestId,
   updateDisbursementByRequestIdWithCondition
@@ -73,9 +78,9 @@ function buildPendingRequest(overrides: Record<string, unknown> = {}) {
   };
 }
 
-// commissioner set không thay đổi (trả về cùng userId với snapshot)
+// commissioner set không thay đổi (trả về cùng userId+role với snapshot)
 function mockUnchangedCommissionerSet() {
-  vi.mocked(findUsersByRole).mockResolvedValue([
+  vi.mocked(findActiveCommissioners).mockResolvedValue([
     { id: 'admin-1', role: 'admin' } as never,
     { id: 'regulatory-1', role: 'regulatory' } as never,
     { id: 'admin-2', role: 'admin' } as never
@@ -141,7 +146,7 @@ describe('submitOverrideVote', () => {
       buildPendingRequest() as never
     );
     // Giả lập: regulatory-1 bị xóa, thêm new-admin vào
-    vi.mocked(findUsersByRole).mockResolvedValue([
+    vi.mocked(findActiveCommissioners).mockResolvedValue([
       { id: 'admin-1', role: 'admin' } as never,
       { id: 'new-admin', role: 'admin' } as never
     ]);
@@ -312,5 +317,93 @@ describe('submitOverrideVote', () => {
     await expect(
       submitOverrideVote('req-001', 'admin-1', 'admin', 'APPROVE', 'ok')
     ).rejects.toThrow(new VoteRejectedError('REQUEST_NOT_PENDING'));
+  });
+
+  // ─── T1: Role check trong detectCommissionerSetChange (B2-fix #1) ────────
+  it('[T1] expire khi role của commissioner đổi dù userId vẫn khớp', async () => {
+    vi.mocked(findOverrideRequestById).mockResolvedValue(
+      buildPendingRequest() as never
+    );
+    // admin-1 vẫn ACTIVE nhưng role đã đổi từ 'admin' → 'donor' (không trong ACTIVE commissioner set)
+    vi.mocked(findActiveCommissioners).mockResolvedValue([
+      { id: 'admin-1', role: 'donor' } as never,   // demoted — không còn là commissioner
+      { id: 'regulatory-1', role: 'regulatory' } as never,
+      { id: 'admin-2', role: 'admin' } as never
+    ]);
+    vi.mocked(expireOverrideRequest).mockResolvedValue(
+      buildPendingRequest({ status: 'EXPIRED' }) as never
+    );
+
+    const result = await submitOverrideVote('req-001', 'admin-1', 'admin', 'APPROVE', 'ok');
+
+    // Tuple admin-1::admin (snapshot) ≠ admin-1::donor (hiện tại) → phải EXPIRED
+    expect(result.outcome).toBe('EXPIRED_COMMISSIONER_SET_CHANGED');
+    expect(expireOverrideRequest).toHaveBeenCalledWith('req-001', expect.any(Date));
+  });
+
+  // ─── T2: Disbursement đang EXECUTING khi auto-approve (B2-fix #3) ────────
+  it('[T2] disbursementAutoApproved=false và không throw khi disbursement đang EXECUTING', async () => {
+    vi.mocked(findOverrideRequestById).mockResolvedValue(
+      buildPendingRequest({ disbursementRequestId: 'disb-001' }) as never
+    );
+    mockUnchangedCommissionerSet();
+    const requestAfterFinalVote = buildPendingRequest({
+      disbursementRequestId: 'disb-001',
+      votes: [
+        { commissionerId: 'admin-1', commissionerRole: 'admin', vote: 'APPROVE', reason: 'ok', votedAt: new Date() },
+        { commissionerId: 'regulatory-1', commissionerRole: 'regulatory', vote: 'APPROVE', reason: 'ok', votedAt: new Date() },
+        { commissionerId: 'admin-2', commissionerRole: 'admin', vote: 'APPROVE', reason: 'ok', votedAt: new Date() }
+      ]
+    });
+    vi.mocked(addVoteToOverrideRequest).mockResolvedValue(requestAfterFinalVote as never);
+    vi.mocked(resolveOverrideRequest).mockResolvedValue(
+      buildPendingRequest({ disbursementRequestId: 'disb-001', status: 'APPROVED', resolvedAt: new Date() }) as never
+    );
+    // Disbursement đang EXECUTING — race condition với PayOS
+    vi.mocked(findDisbursementByRequestId).mockResolvedValue(
+      { requestId: 'disb-001', status: 'EXECUTING' } as never
+    );
+    vi.mocked(updateDisbursementByRequestIdWithCondition).mockResolvedValue(null);
+
+    const result = await submitOverrideVote('req-001', 'admin-2', 'admin', 'APPROVE', 'ok');
+
+    expect(result.outcome).toBe('RESOLVED_APPROVED');
+    if (result.outcome === 'RESOLVED_APPROVED') {
+      expect(result.disbursementAutoApproved).toBe(false);
+    }
+  });
+
+  // ─── T3: Race condition — 3 APPROVE đồng thời qua Promise.all ────────────
+  it('[T3] chỉ 1 winner resolve APPROVED khi 3 vote APPROVE gần như cùng lúc', async () => {
+    vi.mocked(findOverrideRequestById).mockResolvedValue(buildPendingRequest() as never);
+    mockUnchangedCommissionerSet();
+
+    const fullVoteRequest = buildPendingRequest({
+      votes: [
+        { commissionerId: 'admin-1', commissionerRole: 'admin', vote: 'APPROVE', reason: 'ok', votedAt: new Date() },
+        { commissionerId: 'regulatory-1', commissionerRole: 'regulatory', vote: 'APPROVE', reason: 'ok', votedAt: new Date() },
+        { commissionerId: 'admin-2', commissionerRole: 'admin', vote: 'APPROVE', reason: 'ok', votedAt: new Date() }
+      ]
+    });
+    vi.mocked(addVoteToOverrideRequest).mockResolvedValue(fullVoteRequest as never);
+
+    // Chỉ 1 trong 3 resolve thành công (winner), 2 còn lại trả null (loser — race)
+    vi.mocked(resolveOverrideRequest)
+      .mockResolvedValueOnce(buildPendingRequest({ status: 'APPROVED', resolvedAt: new Date() }) as never)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null);
+
+    const results = await Promise.all([
+      submitOverrideVote('req-001', 'admin-1', 'admin', 'APPROVE', 'ok'),
+      submitOverrideVote('req-001', 'regulatory-1', 'regulatory', 'APPROVE', 'ok'),
+      submitOverrideVote('req-001', 'admin-2', 'admin', 'APPROVE', 'ok')
+    ]);
+
+    const approvedCount = results.filter(r => r.outcome === 'RESOLVED_APPROVED').length;
+    const recordedCount = results.filter(r => r.outcome === 'VOTE_RECORDED').length;
+    expect(approvedCount).toBe(1);
+    expect(recordedCount).toBe(2);
+    // Chỉ emit event 1 lần — winner emit, loser không emit vì resolved=null
+    expect(vi.mocked(oracleEvents.emit)).toHaveBeenCalledTimes(1);
   });
 });

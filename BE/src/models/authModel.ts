@@ -375,3 +375,18 @@ export async function findUsersByRole(roles: string[]): Promise<AuthUser[]> {
     accountStatus: 'ACTIVE'
   }).lean<AuthUser[]>().exec();
 }
+
+/**
+ * Lấy danh sách commissioner đủ tư cách biểu quyết override request.
+ *
+ * [B2-fix #5] Tách helper riêng thay vì thêm isSybil filter vào findUsersByRole —
+ * tránh ảnh hưởng các caller khác cần lấy cả Sybil users (vd: trang admin review Sybil).
+ * Lọc thêm isSybil=false để ngăn Sybil-flagged user lọt vào commissionerSnapshot.
+ */
+export async function findActiveCommissioners(): Promise<AuthUser[]> {
+  return AuthUserModel.find({
+    role: { $in: ['admin', 'regulatory'] },
+    accountStatus: 'ACTIVE',
+    isSybil: false
+  }).lean<AuthUser[]>().exec();
+}
