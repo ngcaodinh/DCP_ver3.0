@@ -69,7 +69,8 @@ describe('transparencyController', () => {
         timeline: mockTimeline,
         nextCursor: null,
         cached: false,
-        count: 1
+        count: 1,
+        fallbackMode: false
       });
       vi.mocked(groupTimelineByCorrelation).mockReturnValue(mockGrouped);
 
@@ -79,13 +80,13 @@ describe('transparencyController', () => {
       await handleGetUnifiedTimeline(req, res);
 
       expect(res.status).toHaveBeenCalledWith(200);
-      expect(res.json).toHaveBeenCalledWith({
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
         timeline: mockTimeline,
         nextCursor: null,
         cached: false,
         grouped: { 'deposit:12345678': mockTimeline },
         count: 1
-      });
+      }));
     });
 
     it('request voi tat ca params hop le', async () => {
@@ -93,7 +94,8 @@ describe('transparencyController', () => {
         timeline: [],
         nextCursor: null,
         cached: false,
-        count: 0
+        count: 0,
+        fallbackMode: false
       });
       vi.mocked(groupTimelineByCorrelation).mockReturnValue(new Map());
 
@@ -271,11 +273,13 @@ describe('transparencyController', () => {
         timeline: [],
         nextCursor: null,
         cached: false,
-        count: 0
+        count: 0,
+        fallbackMode: false
       });
       vi.mocked(groupTimelineByCorrelation).mockReturnValue(new Map());
 
       const req = createMockRequest({
+        projectId: 'project-001',
         pageSize: '50'
       });
       const res = createMockResponse();
@@ -283,6 +287,11 @@ describe('transparencyController', () => {
       await handleGetUnifiedTimeline(req, res);
 
       expect(res.status).toHaveBeenCalledWith(200);
+      expect(getUnifiedTimeline).toHaveBeenCalledWith(
+        expect.objectContaining({ projectId: 'project-001' }),
+        50,
+        undefined
+      );
     });
   });
 
@@ -293,7 +302,8 @@ describe('transparencyController', () => {
         timeline: [],
         nextCursor: null,
         cached: false,
-        count: 0
+        count: 0,
+        fallbackMode: false
       });
       vi.mocked(groupTimelineByCorrelation).mockReturnValue(new Map());
 
@@ -318,7 +328,8 @@ describe('transparencyController', () => {
         timeline: [],
         nextCursor: null,
         cached: false,
-        count: 0
+        count: 0,
+        fallbackMode: false
       });
       vi.mocked(groupTimelineByCorrelation).mockReturnValue(new Map());
 
@@ -339,7 +350,8 @@ describe('transparencyController', () => {
         timeline: [],
         nextCursor: null,
         cached: false,
-        count: 0
+        count: 0,
+        fallbackMode: false
       });
       vi.mocked(groupTimelineByCorrelation).mockReturnValue(new Map());
 
@@ -362,7 +374,8 @@ describe('transparencyController', () => {
         timeline: [],
         nextCursor: null,
         cached: false,
-        count: 0
+        count: 0,
+        fallbackMode: false
       });
       vi.mocked(groupTimelineByCorrelation).mockReturnValue(new Map());
 
@@ -383,7 +396,8 @@ describe('transparencyController', () => {
         timeline: [],
         nextCursor: null,
         cached: false,
-        count: 0
+        count: 0,
+        fallbackMode: false
       });
       vi.mocked(groupTimelineByCorrelation).mockReturnValue(new Map());
 
@@ -406,7 +420,8 @@ describe('transparencyController', () => {
         timeline: [],
         nextCursor: null,
         cached: false,
-        count: 0
+        count: 0,
+        fallbackMode: false
       });
       vi.mocked(groupTimelineByCorrelation).mockReturnValue(new Map());
 
@@ -432,7 +447,8 @@ describe('transparencyController', () => {
         timeline: [],
         nextCursor: null,
         cached: false,
-        count: 0
+        count: 0,
+        fallbackMode: false
       });
       vi.mocked(groupTimelineByCorrelation).mockReturnValue(new Map());
 
@@ -459,7 +475,8 @@ describe('transparencyController', () => {
         timeline: [],
         nextCursor: null,
         cached: false,
-        count: 0
+        count: 0,
+        fallbackMode: false
       });
       vi.mocked(groupTimelineByCorrelation).mockReturnValue(new Map());
 
@@ -486,7 +503,8 @@ describe('transparencyController', () => {
         timeline: [createMockTimelineEvent()],
         nextCursor: 'next-cursor-value',
         cached: true,
-        count: 1
+        count: 1,
+        fallbackMode: false
       });
       vi.mocked(groupTimelineByCorrelation).mockReturnValue(new Map([
         ['deposit:12345678', [createMockTimelineEvent()]]
@@ -503,7 +521,8 @@ describe('transparencyController', () => {
           nextCursor: 'next-cursor-value',
           cached: true,
           grouped: expect.any(Object),
-          count: 1
+          count: 1,
+          fallbackMode: false
         })
       );
     });
@@ -519,7 +538,8 @@ describe('transparencyController', () => {
         timeline: mockTimeline,
         nextCursor: null,
         cached: false,
-        count: 1
+        count: 1,
+        fallbackMode: false
       });
       vi.mocked(groupTimelineByCorrelation).mockReturnValue(mockGrouped);
 
@@ -531,7 +551,8 @@ describe('transparencyController', () => {
       expect(groupTimelineByCorrelation).toHaveBeenCalledWith(mockTimeline);
       expect(res.json).toHaveBeenCalledWith(
         expect.objectContaining({
-          grouped: { 'corr-1': [mockTimeline[0]], 'corr-2': [mockTimeline[0]] }
+          grouped: { 'corr-1': [mockTimeline[0]], 'corr-2': [mockTimeline[0]] },
+          fallbackMode: false
         })
       );
     });
@@ -545,10 +566,12 @@ describe('transparencyController', () => {
       const req = createMockRequest({});
       const res = createMockResponse();
 
-      // Catch the error to prevent test crash
-      await expect(
-        handleGetUnifiedTimeline(req, res)
-      ).rejects.toThrow('Database connection failed');
+      await handleGetUnifiedTimeline(req, res);
+
+      expect(res.status).toHaveBeenCalledWith(500);
+      expect(res.json).toHaveBeenCalledWith({
+        error: 'Internal server error'
+      });
     });
   });
 
@@ -598,7 +621,8 @@ describe('transparencyController', () => {
         timeline: [],
         nextCursor: null,
         cached: false,
-        count: 0
+        count: 0,
+        fallbackMode: false
       });
       vi.mocked(groupTimelineByCorrelation).mockReturnValue(new Map());
 
@@ -625,7 +649,8 @@ describe('transparencyController', () => {
         timeline: [],
         nextCursor: null,
         cached: false,
-        count: 0
+        count: 0,
+        fallbackMode: false
       });
       vi.mocked(groupTimelineByCorrelation).mockReturnValue(new Map());
 
@@ -650,7 +675,8 @@ describe('transparencyController', () => {
         timeline: [],
         nextCursor: null,
         cached: false,
-        count: 0
+        count: 0,
+        fallbackMode: false
       });
       vi.mocked(groupTimelineByCorrelation).mockReturnValue(new Map());
 

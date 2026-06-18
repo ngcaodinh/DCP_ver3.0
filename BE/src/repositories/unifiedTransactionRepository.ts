@@ -297,7 +297,7 @@ export async function aggregateSummaryByProjectId(
   }
 
   return {
-    totalRaisedVnd: aggregateResult[0].totalRaisedVnd,
-    totalTransactions: aggregateResult[0].totalTransactions
+    totalRaisedVnd: aggregateResult[0]?.totalRaisedVnd ?? 0,
+    totalTransactions: aggregateResult[0]?.totalTransactions ?? 0
   };
 }

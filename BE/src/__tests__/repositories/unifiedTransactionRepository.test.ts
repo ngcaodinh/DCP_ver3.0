@@ -192,9 +192,16 @@ describe('unifiedTransactionRepository', () => {
         createMockTransaction({ utxId: 'after-cursor-2' })
       ];
 
+      let capturedLimit = 0;
       vi.mocked(UnifiedTransactionModel.find).mockReturnValue({
         sort: vi.fn().mockReturnThis(),
-        limit: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockImplementation((n: number) => {
+          capturedLimit = n;
+          return {
+            lean: vi.fn().mockReturnThis(),
+            exec: vi.fn().mockResolvedValue(mockItems)
+          };
+        }),
         lean: vi.fn().mockReturnThis(),
         exec: vi.fn().mockResolvedValue(mockItems)
       } as unknown as ReturnType<typeof UnifiedTransactionModel.find>);
@@ -204,6 +211,27 @@ describe('unifiedTransactionRepository', () => {
       // Verify that find was called
       expect(UnifiedTransactionModel.find).toHaveBeenCalled();
       expect(result.items).toHaveLength(2);
+
+      // Verify decodeCursor was called with correct input
+      const findCallArgs = vi.mocked(UnifiedTransactionModel.find).mock.calls[0];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const filterQuery = findCallArgs[0] as any as Record<string, unknown>;
+
+      // Verify $or filter with $gt timestamp was constructed
+      expect(filterQuery.$or).toBeDefined();
+      expect(Array.isArray(filterQuery.$or)).toBe(true);
+      const orFilter = filterQuery.$or as Array<Record<string, unknown>>;
+      expect(orFilter.length).toBe(2);
+      // First condition: eventTimestamp > cursor.timestamp
+      expect(orFilter[0]).toHaveProperty('eventTimestamp');
+      expect((orFilter[0].eventTimestamp as Record<string, Date>).$gt).toEqual(timestamp);
+      // Second condition: eventTimestamp === cursor.timestamp AND utxId > cursor.docId
+      expect(orFilter[1]).toHaveProperty('eventTimestamp');
+      expect((orFilter[1].eventTimestamp as Record<string, Date>)).toEqual(timestamp);
+      expect(orFilter[1]).toHaveProperty('utxId');
+
+      // Verify limit was called with pageSize + 1 (for hasMore detection)
+      expect(capturedLimit).toBe(3); // 2 + 1 for hasMore
     });
 
     // ===== 6. findUnifiedTimeline — filter theo walletAddress (lowercase) =====
@@ -323,13 +351,11 @@ describe('unifiedTransactionRepository', () => {
       }])
     } as unknown as ReturnType<typeof UnifiedTransactionModel.aggregate>);
 
-    // Code khong xu ly undefined rieng, nen gia tri undefined duoc tra ve truc tiep
-    // Day la behavior cua repository, khong phai bug test
     const result = await aggregateSummaryByProjectId('project-001');
 
-    // Neu aggregate tra ve undefined, result se co undefined values
-    expect(result.totalRaisedVnd).toBeUndefined();
-    expect(result.totalTransactions).toBeUndefined();
+    // Repository xu ly undefined bang cach tra ve 0
+    expect(result.totalRaisedVnd).toBe(0);
+    expect(result.totalTransactions).toBe(0);
   });
   });
 

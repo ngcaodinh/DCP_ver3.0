@@ -16,6 +16,7 @@ import {
   decodeCursor,
   findUnifiedTimeline
 } from '../repositories/unifiedTransactionRepository';
+import { findDonationsByProjectIdWithDateFilter } from '../repositories/donationRepository';
 
 /** Regex kiem tra dinh dang dia chi vi Ethereum. */
 const WALLET_REGEX = /^0x[a-fA-F0-9]{40}$/;
@@ -67,6 +68,7 @@ export type UnifiedTimelineResponse = {
   nextCursor: string | null;
   cached: boolean;
   count: number;
+  fallbackMode: boolean;
 };
 
 export type UnifiedTimelineQuery = {
@@ -86,7 +88,6 @@ function buildCacheKey(query: UnifiedTimelineQuery, validatedWallet: string | un
       validatedWallet || 'all',
       query.startDate || 'none',
       query.endDate || 'none',
-      query.cursor || 'none',
       String(limit)
     ].join(':')
   }`;
@@ -179,17 +180,15 @@ function blockchainDonationToEvent(donation: DonationRecord): TimelineEvent {
 async function fallbackFromBlockchain(query: UnifiedTimelineQuery, limit: number): Promise<TimelineEvent[]> {
   if (!query.projectId) return [];
 
-  const { findDonationsByProjectId } = await import('../models/donationModel');
-  const donations = await findDonationsByProjectId(query.projectId, limit * 3);
+  const donations = await findDonationsByProjectIdWithDateFilter(query.projectId, {
+    startDate: query.startDate ? new Date(query.startDate) : undefined,
+    endDate: query.endDate ? new Date(query.endDate) : undefined,
+    walletAddress: query.walletAddress,
+    limit: limit * 3
+  });
 
   let events: TimelineEvent[] = donations
-    .filter(d => {
-      if (query.walletAddress && d.donorAddress.toLowerCase() !== query.walletAddress.toLowerCase()) return false;
-      if (query.startDate && new Date(d.timestamp) < new Date(query.startDate)) return false;
-      if (query.endDate && new Date(d.timestamp) > new Date(query.endDate)) return false;
-      return true;
-    })
-    .map(d => blockchainDonationToEvent(d));
+    .map(d => blockchainDonationToEventFromRepo(d));
 
   events.sort((a, b) => {
     const tA = new Date(a.timestamp).getTime();
@@ -209,6 +208,36 @@ async function fallbackFromBlockchain(query: UnifiedTimelineQuery, limit: number
   }
 
   return events.slice(startIndex, startIndex + limit);
+}
+
+/**
+ * Chuyen doi donation tu repository thanh TimelineEvent
+ * @param donation Donation tu repository voi cac truong da duoc rename
+ */
+function blockchainDonationToEventFromRepo(donation: {
+  _id: string;
+  amount: number;
+  timestamp: Date;
+  walletAddress: string;
+  txHash: string;
+  projectId: string;
+}): TimelineEvent {
+  const correlationId = `donation:${donation.txHash}`;
+  return {
+    eventId: `blockchain:${donation.txHash}`,
+    correlationId,
+    eventType: 'DONATION',
+    timestamp: donation.timestamp.toISOString(),
+    chainBlockNumber: null,
+    amountVnd: donation.amount,
+    chainStatus: 'CONFIRMED',
+    chainTxHash: donation.txHash,
+    payosStatus: null,
+    payosOrderCode: null,
+    walletAddress: donation.walletAddress,
+    projectId: donation.projectId,
+    source: 'blockchain'
+  };
 }
 
 /**
@@ -257,6 +286,7 @@ export async function buildUnifiedTimeline(
   const repoResult = await findUnifiedTimeline(repoParams, limit, query.cursor);
 
   let events: TimelineEvent[];
+  let isFallbackMode = false;
   if (repoResult.items.length > 0) {
     events = repoResult.items.map(item => toTimelineEvent(item as unknown as Record<string, unknown>));
   } else {
@@ -267,6 +297,7 @@ export async function buildUnifiedTimeline(
         : undefined
     });
     events = await fallbackFromBlockchain(query, limit);
+    isFallbackMode = true;
   }
 
   let nextCursor: string | null = null;
@@ -279,7 +310,8 @@ export async function buildUnifiedTimeline(
     timeline: events,
     nextCursor,
     cached: false,
-    count: events.length
+    count: events.length,
+    fallbackMode: isFallbackMode
   };
 
   if (!query.cursor) {

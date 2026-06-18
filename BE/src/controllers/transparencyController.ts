@@ -99,19 +99,27 @@ export async function handleGetUnifiedTimeline(
   const safeCursor =
     cursor && cursor.trim() ? cursor.trim() : undefined;
 
-  const result = await getUnifiedTimeline(
-    queryParams,
-    normalizedPageSize,
-    safeCursor
-  );
+  try {
+    const result = await getUnifiedTimeline(
+      queryParams,
+      normalizedPageSize,
+      safeCursor
+    );
 
-  const grouped = groupTimelineByCorrelation(result.timeline);
+    const grouped = groupTimelineByCorrelation(result.timeline);
 
-  response.status(200).json({
-    timeline: result.timeline,
-    nextCursor: result.nextCursor,
-    cached: result.cached,
-    grouped: Object.fromEntries(grouped),
-    count: result.timeline.length
-  });
+    response.status(200).json({
+      timeline: result.timeline,
+      nextCursor: result.nextCursor,
+      cached: result.cached,
+      grouped: Object.fromEntries(grouped),
+      count: result.timeline.length,
+      fallbackMode: result.fallbackMode ?? false
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    response.status(500).json({
+      error: 'Internal server error'
+    });
+  }
 }

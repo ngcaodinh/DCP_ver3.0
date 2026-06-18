@@ -79,3 +79,60 @@ export async function countTotalDonationsSince(sinceDate: Date): Promise<number>
   return countDonationsSince(sinceDate);
 }
 
+/**
+ * Tim kiem donation theo projectId voi date filter va wallet filter
+ * @param projectId ID cua project
+ * @param options Cac tuy chon loc: startDate, endDate, walletAddress, limit
+ * @returns Mang cac donation phu hop voi dieu kien loc
+ */
+export async function findDonationsByProjectIdWithDateFilter(
+  projectId: string,
+  options?: {
+    startDate?: Date;
+    endDate?: Date;
+    walletAddress?: string;
+    limit?: number;
+  }
+): Promise<Array<{
+  _id: string;
+  amount: number;
+  timestamp: Date;
+  walletAddress: string;
+  txHash: string;
+  projectId: string;
+}>> {
+  const { startDate, endDate, walletAddress, limit = 50 } = options || {};
+
+  // Su dung mongoose model truc tiep
+  const mongoose = await import('mongoose');
+  const DonationModel = mongoose.model<DonationRecord>('Donation');
+
+  const query: Record<string, unknown> = { projectId };
+
+  if (startDate || endDate) {
+    query.timestamp = {};
+    if (startDate) (query.timestamp as Record<string, Date>).$gte = startDate;
+    if (endDate) (query.timestamp as Record<string, Date>).$lte = endDate;
+  }
+
+  if (walletAddress) {
+    query.donorAddress = walletAddress;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const results = await (DonationModel.find(query) as any)
+    .sort({ timestamp: -1 })
+    .limit(limit)
+    .lean()
+    .exec();
+
+  return results.map((doc: Record<string, unknown>) => ({
+    _id: String(doc._id),
+    amount: Number(doc.amount),
+    timestamp: new Date(doc.timestamp as Date),
+    walletAddress: String(doc.donorAddress),
+    txHash: String(doc.transactionHash),
+    projectId: String(doc.projectId)
+  }));
+}
+
