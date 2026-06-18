@@ -17,6 +17,7 @@ import { createOracleRoutes } from './routes/oracleRoutes';
 import { createSbtRoutes } from './routes/sbt.routes';
 import { createGuestRoutes } from './routes/guestRoutes';
 import { createPayosWebhookRoutes } from './routes/webhooks/payos.webhook';
+import { createTransparencyRoutes } from './routes/transparencyRoutes';
 import { validateGuestJwtConfig } from './config/guestJsonWebToken';
 import { applySeoAndCacheHeaders } from './middleware/seoCacheMiddleware';
 import { API_GUEST_PREFIX } from './config/apiPrefixes';
@@ -110,6 +111,7 @@ function registerRoutes(): void {
   application.use('/api/sbt', createSbtRoutes());
   application.use('/api/notifications', createNotificationRoutes());
   application.use('/api/webhooks/payos', createPayosWebhookRoutes());
+  application.use('/api/transparency', createTransparencyRoutes());
   application.use(API_GUEST_PREFIX, createGuestRoutes());
 }
 
