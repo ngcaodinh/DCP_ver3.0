@@ -17,6 +17,7 @@ import { startOverrideExpiryWorker, stopOverrideExpiryWorker } from './workers/o
 import { startSbtMintWorker, stopSbtMintWorker } from './workers/sbtMintWorker';
 import { startSbtMintRecoveryScheduler } from './workers/sbtMintRecoveryScheduler';
 import { initializeSbtEventBridge } from './services/sbtEventBridge.service';
+import { startDataMapperWorker } from './workers/data-mapper.worker';
 
 const logger = getLogger();
 
@@ -47,14 +48,14 @@ function startBackgroundWorkers(): void {
   startManualReviewEscalationWorker();
   // Oracle Worker: xác minh EXIF GPS ảnh minh chứng (concurrency 3)
   startOracleWorker();
-  // Oracle Worker: xác minh EXIF GPS ảnh minh chứng (concurrency 3)
-  startOracleWorker();
   // Override Expiry Worker: expire override request PENDING quá 7 ngày không đủ vote
   startOverrideExpiryWorker();
   // SBT Mint Worker: tự động mint SBT khi Oracle verified
   startSbtMintWorker();
-  // SBT Mint Recovery Scheduler: cron 15 phút phát hiện stuck jobs
+  // SBT Mint Recovery Scheduler: cron 15 phut phat hien stuck jobs
   startSbtMintRecoveryScheduler();
+  // Data Mapper Worker: dong bo PayOS + blockchain vao unified_transactions (5 phut)
+  startDataMapperWorker();
 }
 
 /**

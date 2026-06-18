@@ -3,16 +3,18 @@
  * Ngăn chặn việc log các thông tin nhạy cảm như tokens, passwords, PII.
  *
  * Các fields cần redact: token, body, deviceFingerprintHash, ipAddress, walletAddress
- * Chỉ redact khi giá trị là string dài (>8 chars để tránh truncate ngắn).
+ * Luôn redact tất cả giá trị string để đảm bảo không có sensitive data bị lộ.
  */
 function redactSensitiveData(metadata?: Record<string, unknown>): Record<string, unknown> | undefined {
   if (!metadata) return undefined;
 
   const redacted = { ...metadata };
 
-  // Redact token - có thể chứa Bearer tokens hoặc session tokens
-  if (redacted.token && typeof redacted.token === 'string' && redacted.token.length > 8) {
-    redacted.token = `${redacted.token.substring(0, 8)}...[REDACTED]`;
+  // Redact token - có thể chứa Bearer tokens hoặc session tokens, luôn redact bất kể độ dài
+  if (redacted.token && typeof redacted.token === 'string') {
+    redacted.token = redacted.token.length > 8
+      ? `${redacted.token.substring(0, 8)}...[REDACTED]`
+      : '[TOKEN_REDACTED]';
   }
 
   // Redact body - có thể chứa passwords, PII - luôn redact vì có thể chứa sensitive data
@@ -228,6 +230,20 @@ type LogMetadata = {
   tokenIdRaw?: string;
   dlqAt?: string;
   minIntervalMs?: number;
+  // Data Mapper (D2) — PayOS + blockchain sync
+  utxId?: string;
+  latestBlock?: number;
+  originalBlock?: number;
+  newBlock?: number;
+  blockchainSynced?: number;
+  payosSynced?: number;
+  correlated?: number;
+  reorged?: number;
+  totalItems?: number;
+  chainTxHash?: string;
+  oldBlock?: number;
+  fromBlock?: number;
+  toBlock?: number;
 };
 
 
