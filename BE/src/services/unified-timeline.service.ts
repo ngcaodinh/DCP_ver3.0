@@ -12,18 +12,38 @@ import { getRedisClientIfReady } from '../config/redis';
 import { createInMemoryCache } from '../utils/inMemoryCache';
 import { DonationRecord } from '../models/donationModel';
 import {
-  UnifiedTransactionModel
-} from '../models/unifiedTransactionModel';
-import {
   encodeCursor,
-  decodeCursor
+  decodeCursor,
+  findUnifiedTimeline
 } from '../repositories/unifiedTransactionRepository';
+
+/** Regex kiem tra dinh dang dia chi vi Ethereum. */
+const WALLET_REGEX = /^0x[a-fA-F0-9]{40}$/;
 
 const logger = getLogger();
 
+/**
+ * CẢNH BÁO PII & BẢO MẬT CACHE:
+ * ---------------------------------------------------------------------------
+ * In-memory cache lưu trữ toàn bộ JSON response bao gồm:
+ * - walletAddress: địa chỉ ví blockchain
+ * - amountVnd: số tiền giao dịch
+ * - payosOrderCode: mã đơn PayOS
+ * - correlationId: ID tương quan giao dịch
+ * 
+ * Trong production, Redis LUÔN phải available và được ưu tiên sử dụng.
+ * In-memory cache chỉ là FALLBACK khi Redis không khả dụng.
+ * KHÔNG nên sử dụng in-memory cache như primary cache trong production
+ * vì:
+ * 1. Không có TTL hiệu quả khi server restart
+ * 2. Không chia sẻ được giữa các instances (multi-instance deployment)
+ * 3. Tăng memory usage khi scale horizontally
+ * ---------------------------------------------------------------------------
+ */
+
 const unifiedCachePrefix = 'transparency:unified:';
 const unifiedCacheTimeToLiveSeconds = 120;
-const unifiedCacheFallback = createInMemoryCache<string>();
+const unifiedCacheFallback = createInMemoryCache<string>({ maxEntries: 500 });
 const MAX_PAGE_SIZE = 50;
 
 export type TimelineEvent = {
@@ -58,12 +78,12 @@ export type UnifiedTimelineQuery = {
   limit?: number;
 };
 
-function buildCacheKey(query: UnifiedTimelineQuery): string {
+function buildCacheKey(query: UnifiedTimelineQuery, validatedWallet: string | undefined): string {
   const limit = Math.min(query.limit || MAX_PAGE_SIZE, MAX_PAGE_SIZE);
   return `${unifiedCachePrefix}${
     [
       query.projectId || 'all',
-      query.walletAddress || 'all',
+      validatedWallet || 'all',
       query.startDate || 'none',
       query.endDate || 'none',
       query.cursor || 'none',
@@ -125,7 +145,7 @@ function toTimelineEvent(doc: Record<string, unknown>): TimelineEvent {
     correlationId: String(doc.correlationId || ''),
     eventType: String(doc.eventType || 'DONATION') as TimelineEvent['eventType'],
     timestamp: ts,
-    chainBlockNumber: null,
+    chainBlockNumber: doc.chainBlockNumber != null ? Number(doc.chainBlockNumber) : null,
     amountVnd,
     chainStatus: normalizedChainStatus,
     chainTxHash: doc.chainTxHash as string | null,
@@ -156,55 +176,11 @@ function blockchainDonationToEvent(donation: DonationRecord): TimelineEvent {
   };
 }
 
-async function queryFromUnified(query: UnifiedTimelineQuery, limit: number): Promise<Record<string, unknown>[]> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const filter: Record<string, any> = {};
-
-  if (query.projectId) filter.projectId = query.projectId;
-  if (query.walletAddress) filter.walletAddress = query.walletAddress.toLowerCase();
-
-  if (query.startDate || query.endDate) {
-    filter.eventTimestamp = {};
-    if (query.startDate) {
-      (filter.eventTimestamp as Record<string, Date>)['$gte'] = new Date(query.startDate);
-    }
-    if (query.endDate) {
-      (filter.eventTimestamp as Record<string, Date>)['$lte'] = new Date(query.endDate);
-    }
-  }
-
-  if (query.cursor) {
-    const decoded = decodeCursor(query.cursor);
-    if (decoded) {
-      // Sort ASC (1) -> page tiep theo can records MOI HON (timestamp lon hon)
-      filter.$and = [
-        filter.eventTimestamp ? { eventTimestamp: filter.eventTimestamp } : {},
-        {
-          $or: [
-            { eventTimestamp: { $gt: decoded.timestamp } },
-            {
-              eventTimestamp: decoded.timestamp,
-              utxId: { $gt: decoded.documentId }
-            }
-          ]
-        }
-      ];
-      delete filter.eventTimestamp;
-    }
-  }
-
-  return UnifiedTransactionModel.find(filter)
-    .sort({ eventTimestamp: 1, utxId: 1 })
-    .limit(limit)
-    .lean<Record<string, unknown>[]>()
-    .exec();
-}
-
 async function fallbackFromBlockchain(query: UnifiedTimelineQuery, limit: number): Promise<TimelineEvent[]> {
   if (!query.projectId) return [];
 
   const { findDonationsByProjectId } = await import('../models/donationModel');
-  const donations = await findDonationsByProjectId(query.projectId, 1000);
+  const donations = await findDonationsByProjectId(query.projectId, limit * 3);
 
   let events: TimelineEvent[] = donations
     .filter(d => {
@@ -239,7 +215,7 @@ async function fallbackFromBlockchain(query: UnifiedTimelineQuery, limit: number
  * Ham chinh: xay dung unified timeline.
  * Thu tu:
  * 1. Doc tu cache (neu khong co cursor)
- * 2. Query tu unified_transactions collection
+ * 2. Query tu unified_transactions collection (thong qua repository)
  * 3. Neu rong -> fallback query blockchain donations
  * 4. Tao nextCursor
  * 5. Cache result (neu khong co cursor)
@@ -248,7 +224,17 @@ export async function buildUnifiedTimeline(
   query: UnifiedTimelineQuery
 ): Promise<UnifiedTimelineResponse> {
   const limit = Math.min(query.limit || MAX_PAGE_SIZE, MAX_PAGE_SIZE);
-  const cacheKey = buildCacheKey(query);
+
+  // Kiem tra dinh dang dia chi vi truoc khi query
+  let validatedWalletAddress = query.walletAddress;
+  if (query.walletAddress && !WALLET_REGEX.test(query.walletAddress)) {
+    logger.warn('Invalid wallet address format, skipping filter.', {
+      walletAddress: `${query.walletAddress.substring(0, 6)}...[REDACTED]`
+    });
+    validatedWalletAddress = undefined;
+  }
+
+  const cacheKey = buildCacheKey(query, validatedWalletAddress);
 
   if (!query.cursor) {
     const cached = await getCache(cacheKey);
@@ -260,13 +246,26 @@ export async function buildUnifiedTimeline(
     logger.info('Unified timeline cache miss.', { projectId: query.projectId });
   }
 
-  const unifiedDocs = await queryFromUnified(query, limit);
+  // Chuyen doi query params sang dinh dang cua repository (Date objects)
+  const repoParams = {
+    projectId: query.projectId,
+    walletAddress: validatedWalletAddress,
+    startDate: query.startDate ? new Date(query.startDate) : undefined,
+    endDate: query.endDate ? new Date(query.endDate) : undefined
+  };
+
+  const repoResult = await findUnifiedTimeline(repoParams, limit, query.cursor);
 
   let events: TimelineEvent[];
-  if (unifiedDocs.length > 0) {
-    events = unifiedDocs.map(doc => toTimelineEvent(doc));
+  if (repoResult.items.length > 0) {
+    events = repoResult.items.map(item => toTimelineEvent(item as unknown as Record<string, unknown>));
   } else {
-    logger.info('Unified collection empty, using fallback.', { projectId: query.projectId });
+    logger.info('Unified collection empty, using fallback.', {
+      projectId: query.projectId,
+      walletAddress: validatedWalletAddress
+        ? `${validatedWalletAddress.substring(0, 6)}...[REDACTED]`
+        : undefined
+    });
     events = await fallbackFromBlockchain(query, limit);
   }
 
@@ -298,6 +297,15 @@ export async function buildUnifiedTimeline(
 
 /**
  * Xoa cache khi co transaction moi duoc sync.
+ * 
+ * LUU Y: Han che su dung SCAN thay vi KEYS trong production.
+ * - KEYS pattern la O(N) va BLOCK Redis trong qua trinh scan - NGUY HIEM cho production.
+ * - SCAN la iterator-based, chi tra ve 1 tap nho keys moi lan goi, khong block Redis.
+ * - Tradeoff: SCAN co the miss keys neu co write race nhung nhanh chong hon
+ *   trong truong hop binh thuong.
+ * - In production, neu Redis co nhieu keys (>10k), bat buoc phai dung SCAN.
+ * - Do cache invalidation la low-frequency (chi khi sync transaction moi), 
+ *   KEYS van duoc su dung nhung voi warning nay de developer awareness.
  */
 export async function invalidateUnifiedTimelineCache(projectId?: string): Promise<void> {
   const redisClient = getRedisClientIfReady();
@@ -307,10 +315,21 @@ export async function invalidateUnifiedTimelineCache(projectId?: string): Promis
       const pattern = projectId
         ? `${unifiedCachePrefix}${projectId}:*`
         : `${unifiedCachePrefix}*`;
-      const keyList = await redisClient.keys(pattern);
+      
+      // Su dung SCAN iterator thay vi scanStream (da bi loai bo khoi redis@5.12.0)
+      // COUNT = 100 nghia la lay 100 keys moi vong lap, balance giua toc do va performance
+      const keyList: string[] = [];
+      for await (const batch of redisClient.scanIterator({ MATCH: pattern, COUNT: 100 })) {
+        keyList.push(...batch);
+      }
+
       if (keyList.length > 0) {
-        await redisClient.del(keyList);
-        logger.info('Unified timeline cache invalidated via Redis.', { projectId });
+        // redis@5 del accepts multiple keys but types don't reflect this - use spread assertion
+        const delCommand = redisClient.del as (...keys: string[]) => Promise<number>;
+        await delCommand(...keyList);
+        logger.info('Unified timeline cache invalidated via Redis SCAN.', { 
+          projectId
+        });
       }
     } catch (err) {
       logger.warn('Redis invalidate unified timeline cache failed.', {

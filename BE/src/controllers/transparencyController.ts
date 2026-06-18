@@ -1,5 +1,22 @@
 import { Request, Response } from 'express';
+import { z } from 'zod';
 import { getUnifiedTimeline, groupTimelineByCorrelation } from '../services/unified-timeline.service';
+
+/**
+ * Schema Zod cho query params cua unified timeline endpoint.
+ * Endpoint nay la public vi du lieu transaction va dia chi vi
+ * khong duoc xem la PII nhay cam (chi la thong tin cong khai tren blockchain).
+ */
+const unifiedTimelineQuerySchema = z.object({
+  projectId: z.string().optional(),
+  walletAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/).optional(),
+  startDate: z.string().datetime().optional(),
+  endDate: z.string().datetime().optional(),
+  pageSize: z.coerce.number().int().min(1).max(50).optional().default(50),
+  cursor: z.string().optional()
+});
+
+type UnifiedTimelineQueryInput = z.infer<typeof unifiedTimelineQuerySchema>;
 
 function normalizePageSize(value: unknown, defaultValue: number, maxValue: number): number {
   const parsed = Number(value);
@@ -17,6 +34,8 @@ function parseDateParam(value: unknown): string | undefined {
 /**
  * Xu ly GET /api/transparency/unified-timeline.
  *
+ * Endpoint nay la public vi du lieu transaction va dia chi vi
+ * khong duoc xem la PII nhay cam — chi la thong tin cong khai tren blockchain.
  * Tra ve unified timeline voi cursor-based pagination.
  * Cache: Redis TTL 2 phut.
  *
@@ -39,6 +58,21 @@ export async function handleGetUnifiedTimeline(
   request: Request,
   response: Response
 ): Promise<void> {
+  // Validate query params voi Zod schema
+  const parseResult = unifiedTimelineQuerySchema.safeParse(request.query);
+
+  if (!parseResult.success) {
+    const errors = parseResult.error.errors.map(err => ({
+      field: err.path.join('.'),
+      message: err.message
+    }));
+    response.status(400).json({
+      error: 'Validation failed',
+      details: errors
+    });
+    return;
+  }
+
   const {
     projectId,
     walletAddress,
@@ -46,15 +80,15 @@ export async function handleGetUnifiedTimeline(
     endDate,
     pageSize,
     cursor
-  } = request.query;
+  } = parseResult.data;
 
   const queryParams = {
     projectId:
-      typeof projectId === 'string' && projectId.trim()
+      projectId && projectId.trim()
         ? projectId.trim()
         : undefined,
     walletAddress:
-      typeof walletAddress === 'string' && walletAddress.trim()
+      walletAddress && walletAddress.trim()
         ? walletAddress.trim()
         : undefined,
     startDate: parseDateParam(startDate),
@@ -63,7 +97,7 @@ export async function handleGetUnifiedTimeline(
 
   const normalizedPageSize = normalizePageSize(pageSize, 50, 50);
   const safeCursor =
-    typeof cursor === 'string' && cursor.trim() ? cursor.trim() : undefined;
+    cursor && cursor.trim() ? cursor.trim() : undefined;
 
   const result = await getUnifiedTimeline(
     queryParams,

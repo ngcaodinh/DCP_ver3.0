@@ -45,6 +45,16 @@ function redactSensitiveData(metadata?: Record<string, unknown>): Record<string,
     redacted.smartAccountAddress = `${redacted.smartAccountAddress.substring(0, 6)}...[REDACTED]`;
   }
 
+  // Redact fileName - có thể chứa thông tin nhạy cảm
+  if (redacted.fileName && typeof redacted.fileName === 'string' && redacted.fileName.length > 8) {
+    redacted.fileName = `${redacted.fileName.substring(0, 8)}...[REDACTED]`;
+  }
+
+  // Redact originalName - có thể chứa thông tin nhạy cảm
+  if (redacted.originalName && typeof redacted.originalName === 'string' && redacted.originalName.length > 8) {
+    redacted.originalName = `${redacted.originalName.substring(0, 8)}...[REDACTED]`;
+  }
+
   // Redact guest wallet address - có thể link với on-chain activity
   if (redacted.guestWalletAddress && typeof redacted.guestWalletAddress === 'string') {
     redacted.guestWalletAddress = `${redacted.guestWalletAddress.substring(0, 6)}...[REDACTED]`;
@@ -144,6 +154,23 @@ type LogMetadata = {
   idempotencyKey?: string;
   finalTransferId?: string;
   bankCode?: string;
+  // Upload validation metadata (B6)
+  fileName?: string;
+  originalName?: string;
+  totalFiles?: number;
+  rowCount?: number;
+  declaredMimeType?: string;
+  detectedMimeType?: string;
+  actualSize?: number;
+  sizeLimit?: number;
+  failedCount?: number;
+  types?: string | string[];
+  maxRows?: number;
+  fileSize?: number;
+  fieldName?: string;
+  detectedExtension?: string;
+  failedFiles?: string | string[];
+  size?: string;
 };
 
 

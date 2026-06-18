@@ -34,25 +34,27 @@ export function buildBlockchainCorrelationId(txHash: string): string {
 
 /**
  * Ma hoa cursor tu timestamp va document ID.
- * Format: base64(timestampISO + "_" + _id)
+ * Format: base64(timestampISO + "\x00" + utxId)
+ * Su dung null char (\x00) lam separator vi khong xuat hien trong UUID hoac timestamp ISO.
  * Opake, stable, concurrent-write-safe.
  */
 export function encodeCursor(timestamp: Date, documentId: string): string {
-  return Buffer.from(`${timestamp.toISOString()}_${documentId}`).toString('base64');
+  return Buffer.from(`${timestamp.toISOString()}\x00${documentId}`).toString('base64');
 }
 
 /**
  * Giai ma cursor thanh timestamp va document ID.
+ * Doc separator la null char (\x00) de tranh loi khi _id chua dau gach duoi.
  */
 export function decodeCursor(
   cursor: string
 ): { timestamp: Date; documentId: string } | null {
   try {
     const decoded = Buffer.from(cursor, 'base64').toString('utf-8');
-    const lastSeparatorIndex = decoded.lastIndexOf('_');
-    if (lastSeparatorIndex === -1) return null;
-    const timestampStr = decoded.slice(0, lastSeparatorIndex);
-    const documentId = decoded.slice(lastSeparatorIndex + 1);
+    const separatorIndex = decoded.indexOf('\x00');
+    if (separatorIndex === -1) return null;
+    const timestampStr = decoded.slice(0, separatorIndex);
+    const documentId = decoded.slice(separatorIndex + 1);
     const timestamp = new Date(timestampStr);
     if (isNaN(timestamp.getTime()) || !documentId) return null;
     return { timestamp, documentId };
@@ -63,7 +65,8 @@ export function decodeCursor(
 
 /**
  * Lay danh sach unified transactions voi cursor-based pagination.
- * Sap xep theo eventTimestamp DESC, _id DESC de stable sort.
+ * Sap xep theo eventTimestamp ASC, utxId ASC de hien thi timeline tang dan.
+ * Cursor logic: $gt thay vi $lt vi sort ASC nghia la thoi gian tang dan.
  */
 export async function findUnifiedTimeline(
   params: UnifiedTimelineQueryParams,
@@ -90,16 +93,16 @@ export async function findUnifiedTimeline(
 
   if (cursorData) {
     filterQuery.$or = [
-      { eventTimestamp: { $lt: cursorData.timestamp } },
+      { eventTimestamp: { $gt: cursorData.timestamp } },
       {
         eventTimestamp: cursorData.timestamp,
-        utxId: { $lt: cursorData.documentId }
+        utxId: { $gt: cursorData.documentId }
       }
     ];
   }
 
   const items = await UnifiedTransactionModel.find(filterQuery)
-    .sort({ eventTimestamp: -1, utxId: -1 })
+    .sort({ eventTimestamp: 1, utxId: 1 })
     .limit(normalizedPageSize + 1)
     .lean<UnifiedTransaction[]>()
     .exec();
@@ -285,7 +288,9 @@ export async function aggregateSummaryByProjectId(
         totalTransactions: { $sum: 1 }
       }
     }
-  ]).exec();
+  ])
+    .hint({ projectId: 1, eventTimestamp: 1 })
+    .exec();
 
   if (!aggregateResult.length) {
     return { totalRaisedVnd: 0, totalTransactions: 0 };

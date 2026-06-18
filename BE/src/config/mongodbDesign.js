@@ -404,6 +404,38 @@ const mongodbDesign = {
         { keys: { domain: 1, code: 1 }, unique: true, reason: 'Ngăn trùng mã lỗi theo miền.' },
         { keys: { isActive: 1 }, reason: 'Tối ưu tra cứu mã lỗi đang dùng.' }
       ]
+    },
+    {
+      name: 'unified_transactions',
+      purpose: 'Tổng hợp giao dịch minh bạch từ PayOS và blockchain.',
+      fields: [
+        { name: 'utxId', type: 'String', description: 'UUID duy nhất của unified transaction.' },
+        { name: 'correlationId', type: 'String', description: 'Mã liên kết PayOS và blockchain events.' },
+        { name: 'projectId', type: 'String', description: 'UUID dự án.' },
+        { name: 'walletAddress', type: 'String', description: 'Địa chỉ ví người dùng.' },
+        { name: 'eventType', type: 'String', description: 'Loại sự kiện: DEPOSIT, DONATION, DISBURSEMENT, MINT.' },
+        { name: 'eventTimestamp', type: 'Date', description: 'Thời điểm sự kiện xảy ra.' },
+        { name: 'amountVnd', type: 'Number', description: 'Số tiền VNĐ.' },
+        { name: 'amountUsd', type: 'Number', description: 'Số tiền USD tương đương.' },
+        { name: 'source', type: 'String', description: 'Nguồn dữ liệu: PAYOS, BLOCKCHAIN, MIXED.' },
+        { name: 'chainStatus', type: 'String', description: 'Trạng thái blockchain: PENDING, CONFIRMED, FAILED, REORGED.' },
+        { name: 'chainTxHash', type: 'String', description: 'Transaction hash on-chain.' },
+        { name: 'chainBlockNumber', type: 'Number', description: 'Số block on-chain.' },
+        { name: 'payosStatus', type: 'String', description: 'Trạng thái PayOS: PENDING_PAYMENT, PAYMENT_CONFIRMED, FAILED.' },
+        { name: 'payosOrderCode', type: 'String', description: 'Mã đơn PayOS.' },
+        { name: 'payosTransactionId', type: 'String', description: 'PayOS transaction ID.' },
+        { name: 'payosRecordId', type: 'String', description: 'ID gốc từ PayOS.' },
+        { name: 'blockchainRecordId', type: 'String', description: 'ID gốc từ blockchain.' },
+        { name: 'metadata', type: 'Object', description: 'Dữ liệu bổ sung.' },
+        { name: 'createdAt', type: 'Date', description: 'Thời điểm tạo.' },
+        { name: 'updatedAt', type: 'Date', description: 'Thời điểm cập nhật.' }
+      ],
+      indexes: [
+        { keys: { utxId: 1 }, unique: true, reason: 'Đảm bảo mỗi unified transaction chỉ tồn tại một bản ghi.' },
+        { keys: { projectId: 1, eventTimestamp: 1 }, reason: 'Tối ưu timeline theo dự án và thời gian.' },
+        { keys: { walletAddress: 1, eventTimestamp: 1 }, reason: 'Tối ưu tra cứu theo ví và thời gian.' },
+        { keys: { correlationId: 1 }, unique: true, reason: 'Đảm bảo không trùng correlationId.' }
+      ]
     }
   ]
 };
