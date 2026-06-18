@@ -20,6 +20,7 @@ import {
 import { createPayosTransfer, getPayosTransferStatusByReferenceId } from '../services/payosService';
 import { createUserNotification } from '../services/notificationService';
 import { processDisbursementTransferWebhook } from '../services/disbursementService';
+import { getPayosBankCode } from '../config/payosBankCodes';
 
 /**
  * Giới hạn số lần retry tối đa.
@@ -260,19 +261,9 @@ export async function processTransferJob(job: Job<DisbursementTransferJobData>):
     return;
   }
 
-  // Chuẩn bị data cho log
-  const bankCode = (() => {
-    const bankMap: Record<string, string> = {
-      VIETCOMBANK: '970436', BIDV: '970418', VIETINBANK: '970415',
-      AGRIBANK: '970405', ACB: '970416', TECHCOMBANK: '970407',
-      MBBANK: '970422', VPBANK: '970432', SACOMBANK: '970403',
-      TPBANK: '970423', OCB: '970448', HDBANK: '970437', VIB: '970441',
-      SHB: '970443', MSB: '970426', SEABANK: '970440', LPBANK: '970449'
-    };
-    const normalized = disbursement.beneficiaryBankAccount.bankName
-      .normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
-    return bankMap[normalized] ?? disbursement.beneficiaryBankAccount.bankName.slice(0, 32);
-  })();
+  // Lấy PayOS bank code từ config - đã được externalize vào payosBankCodes.ts
+  const bankCode = getPayosBankCode(disbursement.beneficiaryBankAccount.bankName)
+    || disbursement.beneficiaryBankAccount.bankName.slice(0, 32);
 
   // Tạo bản ghi log cho attempt này
   const transferLogRecord: DisbursementTransferLogRecord = {
@@ -445,12 +436,6 @@ export function startPayosTransferWorker(): void {
     logger.warn('Disbursement transfer queue không khả dụng. Worker không khởi động được.');
     return;
   }
-
-  // Đăng ký custom backoff strategy
-  queue.process(async (job: Job<DisbursementTransferJobData>) => {
-    // Xử lý job chính
-    await processTransferJob(job);
-  });
 
   // Retry với exponential backoff: 1m → 5m → 30m
   queue.process(async (job: Job<DisbursementTransferJobData>) => {

@@ -43,6 +43,7 @@ const depositTransactionSchema = new Schema<DepositTransaction>({
 });
 
 const DepositTransactionModel = mongoose.model<DepositTransaction>('DepositTransaction', depositTransactionSchema);
+export { DepositTransactionModel };
 
 /**
  * Hàm tạo mới giao dịch nạp tiền.

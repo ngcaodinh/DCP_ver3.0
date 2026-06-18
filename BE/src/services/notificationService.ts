@@ -17,9 +17,11 @@ type CreateNotificationPayload = {
   deduplicationKey?: string;
 };
 
-/** Hàm tạo mã thông báo an toàn. Mục đích: sinh khóa duy nhất đủ khó đoán để lưu notification. */
+/** Hàm tạo notification ID duy nhất. Sử dụng crypto.randomUUID() để đảm bảo tính ngẫu nhiên cryptographic cho notificationId. */
 function createNotificationId(): string {
-  return `NOTI-${Date.now()}-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const uuid = crypto.randomUUID(); // Format: 550e8400-e29b-41d4-a716-446655440000
+  return `NOTI-${Date.now()}-${uuid.replace(/-/g, '').toUpperCase()}`;
 }
 
 /** Hàm tạo thông báo cho người dùng. Mục đích: lưu một notification mới và tránh trùng theo khóa nghiệp vụ nếu có. */
