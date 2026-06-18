@@ -14,6 +14,7 @@ import { useState, useCallback, useEffect } from "react";
 
 import SybilManagementPanel from "./SybilManagementPanel";
 import SystemErrorLogPanel from "./SystemErrorLogPanel";
+import TransferQueuePanel from "./TransferQueuePanel";
 
 import { fetchApi, buildApiUrl } from "@/app/utils/apiClient";
 
@@ -1796,6 +1797,9 @@ export default function NonDashboardPanel({
 
     case "sybilManagement":
       return <SybilManagementPanel onPushToast={onPushToast} />;
+
+    case "transferQueue":
+      return <TransferQueuePanel onPushToast={onPushToast} />;
 
     default:
       return null;

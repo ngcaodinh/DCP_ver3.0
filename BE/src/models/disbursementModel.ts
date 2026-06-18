@@ -248,3 +248,31 @@ export async function updateDisbursementByRequestIdWithCondition(
 export async function countDisbursementsByStatus(status: DisbursementStatus): Promise<number> {
   return DisbursementMongoModel.countDocuments({ status }).exec();
 }
+
+/**
+ * Tìm tất cả disbursements đang trong trạng thái MANUAL_REVIEW.
+ * Mục đích: Socket.io polling bridge + A3 pending-review list.
+ */
+export async function findDisbursementsInManualReview(): Promise<DisbursementRecord[]> {
+  return DisbursementMongoModel.find({ payosTransferStatus: 'MANUAL_REVIEW' })
+    .sort({ updatedAt: -1 })
+    .lean<DisbursementRecord[]>()
+    .exec();
+}
+
+/**
+ * Tìm disbursements có payosTransferStatus === MANUAL_REVIEW và requestId không thuộc danh sách đã có trong queue.
+ * Mục đích: A3 sync — tìm disbursements cần enqueue mà chưa có queue item.
+ */
+export async function findDisbursementsNeedingManualReview(
+  excludeRequestIds: string[]
+): Promise<DisbursementRecord[]> {
+  const filter: Record<string, unknown> = { payosTransferStatus: 'MANUAL_REVIEW' };
+  if (excludeRequestIds.length > 0) {
+    filter['requestId'] = { $nin: excludeRequestIds };
+  }
+  return DisbursementMongoModel.find(filter)
+    .sort({ updatedAt: -1 })
+    .lean<DisbursementRecord[]>()
+    .exec();
+}

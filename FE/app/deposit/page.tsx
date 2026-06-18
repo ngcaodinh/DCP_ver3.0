@@ -2,7 +2,7 @@
 
 import { Suspense, type ChangeEvent, type MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useRouter, useSearchParams, type ReadonlyURLSearchParams } from 'next/navigation';
 import { readAuthSession } from '../utils/authSession';
 import { useAuthCheck } from '../utils/useAuthCheck';
 import LoginModal from '../components/LoginModal';

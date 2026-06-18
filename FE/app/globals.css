@@ -2,6 +2,9 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Leaflet map — import global để tránh SSR mismatch */
+@import 'leaflet/dist/leaflet.css';
+
 *,
 *::before,
 *::after {

@@ -362,3 +362,31 @@ export async function findSybilAuditLogsByUserId(userId: string): Promise<SybilA
 export async function countSybilAuditLogs(): Promise<number> {
   return SybilAuditLogModel.countDocuments({}).exec();
 }
+
+/**
+ * Hàm lấy danh sách người dùng theo role.
+ * Mục đích: Oracle B2 — lấy tất cả commissioner (admin + regulatory) để tạo snapshot khi có override request.
+ * Chỉ lấy ACTIVE accounts để tránh include tài khoản bị suspend vào snapshot.
+ */
+export async function findUsersByRole(roles: string[]): Promise<AuthUser[]> {
+  if (!roles.length) return [];
+  return AuthUserModel.find({
+    role: { $in: roles },
+    accountStatus: 'ACTIVE'
+  }).lean<AuthUser[]>().exec();
+}
+
+/**
+ * Lấy danh sách commissioner đủ tư cách biểu quyết override request.
+ *
+ * [B2-fix #5] Tách helper riêng thay vì thêm isSybil filter vào findUsersByRole —
+ * tránh ảnh hưởng các caller khác cần lấy cả Sybil users (vd: trang admin review Sybil).
+ * Lọc thêm isSybil=false để ngăn Sybil-flagged user lọt vào commissionerSnapshot.
+ */
+export async function findActiveCommissioners(): Promise<AuthUser[]> {
+  return AuthUserModel.find({
+    role: { $in: ['admin', 'regulatory'] },
+    accountStatus: 'ACTIVE',
+    isSybil: false
+  }).lean<AuthUser[]>().exec();
+}
