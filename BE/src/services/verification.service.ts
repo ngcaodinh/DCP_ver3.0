@@ -38,6 +38,29 @@ const cacheTimeToLiveSeconds = 300; // 5 phut
 const verifyCacheFallback = createInMemoryCache<string>({ maxEntries: 500 });
 const summaryCacheFallback = createInMemoryCache<string>({ maxEntries: 200 });
 
+/** Chi so suc khoe cache — phuc vu monitoring va alerting. */
+const cacheMetrics = {
+  redisGetErrors: 0,
+  redisSetErrors: 0,
+  redisInvalidateErrors: 0,
+  redisUnreachable: 0,
+  lastRedisFailureAt: 0 as number
+};
+
+/** Reset chi so suc khoe cache. Mục đích: phuc vu test. */
+export function resetCacheMetrics(): void {
+  cacheMetrics.redisGetErrors = 0;
+  cacheMetrics.redisSetErrors = 0;
+  cacheMetrics.redisInvalidateErrors = 0;
+  cacheMetrics.redisUnreachable = 0;
+  cacheMetrics.lastRedisFailureAt = 0;
+}
+
+/** Lay chi so suc khoe cache hien tai. Mục đích: Prometheus metrics endpoint. */
+export function getCacheMetrics(): Readonly<typeof cacheMetrics> {
+  return { ...cacheMetrics };
+}
+
 /** Trang thai xac nhan tren blockchain */
 export type ChainStatus = 'CONFIRMED' | 'PENDING' | 'FAILED' | 'REORGED';
 
@@ -112,12 +135,16 @@ async function getFromCache(cacheKey: string): Promise<string | null> {
   if (redisClient) {
     try {
       const cached = await redisClient.get(cacheKey);
-      if (cached) return cached;
+      if (cached != null) return String(cached);
     } catch (err) {
+      cacheMetrics.redisGetErrors++;
+      cacheMetrics.lastRedisFailureAt = Date.now();
       logger.warn('Redis get verification cache failed.', {
         errorMessage: err instanceof Error ? err.message : String(err)
       });
     }
+  } else {
+    cacheMetrics.redisUnreachable++;
   }
   return verifyCacheFallback.get(cacheKey);
 }
@@ -132,12 +159,16 @@ async function getFromSummaryCache(cacheKey: string): Promise<string | null> {
   if (redisClient) {
     try {
       const cached = await redisClient.get(cacheKey);
-      if (cached) return cached;
+      if (cached != null) return String(cached);
     } catch (err) {
+      cacheMetrics.redisGetErrors++;
+      cacheMetrics.lastRedisFailureAt = Date.now();
       logger.warn('Redis get summary cache failed.', {
         errorMessage: err instanceof Error ? err.message : String(err)
       });
     }
+  } else {
+    cacheMetrics.redisUnreachable++;
   }
   return summaryCacheFallback.get(cacheKey);
 }
@@ -154,6 +185,8 @@ async function setVerifyCache(cacheKey: string, json: string): Promise<void> {
       await redisClient.set(cacheKey, json, { EX: cacheTimeToLiveSeconds });
       return;
     } catch (err) {
+      cacheMetrics.redisSetErrors++;
+      cacheMetrics.lastRedisFailureAt = Date.now();
       logger.warn('Redis set verification cache failed.', {
         errorMessage: err instanceof Error ? err.message : String(err)
       });
@@ -174,6 +207,8 @@ async function setSummaryCache(cacheKey: string, json: string): Promise<void> {
       await redisClient.set(cacheKey, json, { EX: cacheTimeToLiveSeconds });
       return;
     } catch (err) {
+      cacheMetrics.redisSetErrors++;
+      cacheMetrics.lastRedisFailureAt = Date.now();
       logger.warn('Redis set summary cache failed.', {
         errorMessage: err instanceof Error ? err.message : String(err)
       });
@@ -378,20 +413,27 @@ export async function invalidateVerificationCache(projectId?: string): Promise<v
       // Verify cache se bi expires tu dong qua TTL
       const patterns: string[] = [`${summaryCachePrefix}${projectId || '*'}`];
 
+      let totalDeleted = 0;
       for (const pattern of patterns) {
         const keyList: string[] = [];
-        for await (const batch of redisClient.scanIterator({ MATCH: pattern, COUNT: 100 })) {
-          keyList.push(...batch);
+        for await (const batch of redisClient.scanIterator({ MATCH: pattern, COUNT: 200 })) {
+          // scanIterator tra ve string[] | Buffer[] — normalize sang string bang String()
+          keyList.push(...batch.map(k => String(k)));
         }
 
         if (keyList.length > 0) {
-          const delCommand = redisClient.del as (...keys: string[]) => Promise<number>;
-          await delCommand(...keyList);
+          // Su dung UNLINK thay vi DEL — xoa key khoi Redis ngay lap tuc
+          // nhung Redis co the reclaim memory trong background worker
+          const unlinkCommand = redisClient.unlink as (...keys: string[]) => Promise<number>;
+          await unlinkCommand(...keyList);
+          totalDeleted += keyList.length;
         }
       }
 
-      logger.info('Verification cache invalidated.', { projectId });
+      logger.info('Verification cache invalidated via UNLINK.', { projectId, keysDeleted: totalDeleted });
     } catch (err) {
+      cacheMetrics.redisInvalidateErrors++;
+      cacheMetrics.lastRedisFailureAt = Date.now();
       logger.warn('Redis invalidate verification cache failed.', {
         errorMessage: err instanceof Error ? err.message : String(err)
       });
