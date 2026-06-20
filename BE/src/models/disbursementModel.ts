@@ -192,9 +192,21 @@ export async function findLatestDisbursements(limitCount: number): Promise<Disbu
     .exec();
 }
 
-/** Tìm các yêu cầu giải ngân theo projectId. Mục đích: xem lịch sử giải ngân dự án. */
-export async function findDisbursementsByProjectId(projectId: string): Promise<DisbursementRecord[]> {
-  return DisbursementMongoModel.find({ projectId }).sort({ createdAt: -1 }).lean<DisbursementRecord[]>().exec();
+/** Tìm các yêu cầu giải ngân theo projectId. Mục đích: xem lịch sử giải ngân dự án.
+ * Giới hạn tối đa 1000 bản ghi mới nhất để tránh OOM/timeout khi project có lịch sử giải ngân lớn. */
+export async function findDisbursementsByProjectId(
+  projectId: string,
+  limitCount: number = 1000
+): Promise<DisbursementRecord[]> {
+  const normalizedLimitCount = Number.isFinite(limitCount)
+    ? Math.max(1, Math.min(1000, Math.floor(limitCount)))
+    : 1000;
+
+  return DisbursementMongoModel.find({ projectId })
+    .sort({ createdAt: -1 })
+    .limit(normalizedLimitCount)
+    .lean<DisbursementRecord[]>()
+    .exec();
 }
 
 /** Tìm các yêu cầu giải ngân theo organizationId. Mục đích: trang quản lý của tổ chức. */

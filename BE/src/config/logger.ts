@@ -82,6 +82,7 @@ type LogMetadata = {
   performedBy?: string;
   performedByRole?: string;
   reason?: string;
+  keysDeleted?: number;
   userId?: string;
   action?: string;
   newRenewalCount?: number;

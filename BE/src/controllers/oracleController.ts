@@ -4,8 +4,7 @@ import { getLogger } from '../config/logger';
 import { sendSuccessResponse, sendErrorResponse, sendErrorFromUnknown } from '../utils/apiResponse';
 import type { AuthenticatedRequest } from '../middleware/authenticationMiddleware';
 import {
-  verifyEvidenceImage,
-  ORACLE_MAX_FILE_SIZE
+  verifyEvidenceImage
 } from '../services/oracleService';
 import {
   submitOverrideVote,
@@ -46,6 +45,13 @@ export async function handleVerifyImage(
     return;
   }
 
+  // validatedFile đã được magic bytes + size check bởi createUploadValidationMiddleware
+  // Nếu invalid, middleware đã trả 413/415 và không gọi controller này
+  if (request.validatedFile && !request.validatedFile.isValid) {
+    sendErrorResponse(response, 415, 'File không hợp lệ.', 'UNSUPPORTED_MEDIA_TYPE');
+    return;
+  }
+
   const { projectId, evidenceCid } = request.body as { projectId?: string; evidenceCid?: string };
 
   if (!projectId?.trim()) {
@@ -54,17 +60,6 @@ export async function handleVerifyImage(
   }
   if (!evidenceCid?.trim()) {
     sendErrorResponse(response, 400, 'Thiếu evidenceCid.', 'VALIDATION_ERROR');
-    return;
-  }
-
-  if (file.size > ORACLE_MAX_FILE_SIZE) {
-    sendErrorResponse(response, 413, `File vượt quá 10MB.`, 'PAYLOAD_TOO_LARGE');
-    return;
-  }
-
-  const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/webp'];
-  if (!allowedMimeTypes.includes(file.mimetype)) {
-    sendErrorResponse(response, 415, 'Chỉ chấp nhận JPEG, PNG, WebP.', 'UNSUPPORTED_MEDIA_TYPE');
     return;
   }
 
@@ -161,18 +156,8 @@ export async function handleVerifyImageBatch(
     return;
   }
 
-  const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/webp'];
-  const oversizedFiles = files.filter(f => f.size > ORACLE_MAX_FILE_SIZE);
-  const invalidTypeFiles = files.filter(f => !allowedMimeTypes.includes(f.mimetype));
-
-  if (oversizedFiles.length > 0) {
-    sendErrorResponse(response, 413, `${oversizedFiles.length} file vượt quá 10MB.`, 'PAYLOAD_TOO_LARGE');
-    return;
-  }
-  if (invalidTypeFiles.length > 0) {
-    sendErrorResponse(response, 415, 'Chỉ chấp nhận JPEG, PNG, WebP.', 'UNSUPPORTED_MEDIA_TYPE');
-    return;
-  }
+  // validatedFiles đã được magic bytes + size check bởi createBatchUploadValidationMiddleware
+  // Nếu có file invalid, middleware đã trả 413/415 và không gọi controller này
 
   // [B1-fix #2] Kiểm tra quyền sở hữu một lần cho cả batch — ngăn IDOR
   const project = await findProjectById(projectId);

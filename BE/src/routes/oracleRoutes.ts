@@ -3,6 +3,7 @@ import multer from 'multer';
 import { createAuthenticationMiddleware } from '../middleware/authenticationMiddleware';
 import { createRoleAuthorizationMiddleware } from '../middleware/roleAuthorizationMiddleware';
 import { createRateLimitMiddleware } from '../middleware/rateLimitMiddleware';
+import { createUploadValidationMiddleware, createBatchUploadValidationMiddleware } from '../middleware/upload-validation.middleware';
 import {
   handleVerifyImage,
   handleVerifyImageBatch,
@@ -48,6 +49,7 @@ export function createOracleRoutes(): Router {
     orgMiddleware,
     verifyRateLimit,
     memoryUpload.single('image'),
+    createUploadValidationMiddleware('image'),
     handleVerifyImage
   );
 
@@ -58,6 +60,7 @@ export function createOracleRoutes(): Router {
     orgMiddleware,
     batchVerifyRateLimit,
     memoryUpload.array('images', 10),
+    createBatchUploadValidationMiddleware('image'),
     handleVerifyImageBatch
   );
 
