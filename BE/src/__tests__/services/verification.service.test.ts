@@ -364,5 +364,55 @@ describe('verification.service', () => {
       expect(result).toBeDefined();
       expect(result?.found).toBe(false);
     });
+
+    it('disbursedAmounts bi gioi han 100 entries de tranh payload qua lon', async () => {
+      mockGetRedisClientIfReady.mockReturnValue(null);
+      mockFindUnifiedTxByCorrelationId.mockResolvedValue(null);
+      // 150 COMPLETED disbursements — verify chi lay 100 amount dau tien
+      const manyDisbursements = Array.from({ length: 150 }, (_, i) => ({
+        status: 'COMPLETED' as const,
+        amount: 1000 + i,
+        requestId: `req-${i}`,
+        projectId: 'project-bulk-006',
+        organizationId: 'org-1',
+        onChainRequestId: i,
+        onChainProjectId: 1,
+        requestMode: 'NORMAL' as const,
+        emergencyReason: null,
+        requiredApprovals: 2,
+        raisedRatioBpsAtCreation: 0,
+        beneficiaryWalletAddress: '0xabc',
+        beneficiaryBankAccount: { bankName: 'b', bankAccountNumber: '1', accountHolderName: 'c' },
+        usagePurpose: 'p',
+        evidenceCid: 'cid',
+        approvals: [],
+        rejection: null,
+        timeoutDeadline: null,
+        payosTransferId: null,
+        payosTransferStatus: null,
+        payosTransferAttemptCount: 0,
+        payosTransferLastError: null,
+        transferIdempotencyKey: null,
+        transactionHash: null,
+        finalizeTransactionHash: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        expiredAt: null,
+        completedAt: new Date()
+      }));
+      mockFindDisbursementsByProjectId.mockResolvedValue(manyDisbursements as any);
+      mockAggregateSummaryByProjectId.mockResolvedValue({
+        totalRaisedVnd: 500000,
+        totalTransactions: 5
+      });
+
+      const result = await getProjectSummary('project-bulk-006');
+
+      expect(result.disbursedAmounts).toHaveLength(100);
+      expect(result.disbursedAmounts[0]).toBe(1000);
+      expect(result.disbursedAmounts[99]).toBe(1099);
+      // Tong disbursed count van tinh tren toan bo 150 ban ghi
+      expect(result.disbursementCount).toBe(150);
+    });
   });
 });

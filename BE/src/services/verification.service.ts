@@ -331,6 +331,8 @@ export async function getProjectSummary(
 
   const remaining = Math.max(0, summaryStats.totalRaisedVnd - totalDisbursed);
 
+  const MAX_DISBURSED_AMOUNTS_RETURNED = 100;
+
   const result: ProjectSummary = {
     projectId,
     totalRaised: summaryStats.totalRaisedVnd,
@@ -339,8 +341,11 @@ export async function getProjectSummary(
     donorCount,
     transactionCount,
     disbursementCount: disbursements.filter(d => d.status === 'COMPLETED').length,
+    // Gioi han toi da 100 disbursement amounts — tranh response payload qua lon
+    // Tong totalDisbursed o tren van chinh xac vi tinh tu toan bo mang
     disbursedAmounts: disbursements
       .filter(d => d.status === 'COMPLETED')
+      .slice(0, MAX_DISBURSED_AMOUNTS_RETURNED)
       .map(d => d.amount),
     cached: false,
     fallbackMode: false
