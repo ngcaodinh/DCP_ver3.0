@@ -17,7 +17,6 @@ import { getRedisClientIfReady } from '../config/redis';
 import { createInMemoryCache } from '../utils/inMemoryCache';
 import { findUnifiedTransactionByCorrelationId, aggregateSummaryByProjectId } from '../repositories/unifiedTransactionRepository';
 import { findDisbursementsByProjectId } from '../models/disbursementModel';
-import { findTransferLogsByRequestId } from '../models/disbursementTransferModel';
 
 const logger = getLogger();
 
@@ -274,7 +273,7 @@ export async function verifyTransaction(
       : undefined,
     chain: transaction.chainTxHash
       ? {
-          txHash: maskWalletAddress(transaction.chainTxHash) || transaction.chainTxHash,
+          txHash: maskWalletAddress(transaction.chainTxHash) ?? '***',
           blockNumber: transaction.chainBlockNumber,
           status: transaction.chainStatus as ChainStatus
         }
@@ -326,11 +325,7 @@ export async function getProjectSummary(
   const disbursements = await findDisbursementsByProjectId(projectId);
   const totalDisbursed = calculateTotalDisbursed(disbursements);
 
-  // Dem so donor unique (dia chi vi)
-  // Query all transactions de dem unique wallets
-  const allTransactions = await findUnifiedTransactionByCorrelationId('');
-  // Khong can thuc te - chi can dem tu aggregateResult
-  // Donor count = totalTransactions (vi moi giao dich = 1 donor)
+  // Dem so donor unique — moi transaction = 1 donor
   const donorCount = summaryStats.totalTransactions;
   const transactionCount = summaryStats.totalTransactions;
 
@@ -374,12 +369,9 @@ export async function invalidateVerificationCache(projectId?: string): Promise<v
 
   if (redisClient) {
     try {
-      const patterns: string[] = [];
-      if (projectId) {
-        // Xoa tat ca verify cache (correlationId chua projectId trong data)
-        patterns.push(`${verifyCachePrefix}*`);
-      }
-      patterns.push(`${summaryCachePrefix}${projectId || '*'}`);
+      // Chi xoa summary cache cua project hien tai
+      // Verify cache se bi expires tu dong qua TTL
+      const patterns: string[] = [`${summaryCachePrefix}${projectId || '*'}`];
 
       for (const pattern of patterns) {
         const keyList: string[] = [];
@@ -402,6 +394,10 @@ export async function invalidateVerificationCache(projectId?: string): Promise<v
   }
 
   // Clear in-memory fallback
-  verifyCacheFallback.clearAll();
-  summaryCacheFallback.clearAll();
+  if (projectId) {
+    summaryCacheFallback.clearAll();
+  } else {
+    verifyCacheFallback.clearAll();
+    summaryCacheFallback.clearAll();
+  }
 }

@@ -12,7 +12,10 @@
  */
 import { Request, Response } from 'express';
 import { z } from 'zod';
+import { getLogger } from '../config/logger';
 import { verifyTransaction, getProjectSummary } from '../services/verification.service';
+
+const logger = getLogger();
 
 /**
  * Schema Zod cho params cua verify endpoint.
@@ -81,6 +84,10 @@ export async function handleVerifyTransaction(
 
     response.status(200).json(result);
   } catch (error) {
+    logger.error('Verification endpoint failed.', {
+      correlationId: normalizedCorrelationId,
+      errorMessage: error instanceof Error ? error.message : String(error)
+    });
     response.status(500).json({
       error: 'Internal server error'
     });
@@ -129,6 +136,10 @@ export async function handleGetProjectSummary(
 
     response.status(200).json(summary);
   } catch (error) {
+    logger.error('Project summary endpoint failed.', {
+      projectId: normalizedProjectId,
+      errorMessage: error instanceof Error ? error.message : String(error)
+    });
     response.status(500).json({
       error: 'Internal server error'
     });
