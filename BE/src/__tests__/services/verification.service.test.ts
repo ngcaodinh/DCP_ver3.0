@@ -51,13 +51,15 @@ vi.mock('../../models/disbursementTransferModel', () => ({
 // Import after mocks
 import {
   verifyTransaction,
-  getProjectSummary
+  getProjectSummary,
+  resetCacheMetrics
 } from '../../services/verification.service';
 
 describe('verification.service', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockGetRedisClientIfReady.mockReturnValue(null);
+    resetCacheMetrics();
   });
 
   describe('verifyTransaction', () => {
