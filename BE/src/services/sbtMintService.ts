@@ -1,10 +1,36 @@
 /**
- * TODO: Refactor — file này đang chứa 6 trách nhiệm (create, execute, parse, failure, rerun, recovery).
- * Nên tách thành 3 services riêng theo SRP:
- * - sbtMintExecution.service.ts (executeSbtMint, parseSbtMintedTokenId)
- * - sbtMintRetry.service.ts (handleSbtMintFailure, rerunSbtMintJob)
- * - sbtMintRecovery.service.ts (recoverStuckSbtMints)
- * Tạm thời giữ nguyên để tránh breaking change trong single PR.
+ * [I-A3] TECH DEBT: File chứa 5 distinct responsibilities cần tách theo SRP.
+ *
+ * Migration plan (thực hiện trong future PR riêng):
+ * 1. Tạo BE/src/services/sbtMintRequest.service.ts
+ *    - Di chuyển: createSbtMintRequest, CreateSbtMintRequestInput type
+ *    - Export: createSbtMintRequest, CreateSbtMintRequestInput
+ *
+ * 2. Tạo BE/src/services/sbtMintExecution.service.ts
+ *    - Di chuyển: executeSbtMint, parseSbtMintedTokenId, validateBeneficiaryAddress,
+ *      normalizeBeneficiaryAddress, _writableContract, getWritableContract, resetWritableContractForTest
+ *    - Import: sbtMintRequest.service, sbtMintQueue, impactSbtMetadataModel
+ *    - Export: executeSbtMint, resetWritableContractForTest
+ *
+ * 3. Tạo BE/src/services/sbtMintFailure.service.ts
+ *    - Di chuyển: handleSbtMintFailure, SBT_MINT_MAX_ATTEMPTS, SBT_MINT_RETRY_DELAYS_MS
+ *    - Import: sbtMintQueue, sbtMintDlqModel, impactSbtMetadataModel
+ *    - Export: handleSbtMintFailure, SBT_MINT_MAX_ATTEMPTS, SBT_MINT_RETRY_DELAYS_MS
+ *
+ * 4. Tạo BE/src/services/sbtMintRerun.service.ts
+ *    - Di chuyển: rerunSbtMintJob
+ *    - Import: sbtMintQueue, impactSbtMetadataModel
+ *    - Export: rerunSbtMintJob
+ *
+ * 5. Tạo BE/src/services/sbtMintRecovery.service.ts
+ *    - Di chuyển: recoverStuckSbtMints, findImpactSbtNeedingRecovery
+ *    - Import: sbtMintQueue, impactSbtMetadataModel
+ *    - Export: recoverStuckSbtMints, findImpactSbtNeedingRecovery
+ *
+ * 6. BE/src/services/sbtMintService.ts trở thành barrel export file:
+ *    - Re-export tất cả exports từ 5 service files
+ *    - Import và re-export: extractErrorMessage (từ utils)
+ *    - Tạm thời keep nguyên để tránh breaking change trong single PR
  */
 import { randomUUID } from 'crypto';
 import { ethers } from 'ethers';
@@ -17,7 +43,6 @@ export { extractErrorMessage };
 import {
   createImpactSbtMetadata,
   findImpactSbtMetadataByMintRequestId,
-  findImpactSbtMetadataByVerificationId,
   markImpactSbtAsSubmitted,
   markImpactSbtAsConfirmed,
   markImpactSbtAsFailed,
@@ -48,6 +73,16 @@ import {
 } from '../queues/sbtMintQueue';
 import { findImpactSbtNeedingRecovery } from '../models/impactSbtMetadataModel';
 
+/**
+ * Environment variable cho số block confirmations khi chờ mint transaction.
+ * Giá trị mặc định: 2 confirmations (khoảng 12 giây trên Autonomys Network).
+ * Tăng lên nếu cần security cao hơn cho transaction tài chính.
+ */
+const SBT_MINT_CONFIRMATION_BLOCKS = parseInt(process.env.SBT_MINT_CONFIRMATION_BLOCKS ?? '2', 10);
+if (SBT_MINT_CONFIRMATION_BLOCKS < 1) {
+  throw new Error('SBT_MINT_CONFIRMATION_BLOCKS phải >= 1.');
+}
+
 const logger = getLogger();
 
 // Cache ethers.Interface cho SBTMinted event — tránh tạo mới mỗi lần parse logs.
@@ -55,6 +90,10 @@ const logger = getLogger();
 const SBT_MINTED_EVENT_IFACE = new ethers.Interface([
   'event SBTMinted(address indexed to, uint256 indexed tokenId, string tokenURI_)'
 ]);
+
+// ============================================================
+// SECTION 1: Mint Request Creation (createSbtMintRequest)
+// ============================================================
 
 /**
  * Tham số tạo mint request khi Oracle verify thành công.
@@ -74,49 +113,45 @@ export type CreateSbtMintRequestInput = {
 };
 
 /**
- * Chuẩn hóa địa chỉ EVM — lowercase và validate checksum ngầm.
- * Throw nếu không hợp lệ để tránh gửi tx với địa chỉ rác.
+ * Validate địa chỉ EVM — throws nếu không hợp lệ.
+ * Dùng cho input validation ở service boundary.
  */
-function normalizeBeneficiaryAddress(address: string): string {
+function validateBeneficiaryAddress(address: string): void {
   if (!ethers.isAddress(address)) {
     throw new Error(`Địa chỉ beneficiary không hợp lệ: ${address}`);
   }
-  return ethers.getAddress(address).toLowerCase();
+}
+
+/**
+ * Chuẩn hóa địa chỉ EVM về checksum address để lưu vào DB.
+ * ethers.getAddress() trả về checksum address (mixed case theo EIP-55).
+ * Lưu ý: Khi so sánh địa chỉ, nên dùng .toLowerCase() để tránh case-sensitivity issues.
+ * Contract/frontend sẽ tự normalize khi cần.
+ */
+function normalizeBeneficiaryAddress(address: string): string {
+  validateBeneficiaryAddress(address);
+  return ethers.getAddress(address);
 }
 
 /**
  * Hàm tạo mint request mới khi Oracle verified thành công.
  *
  * Flow idempotent:
- * 1. Nếu đã có mintRequest từ verificationId này → skip (tránh duplicate)
- * 2. Nếu chưa có → tạo metadata PENDING + enqueue job
- * 3. Emit oracle verified event đã được filter ở worker layer, không double-process
+ * 1. Thử upsert metadata với verificationId (atomic — tránh race condition)
+ * 2. Nếu verificationId đã tồn tại → trả về existing record (duplicate)
+ * 3. Nếu chưa có → tạo metadata PENDING + enqueue job
  *
  * Hàm này được gọi từ oracle event handler trong sbtMintWorker.startSbtMintWorker.
  * KHÔNG gọi trực tiếp từ API — task C3 (Oracle→SBT Trigger API) sẽ wrap với auth.
+ *
+ * [IMPORTANT #19 fix] Dùng atomic upsert trong createImpactSbtMetadata thay vì
+ * find-then-create (race window). Không cần try-catch duplicate key nữa.
  *
  * @returns Metadata record đã tạo (hoặc existing nếu duplicate) + jobId nếu enqueue thành công
  */
 export async function createSbtMintRequest(
   input: CreateSbtMintRequestInput
 ): Promise<{ record: ImpactSbtMetadataRecord; jobId: string | number | undefined; enqueued: boolean; duplicate: boolean }> {
-  // Idempotency check 1: đã có metadata cho verificationId này chưa
-  const existingByVerification = await findImpactSbtMetadataByVerificationId(input.verificationId);
-  if (existingByVerification) {
-    logger.info('SBT mint request đã tồn tại cho verification này — bỏ qua duplicate.', {
-      mintRequestId: existingByVerification.mintRequestId,
-      sbtId: existingByVerification.sbtId,
-      verificationId: input.verificationId,
-      status: existingByVerification.status
-    });
-    return {
-      record: existingByVerification,
-      jobId: undefined,
-      enqueued: false,
-      duplicate: true
-    };
-  }
-
   const normalizedBeneficiary = normalizeBeneficiaryAddress(input.beneficiaryAddress);
   const mintRequestId = `SBT-MINT-${randomUUID()}`;
   const sbtId = `SBT-${randomUUID()}`;
@@ -148,23 +183,29 @@ export async function createSbtMintRequest(
     lastReRunAt: null
   };
 
-  let record: ImpactSbtMetadataRecord;
-  try {
-    record = await createImpactSbtMetadata(recordInput);
-  } catch (error) {
-    // Race condition: 2 oracle events cho cùng verification tới gần nhau
-    // → unique index trên mintRequestId có thể không catch, nhưng findImpactSbtMetadataByVerificationId
-    //   trước đó đã rồi. Nếu vẫn fail duplicate, return existing.
-    const existing = await findImpactSbtMetadataByVerificationId(input.verificationId);
-    if (existing) {
-      logger.warn('SBT mint request bị duplicate do race condition — dùng bản ghi existing.', {
-        mintRequestId: existing.mintRequestId,
-        verificationId: input.verificationId
-      });
-      return { record: existing, jobId: undefined, enqueued: false, duplicate: true };
-    }
-    throw error;
+  // [IMPORTANT #19 fix] Atomic upsert — không có race window nữa
+  // createImpactSbtMetadata dùng findOneAndUpdate với upsert: true
+  const record = await createImpactSbtMetadata(recordInput);
+
+  // Kiểm tra duplicate: nếu returned record có sbtId khác với sbtId vừa generate,
+  // có nghĩa là đã có record tồn tại (upsert không insert)
+  if (record.sbtId !== sbtId) {
+    // Duplicate — trả về existing record mà không enqueue
+    logger.info('SBT mint request đã tồn tại cho verification này — bỏ qua duplicate (atomic upsert).', {
+      mintRequestId: record.mintRequestId,
+      sbtId: record.sbtId,
+      verificationId: input.verificationId,
+      status: record.status
+    });
+    return {
+      record,
+      jobId: undefined,
+      enqueued: false,
+      duplicate: true
+    };
   }
+
+  // New record created successfully — proceed with enqueue
 
   // Enqueue job attempt đầu tiên
   const enqueueResult = await enqueueSbtMint(
@@ -195,6 +236,52 @@ export async function createSbtMintRequest(
   });
 
   return { record, jobId: enqueueResult.jobId, enqueued: enqueueResult.enqueued, duplicate: false };
+}
+
+// ============================================================
+// SECTION 2: Mint Execution (executeSbtMint, parseSbtMintedTokenId)
+// ============================================================
+
+// Contract instance — tạo 1 lần, reuse cho tất cả executeSbtMint calls.
+// ethers.Contract với signer không hold persistent connection,
+// chỉ hold provider reference. Việc tạo 1 instance tránh overhead mỗi call.
+let _writableContract: ethers.Contract | null = null;
+
+function getWritableContract(): ethers.Contract {
+  if (!_writableContract) {
+    _writableContract = getWritableImpactSbtContract();
+  }
+  return _writableContract;
+}
+
+/**
+ * Reset cached contract instance — dùng trong test để tránh stale mock.
+ * KHÔNG gọi trong production code.
+ */
+export function resetWritableContractForTest(): void {
+  _writableContract = null;
+}
+
+/**
+ * Helper: trả về số nhỏ hơn trong hai BigInt.
+ * Dùng cho gas limit cap (BLOCKER #3).
+ */
+function minBigInt(a: bigint, b: bigint): bigint {
+  return a < b ? a : b;
+}
+
+/**
+ * Kiểm tra DLQ status sau khi mint confirm (fire-and-forget).
+ * Nếu record từng vào DLQ, đánh dấu RECOVERED.
+ */
+async function checkSbtMintDlqStatus(mintRequestId: string): Promise<void> {
+  const dlqEntry = await findSbtMintDlqByMintRequestId(mintRequestId);
+  if (dlqEntry && dlqEntry.status === 'OPEN') {
+    await markSbtMintDlqAsRecovered(mintRequestId, {
+      recoveredBy: 'system_auto_recovery',
+      recoveredAt: new Date()
+    });
+  }
 }
 
 /**
@@ -250,7 +337,7 @@ export async function executeSbtMint(
   // Nếu thật sự có race giữa 2 jobs retry cùng mintRequestId, transaction on-chain
   // sẽ revert vì duplicate nonce/SUBMITTED state — Bull sẽ retry và lần sau skip nhờ CONFIRMED check.
 
-  const contract = getWritableImpactSbtContract();
+  const contract = getWritableContract();
 
   // Ghi chú logic phức tạp: bước gọi contract có thể fail vì nhiều lý do:
   // - gas estimation fail (contract paused, thiếu ORACLE_ROLE)
@@ -267,7 +354,8 @@ export async function executeSbtMint(
     attemptNumber
   });
 
-  const txResponse = await contract.mint(
+  // Estimate gas trước khi gửi tx để set gas limit phù hợp
+  const estimatedGas = await contract.mint.estimateGas(
     record.beneficiaryAddress,
     record.projectIdNumeric,
     record.milestone,
@@ -276,10 +364,29 @@ export async function executeSbtMint(
     record.imageCid,
     record.tokenUri
   );
+  // Giới hạn gas ở mức 3x estimated + buffer cố định để tránh runaway trong trường hợp contract upgraded
+  // [I-A3] Hard cap 500_000 gas để tránh accidentally burn gas khi contract bị buggy
+  const GAS_LIMIT_MULTIPLIER = 3n;
+  const MAX_GAS_LIMIT = BigInt(500_000);
+  const gasLimit = minBigInt((BigInt(estimatedGas) * GAS_LIMIT_MULTIPLIER) + BigInt(100_000), MAX_GAS_LIMIT);
+
+  const txResponse = await contract.mint(
+    record.beneficiaryAddress,
+    record.projectIdNumeric,
+    record.milestone,
+    record.beneficiaryCount,
+    record.gpsCoordinates,
+    record.imageCid,
+    record.tokenUri,
+    { gasLimit }
+  );
 
   // ethers v6 ContractFunction trả về transaction response với .hash + .wait()
   const txHash = txResponse.hash as string;
   const submittedAt = new Date();
+
+  // [I-A4] Anti-tampering: kiểm tra submittedAt không phải future date
+  validateSubmittedAtNotFuture(submittedAt);
 
   // Cập nhật SUBMITTED trước khi chờ receipt — an toàn nếu worker crash sau bước này
   await markImpactSbtAsSubmitted(mintRequestId, {
@@ -295,8 +402,8 @@ export async function executeSbtMint(
     attemptNumber
   });
 
-  // Chờ 1 block confirm — đủ cho hầu hết chain (Polygon Amoy block time ~2s)
-  const receipt = await txResponse.wait(1);
+  // [I-A4] Dùng SBT_MINT_CONFIRMATION_BLOCKS từ env (default 2) cho giao dịch tài chính
+  const receipt = await txResponse.wait(SBT_MINT_CONFIRMATION_BLOCKS);
 
   if (!receipt) {
     throw new Error(`Không nhận được receipt cho tx mint SBT (hash=${txHash}).`);
@@ -318,14 +425,7 @@ export async function executeSbtMint(
     confirmedAt
   });
 
-  // Nếu record này từng vào DLQ, đánh dấu RECOVERED
-  const dlqEntry = await findSbtMintDlqByMintRequestId(mintRequestId);
-  if (dlqEntry && dlqEntry.status === 'OPEN') {
-    await markSbtMintDlqAsRecovered(mintRequestId, {
-      recoveredBy: 'system_auto_recovery',
-      recoveredAt: confirmedAt
-    });
-  }
+  // DLQ status check được thực hiện fire-and-forget bên dưới sau khi emit event
 
   // Emit sbt.minted event để socket + notification forward
   const eventPayload: SbtMintedEventPayload = {
@@ -343,6 +443,12 @@ export async function executeSbtMint(
   };
   sbtEvents.emit('sbt.minted', eventPayload);
 
+  // Fire-and-forget: kiểm tra DLQ sau khi mint confirm mà không block response.
+  // Nếu DLQ check fail, cron job 15 phút sẽ cover.
+  setImmediate(() => {
+    checkSbtMintDlqStatus(mintRequestId).catch((e: Error) => logger.warn('DLQ status check thất bại sau mint.', { mintRequestId, errorMessage: e.message }));
+  });
+
   logger.info('Mint SBT thành công.', {
     mintRequestId,
     sbtId: record.sbtId,
@@ -358,6 +464,21 @@ export async function executeSbtMint(
     blockNumber,
     status: 'CONFIRMED'
   };
+}
+
+/**
+ * Anti-tampering: kiểm tra submittedAt không phải future date.
+ * Clock drift hoặc malicious tampering có thể đặt submittedAt vào tương lai.
+ * Nếu phát hiện → throw để worker không bị mislead bởi stuck transaction check.
+ */
+function validateSubmittedAtNotFuture(submittedAt: Date): void {
+  const now = Date.now();
+  const submittedMs = submittedAt.getTime();
+  // Cho phép drift tối đa 30 giây (để cover RPC node clock drift)
+  const DRIFT_TOLERANCE_MS = 30_000;
+  if (submittedMs > now + DRIFT_TOLERANCE_MS) {
+    throw new Error(`submittedAt nằm trong tương lai (drift=${submittedMs - now}ms) — có thể bị tampering.`);
+  }
 }
 
 /**
@@ -394,6 +515,10 @@ export function parseSbtMintedTokenId(logs: readonly ethers.Log[], sbtIdForLog: 
   // Không tìm thấy event — throw để worker biết tx có vấn đề
   throw new Error(`Không tìm thấy SBTMinted event trong receipt logs (sbtId=${sbtIdForLog}).`);
 }
+
+// ============================================================
+// SECTION 3: Mint Failure & Retry (handleSbtMintFailure)
+// ============================================================
 
 /**
  * Hàm xử lý khi attempt mint thất bại.
@@ -479,7 +604,9 @@ export async function handleSbtMintFailure(
   // Còn retry → re-enqueue với delay backoff
   const nextAttempt = attemptNumber + 1;
   const delayIndex = attemptNumber - 1; // attemptNumber 1-indexed, delayIndex 0-indexed
-  const nextDelayMs = SBT_MINT_RETRY_DELAYS_MS[delayIndex] ?? SBT_MINT_RETRY_DELAYS_MS[0];
+  // Fallback: nếu delayIndex vượt array (do data corruption hoặc race), dùng max delay thay vì throw
+  // Đây là safety net — trong điều kiện bình thường, logic đã được kiểm soát ở các check trên
+  const nextDelayMs = SBT_MINT_RETRY_DELAYS_MS[delayIndex] ?? SBT_MINT_RETRY_DELAYS_MS[SBT_MINT_RETRY_DELAYS_MS.length - 1];
 
   // Xóa các pending job cũ trước khi enqueue mới (tránh duplicate retry job)
   await removePendingSbtMintJobsByRequestId(mintRequestId);
@@ -506,6 +633,10 @@ export async function handleSbtMintFailure(
 
   return { willRetry: true, movedToDlq: false, nextDelayMs };
 }
+
+// ============================================================
+// SECTION 4: Mint Rerun (rerunSbtMintJob)
+// ============================================================
 
 /**
  * Hàm trigger re-run job từ admin UI (POST /api/sbt/retry-job/:mintRequestId).
@@ -589,6 +720,10 @@ export async function rerunSbtMintJob(
   return { record: updatedRecord, jobId: enqueueResult.jobId, enqueued: enqueueResult.enqueued };
 }
 
+// ============================================================
+// SECTION 5: Mint Recovery (recoverStuckSbtMints)
+// ============================================================
+
 /**
  * Hàm recovery bởi cron 15 phút — tìm record PENDING/FAILED/SUBMITTED quá lâu chưa có job.
  * Mục đích: an toàn khi:
@@ -627,6 +762,9 @@ export async function recoverStuckSbtMints(olderThanMinutes: number = 15): Promi
     }
 
     // Nếu SUBMITTED > SBT_MINT_STUCK_TX_THRESHOLD_MS → mark FAILED để retry path xử lý
+    // Lưu ý: Date.now() vs record.submittedAt.getTime() có thể có clock drift < 1s.
+    // Với cron job 15 phút, drift này chấp nhận được. Nếu cần sub-second accuracy,
+    // cần truyền referenceTime từ scheduler hoặc dùng MongoDB server time.
     if (record.status === 'SUBMITTED' && record.submittedAt) {
       const stuckMs = Date.now() - record.submittedAt.getTime();
       if (stuckMs > SBT_MINT_STUCK_TX_THRESHOLD_MS) {

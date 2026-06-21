@@ -162,6 +162,7 @@ export async function getActiveSbtMintJobByRequestId(
 /**
  * Lấy index tất cả jobs theo mintRequestId (active + waiting + delayed).
  * Mục đích: batch fetch 1 lần duy nhất để tránh N+1 query khi loop nhiều records.
+ * Lưu ý: Chỉ fetch 50 jobs mới nhất để tránh O(n) scan khi queue lớn.
  * @returns Map<mintRequestId, count> — count = số job trong tất cả các trạng thái
  */
 export async function getSbtMintJobIndexByRequestId(): Promise<Map<string, number>> {
@@ -169,8 +170,8 @@ export async function getSbtMintJobIndexByRequestId(): Promise<Map<string, numbe
   if (!queue) return new Map();
   const [active, waiting, delayed] = await Promise.all([
     queue.getActive(),
-    queue.getWaiting(),
-    queue.getDelayed()
+    queue.getWaiting(0, 49), // Chỉ fetch 50 jobs mới nhất để tránh O(n) scan khi queue lớn
+    queue.getDelayed(0, 49)
   ]);
   const all = [...active, ...waiting, ...delayed];
   const index = new Map<string, number>();
@@ -191,9 +192,11 @@ export async function countPendingSbtMintJobsByRequestId(mintRequestId: string):
   const queue = getSbtMintQueue();
   if (!queue) return 0;
 
+  // [I-N1] Giới hạn fetch để tránh O(n) memory allocation khi queue lớn.
+  // Limit 100 là safety cap — thực tế mỗi mintRequestId chỉ có 1-2 pending job.
   const [waitingJobs, delayedJobs] = await Promise.all([
-    queue.getWaiting(),
-    queue.getDelayed()
+    queue.getWaiting(0, 99),
+    queue.getDelayed(0, 99)
   ]);
   const allPendingJobs = [...waitingJobs, ...delayedJobs];
   return allPendingJobs.filter(job => job.data.mintRequestId === mintRequestId).length;
@@ -211,9 +214,13 @@ export async function removePendingSbtMintJobsByRequestId(mintRequestId: string)
   // Active jobs đang chạy (processSbtMintJob đang thực thi) — remove sẽ corrupt queue state
   // và có thể gây double-mint. Nếu job active đang xử lý fail, nó sẽ tự retry qua Bull's
   // built-in mechanism. Recovery scheduler cũng đã skip records có job active.
+  //
+  // [N-B1] Giới hạn fetch 100 jobs mỗi loại — tránh O(n) scan khi queue lớn.
+  // Thực tế: mỗi mintRequestId chỉ có tối đa 1-2 pending job tại bất kỳ thời điểm nào
+  // (do BullMQ limiter max 3 jobs/10s). Limit 100 chỉ là safety cap.
   const [waitingJobs, delayedJobs] = await Promise.all([
-    queue.getWaiting(),
-    queue.getDelayed()
+    queue.getWaiting(0, 99),
+    queue.getDelayed(0, 99)
   ]);
   const allPendingJobs = [...waitingJobs, ...delayedJobs];
   const matchingJobs = allPendingJobs.filter(job => job.data.mintRequestId === mintRequestId);

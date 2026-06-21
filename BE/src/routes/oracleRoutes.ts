@@ -13,6 +13,7 @@ import {
   handleGetPendingOverrides,
   handleVoteOverrideRequest
 } from '../controllers/oracleController';
+import { createSbtTriggerRoutes } from './sbt-trigger.routes';
 
 /**
  * Multer memory storage: giữ file trong RAM để oracle service đọc EXIF buffer.
@@ -108,6 +109,10 @@ export function createOracleRoutes(): Router {
     voteRateLimit,
     handleVoteOverrideRequest
   );
+
+  // SBT trigger — Oracle trigger mint SBT sau khi verify thành công (C3)
+  // Route được mount trong createOracleRoutes nên full path là /api/oracle/sbt-trigger
+  router.use(createSbtTriggerRoutes());
 
   return router;
 }

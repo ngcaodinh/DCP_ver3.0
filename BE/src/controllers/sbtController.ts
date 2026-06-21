@@ -19,16 +19,13 @@ const logger = getLogger();
  */
 export async function handleGetSbtDlqList(req: Request, res: Response): Promise<void> {
   try {
-    const rawPage = Number(req.query.page) || 1;
-    const rawLimit = Number(req.query.limit) || 20;
-    const page = Math.max(1, Math.floor(rawPage));
-    const limit = Math.max(1, Math.min(100, Math.floor(rawLimit)));
+    // req.query đã được validate + coerce bởi createZodValidatorMiddleware (paginationQuerySchema)
+    // Dùng validated data từ req.query thay vì manual Number() coercion — I-A5 fix
+    const validatedQuery = req.query as { page: number; limit: number; status?: 'OPEN' | 'RECOVERED' | 'ABANDONED' };
+    const page = Math.max(1, Math.floor(validatedQuery.page)) || 1;
+    const limit = Math.max(1, Math.min(100, Math.floor(validatedQuery.limit))) || 20;
     const skip = (page - 1) * limit;
-
-    const rawStatus = req.query.status as string | undefined;
-    const status = (rawStatus && ['OPEN', 'RECOVERED', 'ABANDONED'].includes(rawStatus))
-      ? rawStatus as SbtMintDlqRecord['status']
-      : 'OPEN';
+    const status = validatedQuery.status ?? 'OPEN';
 
     const [entries, totalCount, openCount] = await Promise.all([
       findSbtMintDlqByStatus(status, limit, skip),
@@ -146,6 +143,7 @@ export async function handleAdminMintSbt(req: Request, res: Response): Promise<v
   }
 
   logger.warn('Phát hiện attempt gọi admin-mint bị cấm.', {
+    // Chỉ log mintRequestId field — không log toàn bộ req.body để tránh lộ sensitive data
     mintRequestId: req.body?.mintRequestId ?? 'N/A',
     userId
   });

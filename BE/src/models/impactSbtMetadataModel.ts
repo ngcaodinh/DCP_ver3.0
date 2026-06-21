@@ -20,6 +20,16 @@ export type ImpactSbtMintStatus = 'PENDING' | 'SUBMITTED' | 'CONFIRMED' | 'FAILE
  *
  * Mỗi lần Oracle verify thành công → tạo 1 record ở trạng thái PENDING → worker mint() on-chain
  * → update SUBMITTED/CONFIRMED. Khi fail hết 6 retry → chuyển DLQ nhưng vẫn giữ record (không xóa).
+ *
+ * Lưu ý về 2-ID pattern:
+ * - sbtId: UUID bản thân record metadata (dùng để query detail từ admin UI, định danh bản ghi độc lập)
+ * - mintRequestId: UUID gắn với job queue (dùng làm idempotency key, liên kết với BullMQ job)
+ * Cả 2 đều unique — mintRequestId đảm bảo không trùng job, sbtId đảm bảo không trùng record.
+ *
+ * Lý do tách 2 ID:
+ * - mintRequestId gắn với job nên cần stable để BullMQ job tracking không bị confuse
+ * - sbtId là record identifier độc lập, có thể tồn tại dù job chưa/t không chạy
+ * - Khi re-run job, mintRequestId giữ nguyên nhưng sbtId vẫn là record đó
  */
 export type ImpactSbtMetadataRecord = {
   sbtId: string;                          // UUID record
@@ -54,7 +64,7 @@ const impactSbtMetadataSchema = new Schema<ImpactSbtMetadataRecord>(
   {
     sbtId: { type: String, required: true, unique: true },
     mintRequestId: { type: String, required: true, unique: true, index: true },
-    verificationId: { type: String, required: true, index: true },
+    verificationId: { type: String, required: true, unique: true },
     projectId: { type: String, required: true, index: true },
     organizationId: { type: String, required: true, index: true },
     beneficiaryAddress: { type: String, required: true, index: true },
@@ -103,14 +113,24 @@ const ImpactSbtMetadataMongoModel = mongoose.model<ImpactSbtMetadataRecord>(
 
 /**
  * Tạo mới bản ghi metadata khi Oracle verified APPROVED.
- * Mục đích: idempotency — nếu mintRequestId đã tồn tại, throw error để caller xử lý.
- * Throw giúp phát hiện duplicate event từ oracle.verified.
+ * Mục đích: idempotency — dùng findOneAndUpdate với upsert để tránh race window
+ * (2 concurrent requests cùng verificationId có thể cùng check find trước khi create).
+ *
+ * [IMPORTANT #19 fix] Dùng upsert operation thay vì create() để đảm bảo atomic:
+ * - Nếu verificationId chưa tồn tại → tạo mới
+ * - Nếu verificationId đã tồn tại → trả về existing record
+ * Không cần try-catch duplicate key nữa.
  */
 export async function createImpactSbtMetadata(
   data: Omit<ImpactSbtMetadataRecord, 'createdAt' | 'updatedAt'>
 ): Promise<ImpactSbtMetadataRecord> {
-  const doc = await ImpactSbtMetadataMongoModel.create(data);
-  return doc.toObject();
+  // Dùng upsert để atomic — không cần try-catch race condition nữa
+  const doc = await ImpactSbtMetadataMongoModel.findOneAndUpdate(
+    { verificationId: data.verificationId },
+    { $setOnInsert: data },
+    { upsert: true, returnDocument: 'after' }
+  ).lean().exec();
+  return doc as ImpactSbtMetadataRecord;
 }
 
 /**

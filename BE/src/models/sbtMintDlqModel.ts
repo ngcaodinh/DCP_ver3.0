@@ -1,3 +1,18 @@
+/**
+ * Dead Letter Queue model cho SBT mint requests thất bại.
+ *
+ * Mục đích: khi worker mint fail hết 6 retry theo backoff (5m→15m→60m→1h→4h→24h),
+ * thay vì xóa job, hệ thống ghi log vào collection này để:
+ * 1. Admin có thể xem danh sách job thất bại
+ * 2. Admin trigger re-run job thông qua API (POST /api/sbt/retry-job/:mintRequestId)
+ * 3. Audit trail cho compliance — biết được request nào fail, khi nào, lý do gì
+ *
+ * Quan trọng: KHÔNG BAO GIỜ cho phép mint tay. Re-run job vẫn phải qua worker code
+ * để đảm bảo an toàn (Q4 decision — không cho admin mint tay).
+ *
+ * [N-B2] Duplicate key handling: khi tạo entry mà đã tồn tại, trả về bản ghi hiện có
+ * thay vì null để caller có thể xử lý graceful (idempotent operation).
+ */
 import mongoose, { Schema } from 'mongoose';
 
 /**
@@ -71,7 +86,7 @@ const SbtMintDlqMongoModel = mongoose.model<SbtMintDlqRecord>(
 /**
  * Tạo bản ghi DLQ mới khi worker hết retry.
  * Mục đích: ghi nhận request thất bại, kèm context để admin debug.
- * Idempotent qua unique index trên mintRequestId — nếu đã tồn tại thì skip.
+ * Idempotent qua unique index trên mintRequestId — nếu đã tồn tại thì trả về bản ghi hiện có.
  */
 export async function createSbtMintDlqEntry(
   data: Omit<SbtMintDlqRecord, 'createdAt' | 'updatedAt' | 'recoveredAt' | 'recoveredBy' | 'recoveryAttemptNumber' | 'status'>
@@ -86,9 +101,10 @@ export async function createSbtMintDlqEntry(
     });
     return doc.toObject();
   } catch (error) {
-    // Duplicate key → đã có DLQ entry từ trước, không cần tạo lại
+    // Duplicate key → đã có DLQ entry từ trước, trả về bản ghi hiện có thay vì null
     if ((error as { code?: number })?.code === 11000) {
-      return null;
+      const existing = await SbtMintDlqMongoModel.findOne({ mintRequestId: data.mintRequestId }).lean().exec();
+      return existing as SbtMintDlqRecord | null;
     }
     throw error;
   }

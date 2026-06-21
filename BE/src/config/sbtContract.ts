@@ -34,13 +34,29 @@ const impactSbtEthersAbi = [
 /**
  * Lấy readonly provider (JsonRpcProvider) cho ImpactSBT contract.
  * Mục đích: dùng cho các thao tác đọc / chờ receipt.
+ *
+ * [B-B1] Cache provider ở module level — tránh tạo JsonRpcProvider mới mỗi lần gọi.
+ * JsonRpcProvider không hold persistent connection, chỉ hold URL + fetch config.
+ * Việc cache giảm GC pressure và đảm bảo connection pooling được reuse.
  */
+let _readOnlyProvider: ethers.JsonRpcProvider | null = null;
+
+// Cache ethers.Contract instances để tránh tạo mới mỗi lần (BLOCKER #8)
+// ethers.Contract với provider không hold persistent connection, chỉ hold reference.
+// Việc cache giảm overhead và đảm bảo singleton cho toàn bộ ứng dụng.
+let _readOnlyContract: ethers.Contract | null = null;
+let _writableContract: ethers.Contract | null = null;
+let _oracleSigner: ethers.Wallet | null = null;
+
 function getReadOnlyProvider(): ethers.JsonRpcProvider {
-  const rpcUrl = process.env.BLOCKCHAIN_RPC_URL?.trim() ?? '';
-  if (!rpcUrl) {
-    throw new Error('Thiếu BLOCKCHAIN_RPC_URL khi khởi tạo ImpactSBT provider.');
+  if (!_readOnlyProvider) {
+    const rpcUrl = process.env.BLOCKCHAIN_RPC_URL?.trim() ?? '';
+    if (!rpcUrl) {
+      throw new Error('Thiếu BLOCKCHAIN_RPC_URL khi khởi tạo ImpactSBT provider.');
+    }
+    _readOnlyProvider = new ethers.JsonRpcProvider(rpcUrl);
   }
-  return new ethers.JsonRpcProvider(rpcUrl);
+  return _readOnlyProvider;
 }
 
 /**
@@ -51,31 +67,67 @@ function getReadOnlyProvider(): ethers.JsonRpcProvider {
  * Lưu ý: Hiện tại task C2 dùng lại BACKEND_MINTER_PRIVATE_KEY (đã có sẵn trong env và
  * đang được dùng cho CharityToken). Nếu sau này tách Oracle signer riêng, chỉ cần
  * đổi biến môi trường ở đây, các service/worker vẫn giữ nguyên pattern.
+ *
+ * [B-B2] Cache signer để tránh tạo mới mỗi lần. ethers.Wallet nhẹ, nhưng cache giúp
+ * đảm bảo singleton và giảm GC overhead trong hot path mint.
  */
 function getOracleSigner(): ethers.Wallet {
+  if (_oracleSigner) {
+    return _oracleSigner;
+  }
   const privateKey = process.env.BACKEND_MINTER_PRIVATE_KEY?.trim() ?? '';
   if (!privateKey) {
     throw new Error('Thiếu BACKEND_MINTER_PRIVATE_KEY khi khởi tạo ImpactSBT Oracle signer.');
   }
-  return new ethers.Wallet(privateKey);
+  // Validate format: phải là 0x + 64 ký tự hex (256-bit key) — BLOCKER #1 fix
+  if (!/^0x[a-fA-F0-9]{64}$/.test(privateKey)) {
+    throw new Error('BACKEND_MINTER_PRIVATE_KEY không đúng format (0x + 64 ký tự hex).');
+  }
+  _oracleSigner = new ethers.Wallet(privateKey);
+  return _oracleSigner;
 }
 
 /**
  * Lấy writable contract (gắn với signer) — dùng để gọi mint() on-chain.
  * Mục đích: tạo instance ethers.Contract có thể gửi transaction từ Oracle EOA.
+ *
+ * [B-B3] Cache contract instance — tránh tạo mới mỗi lần gọi mint().
+ * ethers.Contract với signer không hold persistent connection, chỉ hold provider reference.
+ * Việc cache đảm bảo singleton và giảm GC overhead trong hot path.
  */
 export function getWritableImpactSbtContract(): ethers.Contract {
+  if (_writableContract) {
+    return _writableContract;
+  }
   const provider = getReadOnlyProvider();
   const signer = getOracleSigner().connect(provider);
-  return new ethers.Contract(getImpactSbtContractAddress(), impactSbtEthersAbi, signer);
+  _writableContract = new ethers.Contract(getImpactSbtContractAddress(), impactSbtEthersAbi, signer);
+  return _writableContract;
 }
 
 /**
  * Lấy readonly contract — dùng cho view calls như ownerOf / tokenURI.
  * Mục đích: tránh gắn signer khi không cần thiết.
+ *
+ * [B-B3] Cache readonly contract instance để tránh tạo mới mỗi lần gọi.
  */
 export function getReadOnlyImpactSbtContract(): ethers.Contract {
-  return new ethers.Contract(getImpactSbtContractAddress(), impactSbtEthersAbi, getReadOnlyProvider());
+  if (_readOnlyContract) {
+    return _readOnlyContract;
+  }
+  _readOnlyContract = new ethers.Contract(getImpactSbtContractAddress(), impactSbtEthersAbi, getReadOnlyProvider());
+  return _readOnlyContract;
+}
+
+/**
+ * Kiểm tra contract có deployed tại địa chỉ hay không.
+ * Dùng cho health check / startup validation.
+ * KHÔNG gọi trong hot path (mỗi mint) vì thêm 1 RPC call.
+ */
+export async function verifyContractDeployed(address: string): Promise<boolean> {
+  const provider = getReadOnlyProvider();
+  const code = await provider.getCode(address);
+  return code !== '0x';
 }
 
 /**
@@ -90,10 +142,22 @@ export function getImpactSbtContractAddressLowercase(): string {
  * Hàm log an toàn khi khởi tạo module — không in private key, chỉ in địa chỉ ví Oracle.
  * Mục đích: giúp debug signer mismatch (địa chỉ ví khác ORACLE_ROLE) mà không lộ secret.
  */
-export function logOracleSignerAddressOnce(): void {
+export async function logOracleSignerAddressOnce(): Promise<void> {
   try {
     const signer = getOracleSigner();
-    logger.info('ImpactSBT Oracle signer initialized.', { toAddress: signer.address });
+    const contractAddress = getImpactSbtContractAddressLowercase();
+    const isDeployed = await verifyContractDeployed(contractAddress);
+
+    logger.info('ImpactSBT Oracle signer initialized.', {
+      toAddress: signer.address,
+      contractDeployed: isDeployed
+    } as Record<string, unknown>);
+
+    if (!isDeployed) {
+      logger.warn('ImpactSBT contract chưa deployed tại địa chỉ này. Kiểm tra IMPACT_SBT_ADDRESS.', {
+        contractAddress
+      } as Record<string, unknown>);
+    }
   } catch (error) {
     logger.warn('ImpactSBT Oracle signer chưa sẵn sàng.', { errorMessage: (error as Error).message });
   }
