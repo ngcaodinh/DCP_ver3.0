@@ -214,6 +214,39 @@ export async function findDisbursementsByOrganizationId(organizationId: string):
   return DisbursementMongoModel.find({ organizationId }).sort({ createdAt: -1 }).lean<DisbursementRecord[]>().exec();
 }
 
+/**
+ * Tính tổng disbursement đã hoàn thành cho một project bằng aggregation query.
+ * Mục đích: thay thế findDisbursementsByProjectId + filter trong verification.service
+ * để tránh fetch toàn bộ disbursement records khi chỉ cần total và count.
+ */
+export async function aggregateDisbursementsByProjectId(
+  projectId: string
+): Promise<{ totalCompletedAmount: number; completedCount: number }> {
+  const result = await DisbursementMongoModel.aggregate<{
+    totalCompletedAmount: number;
+    completedCount: number;
+  }>([
+    { $match: { projectId } },
+    { $group: {
+      _id: null,
+      totalCompletedAmount: {
+        $sum: { $cond: [{ $eq: ['$status', 'COMPLETED'] }, '$amount', 0] }
+      },
+      completedCount: {
+        $sum: { $cond: [{ $eq: ['$status', 'COMPLETED'] }, 1, 0] }
+      }
+    }}
+  ]).exec();
+
+  if (!result.length) {
+    return { totalCompletedAmount: 0, completedCount: 0 };
+  }
+  return {
+    totalCompletedAmount: result[0]?.totalCompletedAmount ?? 0,
+    completedCount: result[0]?.completedCount ?? 0
+  };
+}
+
 /** Tìm yêu cầu PENDING theo beneficiary wallet. Mục đích: enforce chỉ 1 request pending mỗi beneficiary. */
 export async function findPendingDisbursementByBeneficiary(beneficiaryWalletAddress: string): Promise<DisbursementRecord | null> {
   return DisbursementMongoModel.findOne({

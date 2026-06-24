@@ -14,6 +14,7 @@ import {
   updateDisbursementByRequestIdWithCondition
 } from '../models/disbursementModel';
 import { createAdminAuditLog } from '../models/adminAuditLogModel';
+import { logOverrideApproved, logOverrideRejected, logOverrideExpired } from './multisigOverrideLog.service';
 import { createUserNotification } from './notificationService';
 import { oracleEvents, type OverrideExecutedEventPayload } from '../events/oracleEvents';
 import { getRedisClientIfReady } from '../config/redis';
@@ -110,6 +111,22 @@ export async function submitOverrideVote(
       overrideRequestId,
       authenticatedUserId: commissionerId
     });
+    // [D5] Ghi audit trail vào multisig_override_logs
+    // Fetch lại request từ DB vì expiredAt đã được ghi bởi expireOverrideRequest
+    const updatedRequest = await findOverrideRequestById(overrideRequestId);
+    if (!updatedRequest) {
+      // Race condition: request không fetch được sau expire (replica lag hoặc bị xóa)
+      // — không block vote flow, chỉ log error và skip audit log
+      logger.error('Không fetch được override request sau khi expire. Skip multisig_override_logs EXPIRED.', {
+        overrideRequestId
+      });
+    } else {
+      void logOverrideExpired(updatedRequest, commissionerId).catch((err: Error) => {
+        logger.error('Ghi multisig_override_logs EXPIRED thất bại.', {
+          overrideRequestId, errorMessage: err.message
+        });
+      });
+    }
     // [B2-fix #2] Ghi audit trail — OVERRIDE_EXPIRED phải có trong compliance log
     void createAdminAuditLog({
       auditId: randomUUID(),
@@ -231,6 +248,12 @@ async function evaluateVoteOutcome(
           overrideRequestId: resolved.overrideRequestId, errorMessage: err.message
         });
       });
+      // [D5] Ghi audit trail vào multisig_override_logs
+      void logOverrideRejected(resolved, rejectingVote!).catch((err: Error) => {
+        logger.error('Ghi multisig_override_logs REJECTED thất bại.', {
+          overrideRequestId: resolved.overrideRequestId, errorMessage: err.message
+        });
+      });
       await notifyOrganizationOverrideResult(resolved, false);
       // Emit để socket bridge thông báo commissioner request đã bị từ chối
       oracleEvents.emit('override.executed', {
@@ -280,6 +303,13 @@ async function evaluateVoteOutcome(
       }
     }).catch((err: Error) => {
       logger.error('Ghi audit log OVERRIDE_VOTE_APPROVE thất bại.', {
+        overrideRequestId: resolved.overrideRequestId, errorMessage: err.message
+      });
+    });
+
+    // [D5] Ghi audit trail vào multisig_override_logs
+    void logOverrideApproved(resolved, votes[votes.length - 1]!, disbursementAutoApproved).catch((err: Error) => {
+      logger.error('Ghi multisig_override_logs APPROVED thất bại.', {
         overrideRequestId: resolved.overrideRequestId, errorMessage: err.message
       });
     });

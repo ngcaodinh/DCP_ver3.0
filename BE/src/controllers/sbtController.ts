@@ -21,7 +21,7 @@ export async function handleGetSbtDlqList(req: Request, res: Response): Promise<
   try {
     // req.query đã được validate + coerce bởi createZodValidatorMiddleware (paginationQuerySchema)
     // Dùng validated data từ req.query thay vì manual Number() coercion — I-A5 fix
-    const validatedQuery = req.query as { page: number; limit: number; status?: 'OPEN' | 'RECOVERED' | 'ABANDONED' };
+    const validatedQuery = req.query as unknown as { page: number; limit: number; status?: 'OPEN' | 'RECOVERED' | 'ABANDONED' };
     const page = Math.max(1, Math.floor(validatedQuery.page)) || 1;
     const limit = Math.max(1, Math.min(100, Math.floor(validatedQuery.limit))) || 20;
     const skip = (page - 1) * limit;
