@@ -16,7 +16,7 @@ import { getLogger } from '../config/logger';
 import { getRedisClientIfReady } from '../config/redis';
 import { createInMemoryCache } from '../utils/inMemoryCache';
 import { findUnifiedTransactionByCorrelationId, aggregateSummaryByProjectId } from '../repositories/unifiedTransactionRepository';
-import { findDisbursementsByProjectId } from '../models/disbursementModel';
+import { aggregateDisbursementsByProjectId, findDisbursementsByProjectId } from '../models/disbursementModel';
 
 const logger = getLogger();
 
@@ -285,9 +285,11 @@ export async function verifyTransaction(
     return notFoundResult;
   }
 
-  // Lay danh sach disbursements cua project de tinh tong giai ngan
-  const disbursements = await findDisbursementsByProjectId(transaction.projectId);
-  const totalDisbursed = calculateTotalDisbursed(disbursements);
+  // Lay tong disbursement da hoan thanh bang aggregation thay vi fetch full records.
+  // aggregateDisbursementsByProjectId chi tra ve { totalCompletedAmount, completedCount }
+  // — toi uu hon so voi findDisbursementsByProjectId tra ve toan bo records.
+  const disbursementStats = await aggregateDisbursementsByProjectId(transaction.projectId);
+  const totalDisbursed = disbursementStats.totalCompletedAmount;
   const disbursedRatioBps = calculateDisbursedRatioBps(
     transaction.amountVnd,
     totalDisbursed
@@ -314,7 +316,7 @@ export async function verifyTransaction(
         }
       : undefined,
     totalDisbursed,
-    disbursementCount: disbursements.filter(d => d.status === 'COMPLETED').length,
+    disbursementCount: disbursementStats.completedCount,
     disbursedRatioBps,
     cached: false,
     fallbackMode: false

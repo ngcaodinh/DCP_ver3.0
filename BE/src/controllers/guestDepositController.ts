@@ -161,7 +161,8 @@ export async function handleSponsorGuestDeposit(
     return;
   }
 
-  const orderCode = String(Date.now() + Math.floor(Math.random() * 999));
+  // Dùng crypto.randomUUID() để tạo orderCode duy nhất, thay vì timestamp + Math.random() (không cryptographically secure).
+  const orderCode = crypto.randomUUID().replace(/-/g, '').substring(0, 17);
   const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
   const returnUrl = `${appUrl}/donations/${projectId}?orderCode=${orderCode}`;
 
@@ -393,7 +394,8 @@ export async function handleCreateGuestDeposit(
     return;
   }
 
-  const orderCode = String(Date.now() + Math.floor(Math.random() * 999));
+  // Dùng crypto.randomUUID() để tạo orderCode duy nhất, thay vì timestamp + Math.random() (không cryptographically secure).
+  const orderCode = crypto.randomUUID().replace(/-/g, '').substring(0, 17);
   const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
   const returnUrl = `${appUrl}/donations/${projectId}?orderCode=${orderCode}`;
 

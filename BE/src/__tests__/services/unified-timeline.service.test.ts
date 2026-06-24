@@ -347,8 +347,8 @@ describe('unified-timeline.service', () => {
       // Mock repository tra ve 2 items (bang pageSize)
       vi.mocked(findUnifiedTimeline).mockResolvedValue({
         items: [
-          { utxId: 'utx-0', eventTimestamp: new Date('2024-06-15T10:00:00Z'), source: 'PAYOS' },
-          { utxId: 'utx-1', eventTimestamp: new Date('2024-06-15T11:00:00Z'), source: 'PAYOS' }
+          { utxId: 'utx-0', correlationId: 'corr-0', projectId: 'proj-0', walletAddress: '0x0000', amountVnd: 100, eventTimestamp: new Date('2024-06-15T10:00:00Z'), source: 'PAYOS' as const, chainStatus: 'CONFIRMED' as const, chainTxHash: null, chainBlockNumber: null, payosStatus: 'PAYMENT_CONFIRMED' as const, payosOrderCode: 'ORD0', payosTransactionId: null, payosRecordId: null, eventType: 'DEPOSIT' as const, blockchainRecordId: null, createdAt: new Date(), updatedAt: new Date() },
+          { utxId: 'utx-1', correlationId: 'corr-1', projectId: 'proj-0', walletAddress: '0x1111', amountVnd: 200, eventTimestamp: new Date('2024-06-15T11:00:00Z'), source: 'PAYOS' as const, chainStatus: 'CONFIRMED' as const, chainTxHash: null, chainBlockNumber: null, payosStatus: 'PAYMENT_CONFIRMED' as const, payosOrderCode: 'ORD1', payosTransactionId: null, payosRecordId: null, eventType: 'DEPOSIT' as const, blockchainRecordId: null, createdAt: new Date(), updatedAt: new Date() }
         ],
         nextCursor: null,
         totalCount: 2

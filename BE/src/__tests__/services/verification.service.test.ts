@@ -20,6 +20,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 // Mock setup
 const mockFindUnifiedTxByCorrelationId = vi.fn();
 const mockAggregateSummaryByProjectId = vi.fn();
+const mockAggregateDisbursementsByProjectId = vi.fn();
 const mockFindDisbursementsByProjectId = vi.fn();
 const mockGetRedisClientIfReady = vi.fn();
 
@@ -41,6 +42,7 @@ vi.mock('../../repositories/unifiedTransactionRepository', () => ({
 }));
 
 vi.mock('../../models/disbursementModel', () => ({
+  aggregateDisbursementsByProjectId: (...args: unknown[]) => mockAggregateDisbursementsByProjectId(...args),
   findDisbursementsByProjectId: (...args: unknown[]) => mockFindDisbursementsByProjectId(...args)
 }));
 
@@ -65,7 +67,7 @@ describe('verification.service', () => {
   describe('verifyTransaction', () => {
     it('tra ve found: false khi khong tim thay transaction', async () => {
       mockFindUnifiedTxByCorrelationId.mockResolvedValue(null);
-      mockFindDisbursementsByProjectId.mockResolvedValue([]);
+      mockAggregateDisbursementsByProjectId.mockResolvedValue({ totalCompletedAmount: 0, completedCount: 0 });
 
       const result = await verifyTransaction('nonexistent:999');
 
@@ -92,7 +94,7 @@ describe('verification.service', () => {
       };
 
       mockFindUnifiedTxByCorrelationId.mockResolvedValue(mockTx);
-      mockFindDisbursementsByProjectId.mockResolvedValue([]);
+      mockAggregateDisbursementsByProjectId.mockResolvedValue({ totalCompletedAmount: 0, completedCount: 0 });
 
       const result = await verifyTransaction('deposit:12345678');
 
@@ -124,7 +126,7 @@ describe('verification.service', () => {
       };
 
       mockFindUnifiedTxByCorrelationId.mockResolvedValue(mockTx);
-      mockFindDisbursementsByProjectId.mockResolvedValue([]);
+      mockAggregateDisbursementsByProjectId.mockResolvedValue({ totalCompletedAmount: 0, completedCount: 0 });
 
       const result = await verifyTransaction('donation:0xtxhash123');
 
@@ -161,7 +163,7 @@ describe('verification.service', () => {
       ];
 
       mockFindUnifiedTxByCorrelationId.mockResolvedValue(mockTx);
-      mockFindDisbursementsByProjectId.mockResolvedValue(disbursements);
+      mockAggregateDisbursementsByProjectId.mockResolvedValue({ totalCompletedAmount: 50000, completedCount: 2 });
 
       const result = await verifyTransaction('deposit:disbursement-test-001');
 
@@ -192,7 +194,7 @@ describe('verification.service', () => {
       ];
 
       mockFindUnifiedTxByCorrelationId.mockResolvedValue(mockTx);
-      mockFindDisbursementsByProjectId.mockResolvedValue(disbursements);
+      mockAggregateDisbursementsByProjectId.mockResolvedValue({ totalCompletedAmount: 50000, completedCount: 2 });
 
       const result = await verifyTransaction('deposit:bips-test-001');
 
@@ -217,7 +219,7 @@ describe('verification.service', () => {
       };
 
       mockFindUnifiedTxByCorrelationId.mockResolvedValue(mockTx);
-      mockFindDisbursementsByProjectId.mockResolvedValue([]);
+      mockAggregateDisbursementsByProjectId.mockResolvedValue({ totalCompletedAmount: 0, completedCount: 0 });
 
       const result = await verifyTransaction('deposit:zero-test-001');
 
@@ -270,7 +272,8 @@ describe('verification.service', () => {
       });
       
       const disbursements = [
-        { requestId: 'req-over-1', projectId: 'project-over-xyz-003', amount: 150000, status: 'COMPLETED' }
+        { requestId: 'req-over-1', projectId: 'project-over-xyz-003', amount: 150000, status: 'COMPLETED' },
+        { requestId: 'req-over-2', projectId: 'project-over-xyz-003', amount: 50000, status: 'COMPLETED' }
       ];
       mockFindDisbursementsByProjectId.mockResolvedValue(disbursements);
 
@@ -359,7 +362,7 @@ describe('verification.service', () => {
       });
 
       mockFindUnifiedTxByCorrelationId.mockResolvedValue(null);
-      mockFindDisbursementsByProjectId.mockResolvedValue([]);
+      mockAggregateDisbursementsByProjectId.mockResolvedValue({ totalCompletedAmount: 0, completedCount: 0 });
 
       const result = await verifyTransaction('deposit:redis-error-001');
 

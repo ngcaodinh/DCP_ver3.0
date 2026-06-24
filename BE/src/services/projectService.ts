@@ -1,4 +1,5 @@
 import { ethers } from 'ethers';
+import crypto from 'crypto';
 import { getLogger } from '../config/logger';
 import { findUserById } from '../models/authModel';
 import { findSubmissionsByOrganizationId } from '../models/organizationKycModel';
@@ -532,10 +533,9 @@ async function ensureOrganizationHasApprovedBeneficiaryBankAccount(organizationI
 /** Hàm tạo mã projectId dạng số. Mục đích: đảm bảo tương thích uint256 khi đồng bộ blockchain. */
 function generateNumericProjectId(): string {
   const createdTimestamp = Date.now();
-  const randomSuffix = Math.floor(Math.random() * 1000)
-    .toString()
-    .padStart(3, '0');
-  return `${createdTimestamp}${randomSuffix}`;
+  // Dùng crypto.randomBytes thay Math.random() — entropy đủ lớn, không đoán được.
+  const randomSuffix = parseInt(crypto.randomBytes(3).toString('hex'), 16) % 1_000_000;
+  return `${createdTimestamp}${randomSuffix.toString().padStart(6, '0')}`;
 }
 
 /** Hàm xử lý nghiệp vụ tạo dự án mới. Mục đích: kiểm tra quyền, chặn trùng tên và lưu DRAFT có evidence. */

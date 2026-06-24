@@ -170,6 +170,9 @@ type LogMetadata = {
   disbursementAutoApproved?: boolean;
   commissionerSetChanged?: boolean;
   currentStatus?: string;
+  // D5 — multisig override log
+  operator?: string;
+  error?: string;
   // upload-validation.middleware.ts
   fileName?: string;
   originalName?: string;

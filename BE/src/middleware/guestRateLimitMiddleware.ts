@@ -11,6 +11,7 @@
  * Không crash khi Redis unavailable — fallback sang Lớp 1 + warning log.
  */
 import { Request, Response, NextFunction } from 'express';
+import { randomUUID } from 'crypto';
 import { getRedisClientIfReady } from '../config/redis';
 import { getLogger } from '../config/logger';
 import { sendErrorResponse } from '../utils/apiResponse';
@@ -190,10 +191,9 @@ async function checkGuestSessionRedisLimit(clientIp: string): Promise<boolean> {
   const now = Date.now();
   const windowStart = now - 3_600_000; // 1 giờ
 
-  // Tạo unique member — dùng timestamp + nano ID để tránh trùng khi cùng ms.
-  // nanoid/incremental counter không cần cryptographically random,
-  // chỉ cần unique trong cùng 1ms window là đủ.
-  const memberValue = `${now}-${now % 1000}-${Math.random().toString(36).substring(2, 10)}`;
+  // Tạo unique member — dùng timestamp + UUID để đảm bảo unique tuyệt đối.
+  // randomUUID() từ crypto module đảm bảo entropy cao, không đoán được.
+  const memberValue = `${now}-${now % 1000}-${randomUUID()}`;
 
   try {
     // Pipeline: zRemRangeByScore + zCard + zAdd + expire trong 1 round-trip

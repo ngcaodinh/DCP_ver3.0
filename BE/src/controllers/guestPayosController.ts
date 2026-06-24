@@ -71,7 +71,9 @@ export async function handleInitGuestPayosDonation(
     return;
   }
 
-  const orderCode = String(Date.now() + Math.floor(Math.random() * 999));
+  // Dùng UUID để tạo orderCode duy nhất — entropy đủ lớn (122 bits).
+  // Thay Math.random() vì không cryptographically secure.
+  const orderCode = crypto.randomUUID().replace(/-/g, '').substring(0, 18);
   const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
   const returnUrl = `${appUrl}/donations/${projectId}?payosOrder=${orderCode}`;
   const cancelUrl = `${appUrl}/donations/${projectId}`;

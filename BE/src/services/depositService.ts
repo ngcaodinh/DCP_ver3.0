@@ -55,8 +55,12 @@ const paymentTimeoutMilliseconds = 15 * 60 * 1000;
  * Mục đích: tạo mã đơn hàng dạng số để tương thích ràng buộc API PayOS.
  */
 function generateOrderCode(): string {
-  const orderNumber = Date.now() + Math.floor(Math.random() * 999);
-  return String(orderNumber);
+  // Dùng timestamp (ms) + random từ crypto để tạo số duy nhất.
+  // Date.now() cho 13 chữ số, randomBytes 4 bytes cho thêm entropy,
+  // ghép lại thành số đủ lớn và đủ random.
+  const timestamp = Date.now();
+  const randomBytes = parseInt(crypto.randomBytes(4).toString('hex'), 16);
+  return String(timestamp * 10_000 + (randomBytes % 10_000));
 }
 
 /**
