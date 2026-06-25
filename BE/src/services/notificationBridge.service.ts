@@ -6,19 +6,26 @@ const logger = getLogger();
 
 /**
  * Hàm khởi tạo notification bridge.
- * Đăng ký listeners để xử lý sự kiện webhook và tạo notification.
- * Mục đích: làm cầu nối tạm thời giữa webhook handler và notification service.
+ * Đăng ký listeners để xử lý sự kiện webhook và enqueue notification qua queue (E1).
+ *
+ * Mục đích:
+ * - Bridge webhook events (DISBURSEMENT_TRANSFERRED, ...) → notification queue.
+ * - KHÔNG ghi thẳng DB ở đây — để worker xử lý async (throttle, channel routing, retry).
+ * - Caller chỉ định channels + priority tùy nghiệp vụ.
+ *   Bridge dùng default: IN_APP cho user, thêm EMAIL cho critical events.
  */
 export function initializeNotificationBridge(): void {
-  // Listener cho sự kiện disbursement chuyển thành công
   webhookEvents.on('DISBURSEMENT_TRANSFERRED', async (payload: DisbursementWebhookEventPayload) => {
     try {
       await createUserNotification({
         userId: payload.organizationId,
-        notificationType: 'DISBURSEMENT_SIGNED',
+        notificationType: 'DISBURSEMENT_COMPLETED',
         title: 'Giải ngân thành công',
         content: `Yêu cầu giải ngân ${payload.requestId} đã được chuyển khoản thành công. Số tiền: ${payload.amount.toLocaleString('vi-VN')} VNĐ.`,
         deduplicationKey: `DISBURSEMENT_TRANSFERRED:${payload.requestId}`,
+        channels: ['IN_APP', 'EMAIL'],
+        priority: 'HIGH',
+        enqueuedBy: 'bridge',
         metadata: {
           requestId: payload.requestId,
           projectId: payload.projectId,
@@ -30,19 +37,18 @@ export function initializeNotificationBridge(): void {
         }
       });
 
-      logger.info('Đã tạo notification cho disbursement transfer thành công.', {
+      logger.info('Đã enqueue notification cho disbursement transfer thành công.', {
         requestId: payload.requestId,
         organizationId: payload.organizationId
       });
     } catch (error) {
-      logger.error('Tạo notification cho disbursement transfer thất bại.', {
+      logger.error('Enqueue notification cho disbursement transfer thất bại.', {
         requestId: payload.requestId,
         errorMessage: (error as Error)?.message
       });
     }
   });
 
-  // Listener cho sự kiện disbursement transfer thất bại
   webhookEvents.on('DISBURSEMENT_TRANSFER_FAILED', async (payload: DisbursementWebhookEventPayload) => {
     try {
       await createUserNotification({
@@ -51,6 +57,9 @@ export function initializeNotificationBridge(): void {
         title: 'Giải ngân thất bại',
         content: `Yêu cầu giải ngân ${payload.requestId} không thể hoàn tất. Vui lòng kiểm tra trạng thái và liên hệ hỗ trợ nếu cần.`,
         deduplicationKey: `DISBURSEMENT_TRANSFER_FAILED:${payload.requestId}`,
+        channels: ['IN_APP', 'EMAIL'],
+        priority: 'HIGH',
+        enqueuedBy: 'bridge',
         metadata: {
           requestId: payload.requestId,
           projectId: payload.projectId,
@@ -61,17 +70,17 @@ export function initializeNotificationBridge(): void {
         }
       });
 
-      logger.info('Đã tạo notification cho disbursement transfer thất bại.', {
+      logger.info('Đã enqueue notification cho disbursement transfer thất bại.', {
         requestId: payload.requestId,
         organizationId: payload.organizationId
       });
     } catch (error) {
-      logger.error('Tạo notification cho disbursement transfer failed thất bại.', {
+      logger.error('Enqueue notification cho disbursement transfer failed thất bại.', {
         requestId: payload.requestId,
         errorMessage: (error as Error)?.message
       });
     }
   });
 
-  logger.info('Notification bridge đã được khởi tạo.');
+  logger.info('Notification bridge đã được khởi tạo (E1 async dispatch).');
 }
