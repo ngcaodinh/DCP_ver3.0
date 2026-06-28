@@ -53,7 +53,7 @@ vi.mock('../services/payosService', () => ({
   getPayosTransferStatusByReferenceId: vi.fn(),
 }));
 
-vi.mock('../services/notificationService', () => ({
+vi.mock('../../services/notificationService', () => ({
   createUserNotification: vi.fn(),
 }));
 

@@ -29,6 +29,10 @@ vi.mock('../../config/logger', () => ({
   }))
 }));
 
+vi.mock('../../services/notificationService', () => ({
+  createUserNotification: vi.fn().mockResolvedValue(null)
+}));
+
 vi.mock('../../config/zeroDev', () => ({
   getZeroDevConfig: vi.fn(() => ({
     paymasterUrl: 'https://paymaster.test',

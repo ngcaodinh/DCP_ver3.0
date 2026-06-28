@@ -84,7 +84,16 @@ type LogMetadata = {
   reason?: string;
   keysDeleted?: number;
   userId?: string;
+  notificationId?: string;
+  notificationType?: string;
+  channels?: string | string[];
+  deliveryState?: string;
+  attempts?: number;
+  priority?: string | number;
   action?: string;
+  deliveredChannels?: string | string[];
+  requestedChannels?: string | string[];
+  failedChannels?: string | string[];
   newRenewalCount?: number;
   expiredSessions?: number;
   purgedSessions?: number;

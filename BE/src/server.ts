@@ -18,6 +18,7 @@ import { startSbtMintWorker, stopSbtMintWorker } from './workers/sbtMintWorker';
 import { startSbtMintRecoveryScheduler } from './workers/sbtMintRecoveryScheduler';
 import { initializeSbtEventBridge } from './services/sbtEventBridge.service';
 import { startDataMapperWorker } from './workers/data-mapper.worker';
+import { startNotificationWorker, stopNotificationWorker } from './workers/notification.worker';
 
 const logger = getLogger();
 
@@ -56,6 +57,8 @@ function startBackgroundWorkers(): void {
   startSbtMintRecoveryScheduler();
   // Data Mapper Worker: dong bo PayOS + blockchain vao unified_transactions (5 phut)
   startDataMapperWorker();
+  // Notification Worker (E1): consume notification queue, channel routing + throttle + DLQ
+  startNotificationWorker();
 }
 
 /**
@@ -93,6 +96,8 @@ async function startServer(): Promise<void> {
       stopOverrideExpiryWorker();
       await stopOracleWorker();
       await stopSbtMintWorker();
+      // Notification worker: Bull queue.close() chờ active job xong (graceful per spec E1)
+      await stopNotificationWorker();
     } catch (error) {
       logger.error('Lỗi khi shutdown workers.', {
         errorMessage: (error as Error).message

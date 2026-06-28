@@ -32,6 +32,10 @@ vi.mock('../../events/oracleEvents', () => ({
   oracleEvents: { emit: vi.fn() }
 }));
 
+vi.mock('../../services/notificationService', () => ({
+  createUserNotification: vi.fn().mockResolvedValue(null)
+}));
+
 vi.mock('../../config/logger', () => ({
   getLogger: () => ({
     info: vi.fn(),
