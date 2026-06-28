@@ -3,15 +3,33 @@ import { getLogger } from '../config/logger';
 import { getRedisClientIfReady } from '../config/redis';
 import { extractErrorMessage } from '../utils/extractErrorMessage';
 import type { NotificationChannel, NotificationPriority, NotificationType } from '../models/notificationModel';
+import type { Job } from 'bull';
 
 const logger = getLogger();
 export const NOTIFICATION_QUEUE_NAME = 'notification';
+export const NOTIFICATION_DLQ_QUEUE_NAME = 'notification:dlq';
+
+// Redis config cho DLQ queue (tái sử dụng từ main queue pattern).
+let redisConfig: string | undefined;
 
 /**
- * Tên queue Bull phụ (DLQ) — theo spec E1: `notification:dlq`.
- * Theo Bull convention: queue phụ dùng prefix tên + ':dlq'.
+ * Lấy redis config từ connection hiện tại.
  */
-export const NOTIFICATION_DLQ_QUEUE_NAME = 'notification:dlq';
+function getRedisConfig(): string {
+  if (!redisConfig) {
+    const redisClient = getRedisClientIfReady();
+    redisConfig = redisClient?.options?.url ?? process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';
+  }
+  return redisConfig;
+}
+
+/**
+ * DLQ queue cho notification thất bại vĩnh viễn sau khi hết retries.
+ * Job trong DLQ được giữ 30 ngày để admin có thể investigate.
+ */
+export const notificationDlqQueue = new Queue(NOTIFICATION_DLQ_QUEUE_NAME, getRedisConfig(), {
+  defaultJobOptions: { removeOnComplete: true, removeOnFail: 30 * 24 * 60 }
+});
 
 /**
  * Map từ NotificationPriority → Bull priority (Bull: thấp hơn = chạy trước).
@@ -264,4 +282,21 @@ export async function getNotificationQueueStats(): Promise<{
   ]);
 
   return { waiting, active, completed, failed, delayed };
+}
+
+/**
+ * Chuyển job thất bại sang DLQ sau khi đã hết retries.
+ * @param job Job gốc từ Bull queue
+ */
+export async function moveNotificationToDLQ(job: Job<NotificationJobData>): Promise<void> {
+  await notificationDlqQueue.add(
+    'failed-notification',
+    job.data,
+    {
+      attempts: 1,
+      removeOnComplete: true,
+      removeOnFail: 30 * 24 * 60 // giữ 30 ngày trong DLQ
+    }
+  );
+  await job.remove();
 }

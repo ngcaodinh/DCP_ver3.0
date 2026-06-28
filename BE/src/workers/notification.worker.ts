@@ -7,6 +7,7 @@ import {
   NOTIFICATION_RETRY_DELAYS_MS,
   isUserThrottled,
   NOTIFICATION_THROTTLE_DELAY_MS,
+  moveNotificationToDLQ,
   type NotificationJobData
 } from '../queues/notificationQueue';
 import {
@@ -254,8 +255,9 @@ async function scheduleNextAttempt(
       lastError: errorMessage
     });
 
-    // Mark job as failed bằng cách throw — Bull sẽ move sang failed set (DLQ effectively).
-    throw new Error(`Notification DLQ after ${attemptNumber} attempts: ${errorMessage}`);
+    // Chuyển job sang DLQ queue thay vì throw — DLQ được giữ 30 ngày để admin investigate.
+    await moveNotificationToDLQ(job);
+    return;
   }
 
   // Schedule retry.

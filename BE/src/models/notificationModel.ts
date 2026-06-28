@@ -132,5 +132,10 @@ notificationSchema.index(
   { deduplicationKey: 1 },
   { unique: true, partialFilterExpression: { deduplicationKey: { $type: 'string' } } }
 );
+// TTL index: tự động xóa notification sau 90 ngày để giảm storage và comply GDPR.
+notificationSchema.index(
+  { createdAt: 1 },
+  { expireAfterSeconds: 90 * 24 * 60 * 60 }
+);
 
 export const NotificationModel = mongoose.models.Notification || mongoose.model<Notification>('Notification', notificationSchema);

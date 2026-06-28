@@ -41,7 +41,9 @@ const userNotificationPreferenceSchema = new Schema<UserNotificationPreference>(
   {
     userId: { type: String, required: true, unique: true, index: true },
     preferences: { type: preferencesSchema, required: true, default: {} },
-    globalEnabled: { type: Boolean, required: true, default: true }
+    globalEnabled: { type: Boolean, required: true, default: true },
+    /** Token để user hủy đăng ký notification qua link email (không cần login). */
+    unsubscribeToken: { type: String, sparse: true, index: true }
   },
   { timestamps: true }
 );

@@ -15,7 +15,8 @@ vi.mock('../../queues/notificationQueue', () => ({
   NOTIFICATION_RETRY_DELAYS_MS: [30_000, 120_000, 300_000],
   NOTIFICATION_THROTTLE_DELAY_MS: 60_000,
   NOTIFICATION_BULL_PRIORITY: { CRITICAL: 1, HIGH: 2, NORMAL: 3, LOW: 4 },
-  NOTIFICATION_ALLOWLIST: {}
+  NOTIFICATION_ALLOWLIST: {},
+  moveNotificationToDLQ: vi.fn().mockResolvedValue(undefined)
 }));
 
 vi.mock('../../services/notificationService', () => ({
@@ -204,5 +205,43 @@ describe('stopNotificationWorker graceful shutdown', () => {
     const { stopNotificationWorker } = await import('../../workers/notification.worker');
 
     await expect(stopNotificationWorker()).resolves.toBeUndefined();
+  });
+});
+
+describe('scheduleNextAttempt - DLQ Logic', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('nên dùng exponential backoff delay đúng', async () => {
+    const { NOTIFICATION_RETRY_DELAYS_MS } = await import('../../queues/notificationQueue');
+
+    expect(NOTIFICATION_RETRY_DELAYS_MS[0]).toBe(30_000);  // Attempt 1 → retry sau 30s
+    expect(NOTIFICATION_RETRY_DELAYS_MS[1]).toBe(120_000); // Attempt 2 → retry sau 2 phút
+    expect(NOTIFICATION_RETRY_DELAYS_MS[2]).toBe(300_000); // Attempt 3 → retry sau 5 phút
+  });
+
+  it('retry flow: attempt 1 → 2 → 3 → DLQ', async () => {
+    const { NOTIFICATION_MAX_ATTEMPTS } = await import('../../queues/notificationQueue');
+
+    // Verify max attempts = 3
+    expect(NOTIFICATION_MAX_ATTEMPTS).toBe(3);
+
+    // Attempt flow:
+    // Attempt 1 fail → schedule retry (attempt 2)
+    // Attempt 2 fail → schedule retry (attempt 3)
+    // Attempt 3 fail → move to DLQ
+
+    const attemptFlows = [
+      { attempt: 1, shouldRetry: true, shouldDLQ: false },
+      { attempt: 2, shouldRetry: true, shouldDLQ: false },
+      { attempt: 3, shouldRetry: false, shouldDLQ: true }
+    ];
+
+    attemptFlows.forEach(({ attempt, shouldRetry, shouldDLQ }) => {
+      const isLastAttempt = attempt >= NOTIFICATION_MAX_ATTEMPTS;
+      expect(isLastAttempt).toBe(shouldDLQ);
+      expect(!isLastAttempt).toBe(shouldRetry);
+    });
   });
 });

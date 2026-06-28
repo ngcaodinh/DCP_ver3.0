@@ -11,6 +11,7 @@ export type { NotificationDeliveryStatusMap };
 import { UserNotificationPreferenceModel } from '../models/notificationPreferenceModel';
 import { getLogger } from '../config/logger';
 import { enqueueNotification, NOTIFICATION_ALLOWLIST } from '../queues/notificationQueue';
+import crypto from 'crypto';
 
 const logger = getLogger();
 
@@ -373,4 +374,32 @@ export function computeDeliveryState(
   if (skippedCount === requestedChannels.length) return 'SKIPPED';
   if (sentCount > 0 && (failedCount > 0 || skippedCount > 0)) return 'PARTIAL';
   return 'FAILED';
+}
+
+/**
+ * Tạo token ngẫu nhiên để hủy đăng ký notification qua email.
+ * @param userId ID của người dùng
+ * @returns Token unsubscribe dạng hex 64 ký tự
+ */
+export async function generateUnsubscribeToken(userId: string): Promise<string> {
+  const token = crypto.randomBytes(32).toString('hex');
+  await UserNotificationPreferenceModel.findOneAndUpdate(
+    { userId },
+    { $set: { unsubscribeToken: token } },
+    { upsert: true, new: true }
+  );
+  return token;
+}
+
+/**
+ * Xử lý hủy đăng ký notification qua token từ email.
+ * @param token Token từ link unsubscribe trong email
+ * @returns True nếu hủy thành công, false nếu token không hợp lệ
+ */
+export async function processUnsubscribe(token: string): Promise<boolean> {
+  const pref = await UserNotificationPreferenceModel.findOne({ unsubscribeToken: token });
+  if (!pref) return false;
+  pref.globalEnabled = false;
+  await pref.save();
+  return true;
 }
