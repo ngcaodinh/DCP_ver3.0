@@ -285,14 +285,12 @@ describe('E2 Dispatcher', () => {
   });
 
   it('dispatch tra PARTIAL khi EMAIL fail nhung IN_APP success', async () => {
-    // Su dung fake timers de tranh real 60s sleep khi EMAIL fail
-    vi.useFakeTimers();
-
+    // Email chi goi 1 lan (Bull xu ly retry) — khong can fake timers
     setupSmtpEnv();
     mocks.mockSendMail.mockRejectedValue(new Error('SMTP err'));
 
     const { dispatchNotification } = await import('../notificationDispatcher.service');
-    const promise = dispatchNotification(
+    const result = await dispatchNotification(
       {
         notificationId: 'N3', notificationType: 'LARGE_DONATION',
         title: 'T', content: 'C', channels: ['IN_APP', 'EMAIL'],
@@ -301,13 +299,11 @@ describe('E2 Dispatcher', () => {
       { userId: 'u1', userEmail: 'u@e.com' }
     );
 
-    // Advance through all retry attempts
-    await vi.advanceTimersByTimeAsync(120_000);
-    const result = await promise;
-
     expect(result.deliveryState).toBe('PARTIAL');
-
-    vi.useRealTimers();
+    const emailResult = result.channelResults.find(r => r.channel === 'EMAIL');
+    expect(emailResult?.result.success).toBe(false);
+    const inAppResult = result.channelResults.find(r => r.channel === 'IN_APP');
+    expect(inAppResult?.result.success).toBe(true);
   });
 
   it('PUSH fallback EMAIL khi FCM fail', async () => {
@@ -357,14 +353,12 @@ describe('E2 Dispatcher', () => {
   });
 
   it('dispatch tra FAILED khi tat ca channels fail', async () => {
-    // Su dung fake timers de tranh real 60s sleep khi EMAIL fail
-    vi.useFakeTimers();
-
+    // Email chi goi 1 lan — khong can fake timers
     setupSmtpEnv();
     mocks.mockSendMail.mockRejectedValue(new Error('SMTP err'));
 
     const { dispatchNotification } = await import('../notificationDispatcher.service');
-    const promise = dispatchNotification(
+    const result = await dispatchNotification(
       {
         notificationId: 'N6', notificationType: 'LARGE_DONATION',
         title: 'T', content: 'C', channels: ['EMAIL'],
@@ -373,13 +367,9 @@ describe('E2 Dispatcher', () => {
       { userId: 'u1', userEmail: 'u@e.com' }
     );
 
-    // Advance through all retry attempts
-    await vi.advanceTimersByTimeAsync(120_000);
-    const result = await promise;
-
     expect(result.deliveryState).toBe('FAILED');
-
-    vi.useRealTimers();
+    expect(result.channelResults).toHaveLength(1);
+    expect(result.channelResults[0].result.success).toBe(false);
   });
 });
 

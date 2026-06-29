@@ -19,6 +19,10 @@ export type AuthUser = {
   lastLoginIp: string | null;
   lastLoginUserAgent: string | null;
   correlationId: string;
+  /** FCM device token cho push notification (FCM). */
+  fcmDeviceToken: string | null;
+  /** So dien thoai cua nguoi dung (dung cho SMS notification). */
+  phoneNumber: string | null;
   updatedAt?: Date;
 };
 
@@ -65,7 +69,9 @@ const authUserSchema = new Schema<AuthUser>({
   lastLoginAt: { type: Date, required: true },
   lastLoginIp: { type: String, default: null },
   lastLoginUserAgent: { type: String, default: null },
-  correlationId: { type: String, required: true }
+  correlationId: { type: String, required: true },
+  fcmDeviceToken: { type: String, default: null },
+  phoneNumber: { type: String, default: null }
 });
 
 // Ghi chú logic phức tạp: dùng partial unique index để chỉ bắt buộc duy nhất khi legalRegistrationNumber là chuỗi hợp lệ,
@@ -389,4 +395,37 @@ export async function findActiveCommissioners(): Promise<AuthUser[]> {
     accountStatus: 'ACTIVE',
     isSybil: false
   }).lean<AuthUser[]>().exec();
+}
+
+/**
+ * Lay thong tin user phuc vu notification dispatch.
+ * Tra ve email, FCM token, va phone number cua nguoi dung.
+ * Dung cho E2 multi-channel delivery — worker can thong tin nay de goi dispatcher.
+ *
+ * @param userId ID cua nguoi dung (truong `id`, khong phai `_id`)
+ * @returns UserNotificationContext hoac null neu user khong ton tai
+ */
+export async function findUserNotificationContext(
+  userId: string
+): Promise<{
+  userId: string;
+  userEmail: string | undefined;
+  fcmDeviceToken: string | undefined;
+  phoneNumber: string | undefined;
+} | null> {
+  const user = await AuthUserModel.findOne({ id: userId })
+    .select('id email fcmDeviceToken phoneNumber')
+    .lean<AuthUser>()
+    .exec();
+
+  if (!user) {
+    return null;
+  }
+
+  return {
+    userId: user.id,
+    userEmail: user.email,
+    fcmDeviceToken: user.fcmDeviceToken ?? undefined,
+    phoneNumber: user.phoneNumber ?? undefined
+  };
 }

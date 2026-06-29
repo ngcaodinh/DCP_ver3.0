@@ -1,6 +1,7 @@
 /**
  * Unit tests cho E2 Multi-channel Delivery — Email Retry.
- * Dung fake timers de tranh real 60s sleep delays.
+ * Email retry được xử lý bởi Bull queue (non-blocking).
+ * Tests xác minh email service chỉ attempt 1 lần, caller quyết định retry.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
@@ -60,24 +61,17 @@ describe('E2 Email Retry', () => {
     vi.useRealTimers();
   });
 
-  it('retry 3 lan khi SMTP fail (fake timers)', async () => {
-    // Su dung fake timers de tranh real 60s sleep
-    vi.useFakeTimers();
-
+  it('sendEmailWithRetry chi attempt 1 lan, khong block worker', async () => {
+    // Email service chi goi 1 lan — Bull queue xu ly retry (non-blocking)
     mocks.mockSendMail.mockRejectedValue(new Error('SMTP temp error'));
 
     const { sendEmailWithRetry } = await import('../email.service');
-
-    const promise = sendEmailWithRetry({ to: 'u@e.com', subject: 'T', html: '<p>T</p>' });
-
-    // Advance through 3 attempts (2 intervals of 60s each = 120s total)
-    await vi.advanceTimersByTimeAsync(120_000);
-
-    const result = await promise;
+    const result = await sendEmailWithRetry({ to: 'u@e.com', subject: 'T', html: '<p>T</p>' });
 
     expect(result.success).toBe(false);
     expect(result.channel).toBe('EMAIL');
-    expect(mocks.mockSendMail).toHaveBeenCalledTimes(3);
+    expect(result.retryable).toBe(true); // Bull se retry
+    expect(mocks.mockSendMail).toHaveBeenCalledTimes(1);
   });
 
   it('success ngay khi lan dau thanh cong', async () => {
@@ -89,12 +83,12 @@ describe('E2 Email Retry', () => {
     expect(mocks.mockSendMail).toHaveBeenCalledTimes(1);
   });
 
-  it('khong retry khi authentication failed', async () => {
+  it('khong retry khi authentication failed (non-retryable)', async () => {
     mocks.mockSendMail.mockRejectedValue(new Error('Authentication failed'));
     const { sendEmailWithRetry } = await import('../email.service');
     const result = await sendEmailWithRetry({ to: 'u@e.com', subject: 'T', html: '<p>T</p>' });
     expect(result.success).toBe(false);
-    expect(result.retryable).toBe(false);
+    expect(result.retryable).toBe(false); // Khong retry — credentials sai
     expect(mocks.mockSendMail).toHaveBeenCalledTimes(1);
   });
 });

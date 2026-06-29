@@ -15,9 +15,12 @@ import {
   updateNotificationDeliveryStatus,
   updateChannelStatus,
   computeDeliveryState,
+  getUnsubscribeTokenForUser,
   type NotificationDeliveryStatusMap
 } from '../services/notificationService';
 import { notificationEvents } from '../events/notificationEvents';
+import { findUserNotificationContext } from '../models/authModel';
+import { dispatchNotification } from '../services/notificationDispatcher.service';
 import type { NotificationChannel, NotificationDeliveryState } from '../models/notificationModel';
 import { extractErrorMessage } from '../utils/extractErrorMessage';
 
@@ -35,25 +38,19 @@ const NOTIFICATION_WORKER_CONCURRENCY = 5;
 const SUCCESS_RESULT_TOKEN = 'SUCCESS';
 
 /**
- * Hàm dispatch 1 channel — thực hiện side-effect delivery cho channel cụ thể.
+ * Ham dispatch 1 channel — thuc hien side-effect delivery cho channel cu the.
  *
- * Theo spec E1: "Send via appropriate channel (IN_APP/EMAIL/PUSH/SMS) based on user preference".
- * E1 chỉ implement IN_APP delivery thật (ghi DB đã SENT + emit event để E3 consume).
- * Các channel khác (EMAIL/PUSH/SMS) là adapter skeleton — sẽ implement thật ở E2.
- *
- * Mục đích:
- * - IN_APP: update DB status='SENT' (đã đánh dấu trong notificationEvents listener tương lai của E3)
- *   và emit notificationEvents để SSE controller / future per-user socket forward tới client.
- * - EMAIL/PUSH/SMS: emit event để E2 service handler xử lý thật (Nodemailer/FCM/Twilio).
- *   Trong E1 nếu chưa có handler, default là "no-op delivered" vì spec E1 chưa yêu cầu transport thật.
+ * Theo spec E2: goi E2 dispatcher cho EMAIL/PUSH/SMS, emit event cho IN_APP.
+ * E2 dispatcher xu ly Nodemailer (EMAIL), FCM (PUSH), Twilio (SMS) + fallback chain.
  */
 async function dispatchChannel(
   channel: NotificationChannel,
-  job: NotificationJobData
+  job: NotificationJobData,
+  userContext: { userEmail?: string; fcmDeviceToken?: string; phoneNumber?: string; unsubscribeToken?: string } | null
 ): Promise<{ success: boolean; errorMessage?: string }> {
   try {
+    // IN_APP: emit event de E3 SSE consumer xu ly (khong goi dispatcher)
     if (channel === 'IN_APP') {
-      // IN_APP delivery: ghi DB (đã làm trước đó qua upsert) + emit event cho E3/SSE consumer.
       notificationEvents.emit('notification.delivered', {
         notificationId: job.notificationId,
         userId: job.userId,
@@ -66,24 +63,41 @@ async function dispatchChannel(
       return { success: true };
     }
 
+    // EMAIL/PUSH/SMS: goi E2 dispatcher de xu ly transport thuc te
     if (channel === 'EMAIL' || channel === 'PUSH' || channel === 'SMS') {
-      // E1 skeleton: emit event để E2 consume (khi implement Gmail SMTP/FCM/Twilio).
-      // Nếu E2 chưa sẵn sàng, default coi như đã delivered (success=true) để không block E1 test path.
-      // Khi E2 wire handler, nó sẽ handle thật và set status phù hợp qua DB update.
-      notificationEvents.emit('notification.delivered', {
-        notificationId: job.notificationId,
-        userId: job.userId,
-        notificationType: job.notificationType,
-        channel,
-        title: job.title,
-        content: job.content,
-        deliveredAt: new Date()
-      });
-      logger.info(`[E1 skeleton] Channel ${channel} delivery qua event bus — E2 sẽ handle transport thật.`, {
-        notificationId: job.notificationId,
-        userId: job.userId
-      });
-      return { success: true };
+      if (!userContext) {
+        logger.warn('User context khong co — skip channel dispatch.', {
+          notificationId: job.notificationId,
+          userId: job.userId,
+          channels: [channel]
+        });
+        return { success: false, errorMessage: 'User context not available' };
+      }
+
+      const result = await dispatchNotification(
+        {
+          notificationId: job.notificationId,
+          notificationType: job.notificationType,
+          title: job.title,
+          content: job.content,
+          channels: [channel],
+          metadata: job.metadata
+        },
+        {
+          userId: job.userId,
+          userEmail: userContext.userEmail,
+          fcmDeviceToken: userContext.fcmDeviceToken,
+          phoneNumber: userContext.phoneNumber,
+          unsubscribeToken: userContext.unsubscribeToken,
+          donationAmountVnd: (job.metadata?.donationAmountVnd as number | undefined)
+        }
+      );
+
+      const channelResult = result.channelResults[0]?.result;
+      return {
+        success: channelResult?.success ?? false,
+        errorMessage: channelResult?.success === false ? channelResult.errorMessage : undefined
+      };
     }
 
     return { success: false, errorMessage: `Unknown channel: ${channel}` };
@@ -163,6 +177,23 @@ export async function processNotificationJob(job: Job<NotificationJobData>): Pro
     };
   }
 
+  // 2. Fetch user context + unsubscribe token for E2 dispatcher.
+  const userContext = await findUserNotificationContext(userId);
+  if (!userContext) {
+    logger.warn('User not found (deleted) — skip notification job.', {
+      notificationId,
+      userId,
+      jobId: job.id
+    });
+    return {
+      notificationId,
+      deliveryState: 'SKIPPED',
+      deliveredChannels: [],
+      failedChannels: []
+    };
+  }
+  const unsubscribeToken = await getUnsubscribeTokenForUser(userId);
+
   // 3. Per-channel dispatch.
   let deliveryStatus: NotificationDeliveryStatusMap = notification.deliveryStatus || {
     IN_APP: 'PENDING',
@@ -174,7 +205,12 @@ export async function processNotificationJob(job: Job<NotificationJobData>): Pro
   const failedChannels: NotificationChannel[] = [];
 
   for (const channel of channels) {
-    const dispatchResult = await dispatchChannel(channel, job.data);
+    const dispatchResult = await dispatchChannel(channel, job.data, {
+      userEmail: userContext?.userEmail,
+      fcmDeviceToken: userContext?.fcmDeviceToken,
+      phoneNumber: userContext?.phoneNumber,
+      unsubscribeToken: unsubscribeToken ?? undefined
+    });
     if (dispatchResult.success) {
       deliveryStatus = updateChannelStatus(deliveryStatus, channel, 'SENT');
       deliveredChannels.push(channel);

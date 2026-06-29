@@ -201,7 +201,7 @@ async function sendEmailOnce(options: {
     const latencyMs = Date.now() - startTime;
     logger.info('Email đã được gửi thành công.', {
       to: options.to,
-      subject: options.to,
+      subject: options.subject,
       messageId: result.messageId,
       latencyMs
     });
@@ -243,20 +243,18 @@ async function sendEmailOnce(options: {
 function isRetryableError(error: unknown): boolean {
   if (error instanceof Error) {
     const message = error.message.toLowerCase();
-    // Các lỗi không retry được
     if (message.includes('invalid recipient')) return false;
     if (message.includes('authentication failed')) return false;
     if (message.includes('credentials')) return false;
-    if (message.includes('eai_ewronguser')) return false; // Gmail: user not found
+    if (message.includes('eai_ewronguser')) return false;
   }
-  // Mặc định: retry
   return true;
 }
 
 /**
- * Gửi email với retry logic — thử tối đa EMAIL_MAX_RETRY_ATTEMPTS lần.
- * Interval cố định EMAIL_RETRY_INTERVAL_MS giữa các lần retry.
- * Spec: retry 3 lần với 1-minute interval.
+ * Gửi email một lần (không retry nội bộ).
+ * Retry được xử lý bởi Bull queue trong notification worker.
+ * Spec: retry 3 lần với 1-minute interval do Bull quản lý (non-blocking).
  *
  * @param options Các tham số gửi email
  * @returns DeliveryResult
@@ -266,53 +264,17 @@ export async function sendEmailWithRetry(options: {
   subject: string;
   html: string;
 }): Promise<DeliveryResult> {
-  let lastResult: DeliveryResult = {
-    success: false,
-    channel: 'EMAIL',
-    errorMessage: 'Chưa thử gửi email',
-    retryable: false
-  };
+  // Một lần gửi duy nhất — Bull queue xử lý retry nếu cần (không block worker)
+  const result = await sendEmailOnce(options);
 
-  for (let attempt = 1; attempt <= EMAIL_MAX_RETRY_ATTEMPTS; attempt++) {
-    logger.info(`Email send attempt ${attempt}/${EMAIL_MAX_RETRY_ATTEMPTS}`, {
+  if (!result.success && result.retryable) {
+    logger.info('Email gửi thất bại nhưng retryable — Bull queue sẽ retry.', {
       to: options.to,
-      subject: options.subject
+      errorMessage: result.errorMessage
     });
-
-    lastResult = await sendEmailOnce(options);
-
-    if (lastResult.success) {
-      return lastResult;
-    }
-
-    // Nếu lỗi không retry được, không thử lại
-    if (!lastResult.retryable) {
-      logger.warn('Email error không retry được, dừng retry.', {
-        to: options.to,
-        errorMessage: lastResult.errorMessage,
-        attempt
-      });
-      return lastResult;
-    }
-
-    // Nếu chưa phải attempt cuối, đợi interval
-    if (attempt < EMAIL_MAX_RETRY_ATTEMPTS) {
-      logger.info(`Email retry đợi ${EMAIL_RETRY_INTERVAL_MS}ms...`, {
-        to: options.to,
-        nextAttempt: attempt + 1
-      });
-      await sleep(EMAIL_RETRY_INTERVAL_MS);
-    }
   }
 
-  // Tất cả retries exhausted
-  logger.error('Email send thất bại sau khi đã retry.', {
-    to: options.to,
-    subject: options.subject,
-    totalAttempts: EMAIL_MAX_RETRY_ATTEMPTS
-  });
-
-  return lastResult;
+  return result;
 }
 
 /**
@@ -431,13 +393,6 @@ export async function sendNotificationEmail(
     templateContext,
     unsubscribeToken: dispatchContext.unsubscribeToken
   });
-}
-
-/**
- * Hàm helper sleep cho retry interval.
- */
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 /**
