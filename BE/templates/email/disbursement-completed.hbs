@@ -1,0 +1,53 @@
+{{!--
+  Template: Disbursement Completed Notification
+  Dùng cho DISBURSEMENT_COMPLETED event type.
+--}}
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{title}}</title>
+  <style>
+    body { margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f4f4; }
+    .email-container { max-width: 600px; margin: 0 auto; background-color: #ffffff; }
+    .email-header { background-color: #059669; color: #ffffff; padding: 24px; text-align: center; }
+    .email-header h1 { margin: 0; font-size: 24px; font-weight: 600; }
+    .email-body { padding: 32px 24px; }
+    .email-body h2 { color: #047857; font-size: 20px; margin-top: 0; }
+    .email-body p { color: #374151; font-size: 16px; line-height: 1.6; margin: 16px 0; }
+    .status-box { background-color: #ecfdf5; border-left: 4px solid #059669; padding: 16px 20px; margin: 24px 0; border-radius: 4px; }
+    .status-box .status { color: #059669; font-size: 18px; font-weight: 600; }
+    .email-footer { background-color: #f9fafb; padding: 20px 24px; text-align: center; border-top: 1px solid #e5e7eb; }
+    .email-footer p { color: #6b7280; font-size: 12px; margin: 8px 0; }
+    .unsubscribe-link { color: #6b7280; font-size: 12px; }
+    .unsubscribe-link a { color: #2563eb; text-decoration: underline; }
+    @media only screen and (max-width: 480px) {
+      .email-body { padding: 20px 16px; }
+      .email-header { padding: 16px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="email-container">
+    <div class="email-header">
+      <h1>Giải ngân thành công</h1>
+    </div>
+    <div class="email-body">
+      <h2>{{title}}</h2>
+      <p>{{content}}</p>
+      <div class="status-box">
+        <div class="status">&#10004; Giải ngân đã hoàn tất</div>
+      </div>
+      <p>Tiền đã được chuyển đến tài khoản của bạn. Vui lòng kiểm tra số dư tài khoản.</p>
+    </div>
+    <div class="email-footer">
+      <p>Email này được gửi tự động từ hệ thống Dự án Từ Thiện Minh Bạch.</p>
+      <p>&copy; {{year}} Dự án Từ Thiện Minh Bạch. Mọi quyền được bảo lưu.</p>
+      <p class="unsubscribe-link">
+        Không muốn nhận email? <a href="{{unsubscribeUrl}}">Hủy đăng ký</a>
+      </p>
+    </div>
+  </div>
+</body>
+</html>
