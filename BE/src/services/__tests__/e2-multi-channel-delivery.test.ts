@@ -1,18 +1,18 @@
 /**
  * Unit tests cho E2 Multi-channel Delivery.
- * Mock external dependencies (nodemailer, twilio, firebase-admin) only.
- * Real service implementations run, avoiding singleton mock state conflicts.
+ * Mock external dependencies (nodemailer, twilio, firebase-admin, fs, path) only.
+ * Real service implementations run — fake timers chi can cho email retry delay.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-// Hoisted mock refs
+// Hoisted mock refs — chia se giua vi.mock factories va tests
 const mocks = vi.hoisted(() => ({
   mockSendMail: vi.fn(),
   mockTwilioCreate: vi.fn(),
   mockFcmSend: vi.fn()
 }));
 
-// External deps mock only
+// External deps mock — bao gom default export de tranh loi "No default export"
 vi.mock('../config/logger', () => ({
   getLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn() })
 }));
@@ -32,15 +32,22 @@ vi.mock('firebase-admin/app', () => ({
 }));
 
 vi.mock('firebase-admin/messaging', () => ({
-  getMessaging: vi.fn(() => ({ send: mocks.mockFcmSend }))
+  default: { getMessaging: vi.fn(() => ({ send: mocks.mockFcmSend })) }
 }));
 
 vi.mock('fs', () => ({
+  default: {
+    existsSync: vi.fn(() => true),
+    readFileSync: vi.fn(() => '<p>{{content}}</p><a href="{{unsubscribeUrl}}">Unsub</a>')
+  },
   existsSync: vi.fn(() => true),
   readFileSync: vi.fn(() => '<p>{{content}}</p><a href="{{unsubscribeUrl}}">Unsub</a>')
 }));
 
-vi.mock('path', () => ({ resolve: vi.fn(() => '/t.hbs') }));
+vi.mock('path', () => ({
+  default: { resolve: vi.fn(() => '/t.hbs') },
+  resolve: vi.fn(() => '/t.hbs')
+}));
 
 vi.mock('handlebars', () => ({
   default: {
@@ -51,6 +58,29 @@ vi.mock('handlebars', () => ({
     })
   }
 }));
+
+/**
+ * Reset all singleton clients.
+ */
+async function resetAllSingletons(): Promise<void> {
+  const { resetTransporter } = await import('../email.service');
+  const { resetTwilioClient } = await import('../sms.service');
+  const { resetFirebaseApp } = await import('../push.service');
+  resetTransporter();
+  resetTwilioClient();
+  resetFirebaseApp();
+}
+
+/**
+ * Setup env vars cho SMTP.
+ */
+function setupSmtpEnv(): void {
+  process.env.SMTP_HOST = 'smtp.gmail.com';
+  process.env.SMTP_PORT = '465';
+  process.env.SMTP_USER = 'test@gmail.com';
+  process.env.SMTP_PASS = 'pass';
+  process.env.SMTP_FROM = 'DCP <dcp@test.com>';
+}
 
 describe('E2 Constants', () => {
   it('EMAIL_MAX_RETRY_ATTEMPTS = 3', async () => {
@@ -94,44 +124,7 @@ describe('E2 Constants', () => {
   });
 });
 
-describe('E2 Email Retry', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    mocks.mockSendMail.mockReset();
-    process.env.SMTP_HOST = 'smtp.gmail.com';
-    process.env.SMTP_PORT = '465';
-    process.env.SMTP_USER = 'test@gmail.com';
-    process.env.SMTP_PASS = 'pass';
-    process.env.SMTP_FROM = 'DCP <dcp@test.com>';
-  });
-
-  it('retry 3 lan khi SMTP fail', async () => {
-    mocks.mockSendMail.mockRejectedValue(new Error('SMTP temp error'));
-    const { sendEmailWithRetry } = await import('../email.service');
-    const result = await sendEmailWithRetry({ to: 'u@e.com', subject: 'T', html: '<p>T</p>' });
-    expect(result.success).toBe(false);
-    expect(result.channel).toBe('EMAIL');
-    expect(mocks.mockSendMail).toHaveBeenCalledTimes(3);
-  });
-
-  it('success ngay khi lan dau thanh cong', async () => {
-    mocks.mockSendMail.mockResolvedValue({ messageId: 'msg-1' });
-    const { sendEmailWithRetry } = await import('../email.service');
-    const result = await sendEmailWithRetry({ to: 'u@e.com', subject: 'T', html: '<p>T</p>' });
-    expect(result.success).toBe(true);
-    expect(result.providerMessageId).toBe('msg-1');
-    expect(mocks.mockSendMail).toHaveBeenCalledTimes(1);
-  });
-
-  it('khong retry khi authentication failed', async () => {
-    mocks.mockSendMail.mockRejectedValue(new Error('Authentication failed'));
-    const { sendEmailWithRetry } = await import('../email.service');
-    const result = await sendEmailWithRetry({ to: 'u@e.com', subject: 'T', html: '<p>T</p>' });
-    expect(result.success).toBe(false);
-    expect(result.retryable).toBe(false);
-    expect(mocks.mockSendMail).toHaveBeenCalledTimes(1);
-  });
-});
+/* Email Retry tests moved to e2-email-retry.test.ts (requires fake timers, isolated to avoid state leak) */
 
 describe('E2 SMS Service', () => {
   beforeEach(() => {
@@ -249,13 +242,19 @@ describe('E2 Allowlist & Threshold', () => {
 });
 
 describe('E2 Dispatcher', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
     mocks.mockSendMail.mockReset();
+    mocks.mockTwilioCreate.mockReset();
+    mocks.mockFcmSend.mockReset();
     delete process.env.LARGE_DONATION_EMAIL_THRESHOLD_VND;
+
+    // Reset singletons truoC import — tranh state leak tu test groups truoc do
+    await resetAllSingletons();
   });
 
   it('dispatch EMAIL DELIVERED khi user co email', async () => {
+    setupSmtpEnv();
     mocks.mockSendMail.mockResolvedValue({ messageId: 'm1' });
 
     const { dispatchNotification } = await import('../notificationDispatcher.service');
@@ -273,7 +272,7 @@ describe('E2 Dispatcher', () => {
     expect(result.channelResults[0].result.success).toBe(true);
   });
 
-  it('dispatch IN_APP DELIVERED (khong goi email service)', async () => {
+  it('dispatch IN_APP DELIVERED (khong goi external services)', async () => {
     const { dispatchNotification } = await import('../notificationDispatcher.service');
     const result = await dispatchNotification(
       { notificationId: 'N2', notificationType: 'DONATION_RECEIVED', title: 'T', content: 'C', channels: ['IN_APP'] },
@@ -286,10 +285,14 @@ describe('E2 Dispatcher', () => {
   });
 
   it('dispatch tra PARTIAL khi EMAIL fail nhung IN_APP success', async () => {
+    // Su dung fake timers de tranh real 60s sleep khi EMAIL fail
+    vi.useFakeTimers();
+
+    setupSmtpEnv();
     mocks.mockSendMail.mockRejectedValue(new Error('SMTP err'));
 
     const { dispatchNotification } = await import('../notificationDispatcher.service');
-    const result = await dispatchNotification(
+    const promise = dispatchNotification(
       {
         notificationId: 'N3', notificationType: 'LARGE_DONATION',
         title: 'T', content: 'C', channels: ['IN_APP', 'EMAIL'],
@@ -298,10 +301,20 @@ describe('E2 Dispatcher', () => {
       { userId: 'u1', userEmail: 'u@e.com' }
     );
 
+    // Advance through all retry attempts
+    await vi.advanceTimersByTimeAsync(120_000);
+    const result = await promise;
+
     expect(result.deliveryState).toBe('PARTIAL');
+
+    vi.useRealTimers();
   });
 
   it('PUSH fallback EMAIL khi FCM fail', async () => {
+    process.env.FCM_PROJECT_ID = 'test-project';
+    process.env.FCM_PRIVATE_KEY = '-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----\n';
+    process.env.FCM_CLIENT_EMAIL = 'test@iam.gserviceaccount.com';
+    setupSmtpEnv();
     mocks.mockFcmSend.mockRejectedValue(new Error('FCM err'));
     mocks.mockSendMail.mockResolvedValue({ messageId: 'm-fb' });
 
@@ -321,6 +334,10 @@ describe('E2 Dispatcher', () => {
   });
 
   it('SMS fallback EMAIL khi Twilio fail', async () => {
+    process.env.TWILIO_ACCOUNT_SID = 'ACxxx';
+    process.env.TWILIO_AUTH_TOKEN = 'tok';
+    process.env.TWILIO_FROM_NUMBER = '+1234567890';
+    setupSmtpEnv();
     mocks.mockTwilioCreate.mockRejectedValue(new Error('Twilio err'));
     mocks.mockSendMail.mockResolvedValue({ messageId: 'm-sms-fb' });
 
@@ -340,10 +357,14 @@ describe('E2 Dispatcher', () => {
   });
 
   it('dispatch tra FAILED khi tat ca channels fail', async () => {
+    // Su dung fake timers de tranh real 60s sleep khi EMAIL fail
+    vi.useFakeTimers();
+
+    setupSmtpEnv();
     mocks.mockSendMail.mockRejectedValue(new Error('SMTP err'));
 
     const { dispatchNotification } = await import('../notificationDispatcher.service');
-    const result = await dispatchNotification(
+    const promise = dispatchNotification(
       {
         notificationId: 'N6', notificationType: 'LARGE_DONATION',
         title: 'T', content: 'C', channels: ['EMAIL'],
@@ -352,7 +373,13 @@ describe('E2 Dispatcher', () => {
       { userId: 'u1', userEmail: 'u@e.com' }
     );
 
+    // Advance through all retry attempts
+    await vi.advanceTimersByTimeAsync(120_000);
+    const result = await promise;
+
     expect(result.deliveryState).toBe('FAILED');
+
+    vi.useRealTimers();
   });
 });
 
