@@ -4,6 +4,8 @@ import { getLogger } from '../config/logger';
 
 const logger = getLogger();
 
+let bridgeInitialized = false;
+
 /**
  * Hàm khởi tạo notification bridge.
  * Đăng ký listeners để xử lý sự kiện webhook và enqueue notification qua queue (E1).
@@ -13,8 +15,14 @@ const logger = getLogger();
  * - KHÔNG ghi thẳng DB ở đây — để worker xử lý async (throttle, channel routing, retry).
  * - Caller chỉ định channels + priority tùy nghiệp vụ.
  *   Bridge dùng default: IN_APP cho user, thêm EMAIL cho critical events.
+ *
+ * Chống double-register: nếu đã gọi rồi thì bỏ qua, tránh duplicate listeners.
  */
 export function initializeNotificationBridge(): void {
+  if (bridgeInitialized) {
+    return;
+  }
+  bridgeInitialized = true;
   webhookEvents.on('DISBURSEMENT_TRANSFERRED', async (payload: DisbursementWebhookEventPayload) => {
     try {
       await createUserNotification({

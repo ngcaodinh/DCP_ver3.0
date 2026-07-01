@@ -169,24 +169,24 @@ export async function sendSms(options: {
  * - E.164: giữ nguyên
  */
 function normalizePhoneNumber(phone: string): string | null {
-  // Loại bỏ khoảng trắng, dấu gạch ngang
-  const cleaned = phone.replace(/[\s\-]/g, '');
+  // Loại bỏ khoảng trắng, dấu gạch ngang, dấu chấm, dấu ngoặc
+  const cleaned = phone.replace(/[\s\-./()]/g, '');
 
-  // Nếu đã là E.164 format
+  // E.164: bắt đầu bằng +, theo sau là 8-15 chữ số (chuẩn ITU-T E.164)
   if (cleaned.startsWith('+')) {
-    if (cleaned.length >= 10 && cleaned.length <= 15) {
+    if (/^\+\d{8,15}$/.test(cleaned)) {
       return cleaned;
     }
     return null;
   }
 
-  // Số Việt Nam bắt đầu bằng 0
-  if (cleaned.startsWith('0') && cleaned.length === 10) {
+  // Số Việt Nam local: bắt đầu bằng 0, đúng 10 chữ số
+  if (/^0\d{9}$/.test(cleaned)) {
     return '+84' + cleaned.substring(1);
   }
 
-  // Số quốc tế không có +
-  if (cleaned.length >= 10 && cleaned.length <= 12) {
+  // Số quốc tế không có +: 8-15 chữ số (E.164 strict)
+  if (/^\d{8,15}$/.test(cleaned)) {
     return '+' + cleaned;
   }
 

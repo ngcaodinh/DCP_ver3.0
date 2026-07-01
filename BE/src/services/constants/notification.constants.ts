@@ -51,6 +51,68 @@ export const SMS_TIMEOUT_MS = 15_000;
 
 /**
  * Base URL cho unsubscribe link trong email.
- * Sẽ được override bởi FRONTEND_URL env var nếu có.
+ * Resolve theo thứ tự: FRONTEND_URL env var → fallback (chỉ dùng cho dev).
+ *
+ * Lưu ý: production BẮT BUỘC phải set FRONTEND_URL.
+ * Nếu thiếu, getResolvedUnsubscribeBaseUrl() sẽ throw để gửi email bị block —
+ * ưu tiên fail-fast hơn là gửi link sai (localhost) cho user thật.
  */
 export const DEFAULT_UNSUBSCRIBE_BASE_URL = 'http://localhost:3000/settings/notifications';
+
+/**
+ * Map notification type → email template file name (không extension).
+ * Single source of truth — thêm/sửa template chỉ cần update map này.
+ */
+export const NOTIFICATION_EMAIL_TEMPLATE_MAP: Record<string, string> = {
+  LARGE_DONATION: 'large-donation',
+  DISBURSEMENT_COMPLETED: 'disbursement-completed',
+  MANUAL_REVIEW_ESCALATION: 'manual-review-escalation',
+  OVERRIDE_APPROVED: 'override-approved',
+  SBT_MINT_FAILED: 'sbt-mint-failed'
+};
+
+/**
+ * Resolve unsubscribe base URL với guard production.
+ * @returns Resolved URL
+ * @throws Error khi thiếu FRONTEND_URL và NODE_ENV=production
+ */
+export function getResolvedUnsubscribeBaseUrl(): string {
+  const fromEnv = process.env.FRONTEND_URL;
+  if (fromEnv && fromEnv.length > 0) {
+    return `${fromEnv.replace(/\/$/, '')}/settings/notifications`;
+  }
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      '[notification] FRONTEND_URL env var là bắt buộc trong production — ' +
+      'không fallback về localhost vì sẽ gửi link sai cho user.'
+    );
+  }
+  return DEFAULT_UNSUBSCRIBE_BASE_URL;
+}
+
+/**
+ * Các notification type hiển thị trong dropdown thông báo.
+ * Single source of truth — tránh duplicate array rải rác nhiều nơi.
+ */
+export const VISIBLE_NOTIFICATION_TYPES = [
+  'DONATION_RECEIVED',
+  'DISBURSEMENT_SIGNED',
+  'LARGE_DONATION',
+  'DISBURSEMENT_COMPLETED',
+  'OVERRIDE_APPROVED',
+  'SBT_MINT_FAILED'
+] as const;
+
+/**
+ * Custom error class cho validation errors trong notification service.
+ * Dùng typed error codes thay vì string matching trong controller.
+ */
+export class NotificationValidationError extends Error {
+  public readonly code: 'INVALID_TYPE' | 'INVALID_CHANNEL';
+
+  constructor(code: 'INVALID_TYPE' | 'INVALID_CHANNEL', detail: string) {
+    super(detail);
+    this.name = 'NotificationValidationError';
+    this.code = code;
+  }
+}

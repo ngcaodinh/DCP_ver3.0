@@ -53,3 +53,4 @@ export const UserNotificationPreferenceModel =
   mongoose.model<UserNotificationPreference>('UserNotificationPreference', userNotificationPreferenceSchema);
 
 export type { NotificationChannel, NotificationType };
+export type { NotificationPreferencesMap };
