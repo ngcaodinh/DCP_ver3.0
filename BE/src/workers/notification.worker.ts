@@ -89,6 +89,7 @@ async function dispatchChannel(
           fcmDeviceToken: userContext.fcmDeviceToken,
           phoneNumber: userContext.phoneNumber,
           unsubscribeToken: userContext.unsubscribeToken,
+          // Dùng metadata.donationAmountVnd làm nguồn duy nhất — threshold check dùng cùng metadata.
           donationAmountVnd: (job.metadata?.donationAmountVnd as number | undefined)
         }
       );

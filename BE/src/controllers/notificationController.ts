@@ -1,6 +1,10 @@
 import { Response } from 'express';
 import { AuthenticatedRequest } from '../middleware/authenticationMiddleware';
-import { getUserNotifications, markAllUserNotificationsAsRead } from '../services/notificationService';
+import {
+  getUserNotifications,
+  markAllUserNotificationsAsRead,
+  processUnsubscribe
+} from '../services/notificationService';
 import { sendErrorFromUnknown, sendErrorResponse, sendSuccessResponse } from '../utils/apiResponse';
 import { getLogger } from '../config/logger';
 
@@ -44,6 +48,36 @@ export async function markAllNotificationsAsReadController(request: Authenticate
     sendSuccessResponse(response, 200, 'Đã đánh dấu toàn bộ thông báo là đã đọc.', notificationResult);
   } catch (error: unknown) {
     sendErrorFromUnknown(response, error, 'Không thể đánh dấu thông báo đã đọc.');
+  }
+}
+
+/** Controller xử lý hủy đăng ký notification qua token từ email.
+ * Endpoint không yêu cầu auth — token đã đủ identity.
+ * Token có độ entropy 256-bit, không thể brute-force.
+ */
+export async function unsubscribeController(request: { query: { token?: string } }, response: Response): Promise<void> {
+  const { token } = request.query;
+
+  if (!token || typeof token !== 'string' || token.length !== 64) {
+    sendErrorResponse(response, 400, 'Token không hợp lệ.', 'INVALID_TOKEN');
+    return;
+  }
+
+  // Chỉ chấp nhận hex 64 ký tự (256-bit từ crypto.randomBytes(32))
+  if (!/^[a-f0-9]{64}$/i.test(token)) {
+    sendErrorResponse(response, 400, 'Token không hợp lệ.', 'INVALID_TOKEN');
+    return;
+  }
+
+  try {
+    const success = await processUnsubscribe(token);
+    if (success) {
+      sendSuccessResponse(response, 200, 'Đã hủy đăng ký thành công.', { unsubscribed: true });
+    } else {
+      sendErrorResponse(response, 404, 'Token không tìm thấy hoặc đã hết hạn.', 'TOKEN_NOT_FOUND');
+    }
+  } catch (error: unknown) {
+    sendErrorFromUnknown(response, error, 'Không thể xử lý hủy đăng ký.');
   }
 }
 

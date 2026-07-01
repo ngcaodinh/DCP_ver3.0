@@ -5,17 +5,43 @@
 import nodemailer from 'nodemailer';
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import Handlebars from 'handlebars';
 import { getLogger } from '../config/logger';
 import {
   EMAIL_MAX_RETRY_ATTEMPTS,
   EMAIL_RETRY_INTERVAL_MS,
   EMAIL_TIMEOUT_MS,
-  DEFAULT_UNSUBSCRIBE_BASE_URL
+  NOTIFICATION_EMAIL_TEMPLATE_MAP,
+  getResolvedUnsubscribeBaseUrl
 } from './constants/notification.constants';
 import type { DeliveryResult, DispatchContext } from './types/delivery.types';
 
 const logger = getLogger();
+
+/**
+ * ESM-compatible __dirname — hoạt động đúng trong bundled app, Docker, và TypeScript compiled output.
+ * `__dirname` không tồn tại trong ESM; dùng `import.meta.url` thay thế.
+ */
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+/**
+ * Chuyển đổi HTML special characters thành entities.
+ * Dùng làm sanitize trước khi render vào email template — phòng trường hợp
+ * template dùng triple-brace `{{{content}}}` (không escape) hoặc nội dung
+ * từ nguồn không đáng tin cậy (blockchain event, external API).
+ */
+function escapeHtmlEntities(value: unknown): string {
+  if (value == null) return '';
+  const str = String(value);
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
 
 // Cache compiled templates để không phải compile lại mỗi lần gửi.
 const templateCache = new Map<string, HandlebarsTemplateDelegate<Record<string, unknown>>>();
@@ -158,7 +184,13 @@ function loadTemplate(templateName: string): HandlebarsTemplateDelegate<Record<s
  */
 function renderTemplate(templateName: string, context: Record<string, unknown>): string {
   const template = loadTemplate(templateName);
-  return template(context) as string;
+  // Escape HTML entities cho tất cả giá trị string trong context.
+  // Đảm bảo content/title không inject được HTML vào email ngay cả khi template dùng triple-brace.
+  const sanitizedContext: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(context)) {
+    sanitizedContext[key] = typeof value === 'string' ? escapeHtmlEntities(value) : value;
+  }
+  return template(sanitizedContext) as string;
 }
 
 /**
@@ -292,10 +324,11 @@ export async function sendEmail(options: {
   unsubscribeToken?: string;
 }): Promise<DeliveryResult> {
   try {
-    // Thêm unsubscribe link vào context
-    const unsubscribeBaseUrl = process.env.FRONTEND_URL || DEFAULT_UNSUBSCRIBE_BASE_URL;
+    // Resolve unsubscribe base URL: production BẮT BUỘC có FRONTEND_URL env var
+    // (helper này throw nếu thiếu trong production — không fallback về localhost).
+    const unsubscribeBaseUrl = getResolvedUnsubscribeBaseUrl();
     const unsubscribeUrl = options.unsubscribeToken
-      ? `${unsubscribeBaseUrl}/unsubscribe?token=${options.unsubscribeToken}`
+      ? `${unsubscribeBaseUrl}?token=${options.unsubscribeToken}`
       : `${unsubscribeBaseUrl}`;
 
     const html = renderTemplate(options.templateName, {
@@ -353,16 +386,8 @@ export async function sendNotificationEmail(
     };
   }
 
-  // Map notification type → template name
-  const templateMap: Record<string, string> = {
-    LARGE_DONATION: 'large-donation',
-    DISBURSEMENT_COMPLETED: 'disbursement-completed',
-    MANUAL_REVIEW_ESCALATION: 'manual-review-escalation',
-    OVERRIDE_APPROVED: 'override-approved',
-    SBT_MINT_FAILED: 'sbt-mint-failed'
-  };
-
-  const templateName = templateMap[notificationData.notificationType];
+  // Map notification type → template name (shared map từ constants)
+  const templateName = NOTIFICATION_EMAIL_TEMPLATE_MAP[notificationData.notificationType];
   if (!templateName) {
     return {
       success: false,

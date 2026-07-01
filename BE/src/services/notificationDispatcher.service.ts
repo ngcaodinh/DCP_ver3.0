@@ -5,7 +5,8 @@
 import { getLogger } from '../config/logger';
 import {
   EMAIL_ALLOWLIST_EVENT_TYPES,
-  DEFAULT_LARGE_DONATION_THRESHOLD_VND
+  DEFAULT_LARGE_DONATION_THRESHOLD_VND,
+  NOTIFICATION_EMAIL_TEMPLATE_MAP
 } from './constants/notification.constants';
 import type { DeliveryResult, DispatchContext } from './types/delivery.types';
 import { sendEmail, isEmailServiceReady } from './email.service';
@@ -14,6 +15,9 @@ import { sendNotificationSms, isSmsServiceReady } from './sms.service';
 import type { NotificationChannel, NotificationType } from '../models/notificationModel';
 
 const logger = getLogger();
+
+// Re-export shared map for callers that import this module.
+export { NOTIFICATION_EMAIL_TEMPLATE_MAP };
 
 /**
  * Kết quả dispatch của 1 notification.
@@ -69,18 +73,10 @@ export function getAllowedChannels(
   return requestedChannels;
 }
 
-/**
- * Map notification type sang email template name.
- */
+// Map notification type → email template name.
+// Chia sẻ qua NOTIFICATION_EMAIL_TEMPLATE_MAP từ constants; xem notification.constants.ts.
 function mapNotificationTypeToTemplate(notificationType: NotificationType): string {
-  const templateMap: Record<string, string> = {
-    LARGE_DONATION: 'large-donation',
-    DISBURSEMENT_COMPLETED: 'disbursement-completed',
-    MANUAL_REVIEW_ESCALATION: 'manual-review-escalation',
-    OVERRIDE_APPROVED: 'override-approved',
-    SBT_MINT_FAILED: 'sbt-mint-failed'
-  };
-  return templateMap[notificationType] ?? 'generic-notification';
+  return NOTIFICATION_EMAIL_TEMPLATE_MAP[notificationType] ?? 'generic-notification';
 }
 
 /**
@@ -247,7 +243,15 @@ async function dispatchSmsChannel(
         to: dispatchContext.userEmail,
         templateName: mapNotificationTypeToTemplate(notificationType),
         subject: title,
-        templateContext: { title, content, notificationId, notificationType, smsFailed: true },
+        templateContext: {
+          title,
+          content,
+          notificationId,
+          notificationType,
+          metadata: metadata ?? {},
+          smsFailed: true,
+          donationAmountVnd: dispatchContext.donationAmountVnd
+        },
         unsubscribeToken: dispatchContext.unsubscribeToken
       });
 
@@ -298,7 +302,9 @@ export async function dispatchNotification(
 
   const channelResults: Array<{ channel: NotificationChannel; result: DeliveryResult }> = [];
 
-  for (const channel of channels) {
+  // Dispatch parallel qua Promise.all — mỗi channel là I/O-bound độc lập.
+  // IN_APP là pure sync, vẫn wrap trong Promise để code đồng nhất.
+  const dispatchPromises = channels.map(async (channel) => {
     let result: DeliveryResult;
 
     switch (channel) {
@@ -319,8 +325,6 @@ export async function dispatchNotification(
         result = { success: false, channel, errorMessage: `Unknown channel: ${channel}`, retryable: false };
     }
 
-    channelResults.push({ channel, result });
-
     if (result.success) {
       logger.info(`Channel ${channel} dispatch thành công.`, {
         notificationId,
@@ -335,6 +339,23 @@ export async function dispatchNotification(
         channel,
         errorMessage: result.errorMessage,
         retryable: result.retryable
+      });
+    }
+
+    return { channel, result };
+  });
+
+  // Promise.allSettled để 1 channel fail không block logging/aggregation của channels khác
+  const settled = await Promise.allSettled(dispatchPromises);
+  for (const s of settled) {
+    if (s.status === 'fulfilled') {
+      channelResults.push(s.value);
+    } else {
+      // Tạo result cho channel bị throw (không nên xảy ra — dispatch* đều trả DeliveryResult)
+      logger.error('Channel dispatch threw unhandled exception.', {
+        notificationId,
+        userId: dispatchContext.userId,
+        errorMessage: (s.reason as Error)?.message ?? String(s.reason)
       });
     }
   }

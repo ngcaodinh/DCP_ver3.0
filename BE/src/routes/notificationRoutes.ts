@@ -2,7 +2,8 @@ import { Router } from 'express';
 import {
   getNotificationsController,
   markAllNotificationsAsReadController,
-  streamNotificationsController
+  streamNotificationsController,
+  unsubscribeController
 } from '../controllers/notificationController';
 import { createAuthenticationMiddleware } from '../middleware/authenticationMiddleware';
 
@@ -11,6 +12,7 @@ export function createNotificationRoutes(): Router {
   const router = Router();
   const authenticationMiddleware = createAuthenticationMiddleware();
 
+  router.get('/unsubscribe', unsubscribeController);
   router.get('/', authenticationMiddleware, getNotificationsController);
   router.patch('/read-all', authenticationMiddleware, markAllNotificationsAsReadController);
   router.get('/stream', authenticationMiddleware, streamNotificationsController);
