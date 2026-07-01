@@ -1,0 +1,57 @@
+{{!--
+  Template: Large Donation Notification
+  Dùng cho LARGE_DONATION event type khi donation >= threshold.
+--}}
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{title}}</title>
+  <style>
+    body { margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f4f4; }
+    .email-container { max-width: 600px; margin: 0 auto; background-color: #ffffff; }
+    .email-header { background-color: #2563eb; color: #ffffff; padding: 24px; text-align: center; }
+    .email-header h1 { margin: 0; font-size: 24px; font-weight: 600; }
+    .email-body { padding: 32px 24px; }
+    .email-body h2 { color: #1e40af; font-size: 20px; margin-top: 0; }
+    .email-body p { color: #374151; font-size: 16px; line-height: 1.6; margin: 16px 0; }
+    .amount-box { background-color: #eff6ff; border-left: 4px solid #2563eb; padding: 16px 20px; margin: 24px 0; border-radius: 4px; }
+    .amount-box .label { color: #6b7280; font-size: 14px; }
+    .amount-box .amount { color: #2563eb; font-size: 28px; font-weight: 700; }
+    .email-footer { background-color: #f9fafb; padding: 20px 24px; text-align: center; border-top: 1px solid #e5e7eb; }
+    .email-footer p { color: #6b7280; font-size: 12px; margin: 8px 0; }
+    .unsubscribe-link { color: #6b7280; font-size: 12px; }
+    .unsubscribe-link a { color: #2563eb; text-decoration: underline; }
+    @media only screen and (max-width: 480px) {
+      .email-body { padding: 20px 16px; }
+      .email-header { padding: 16px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="email-container">
+    <div class="email-header">
+      <h1>Quyên góp lớn!</h1>
+    </div>
+    <div class="email-body">
+      <h2>{{title}}</h2>
+      <p>{{content}}</p>
+      {{#if donationAmountVnd}}
+      <div class="amount-box">
+        <div class="label">Số tiền quyên góp</div>
+        <div class="amount">{{donationAmountVnd}} VND</div>
+      </div>
+      {{/if}}
+      <p>Cảm ơn bạn đã đồng hành cùng Dự án Từ Thiện Minh Bạch trong hành trình gây quỹ từ thiện.</p>
+    </div>
+    <div class="email-footer">
+      <p>Email này được gửi tự động từ hệ thống Dự án Từ Thiện Minh Bạch.</p>
+      <p>&copy; {{year}} Dự án Từ Thiện Minh Bạch. Mọi quyền được bảo lưu.</p>
+      <p class="unsubscribe-link">
+        Không muốn nhận email? <a href="{{unsubscribeUrl}}">Hủy đăng ký</a>
+      </p>
+    </div>
+  </div>
+</body>
+</html>

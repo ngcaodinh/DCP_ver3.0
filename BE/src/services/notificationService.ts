@@ -392,6 +392,18 @@ export async function generateUnsubscribeToken(userId: string): Promise<string> 
 }
 
 /**
+ * Lay unsubscribe token cua user tu UserNotificationPreference.
+ * Dung boi E2 dispatcher de tao email unsubscribe link.
+ *
+ * @param userId ID cua nguoi dung
+ * @returns Unsubscribe token hoac null neu user chua co preference record
+ */
+export async function getUnsubscribeTokenForUser(userId: string): Promise<string | null> {
+  const pref = await UserNotificationPreferenceModel.findOne({ userId }).lean().exec();
+  return pref?.unsubscribeToken ?? null;
+}
+
+/**
  * Xử lý hủy đăng ký notification qua token từ email.
  * @param token Token từ link unsubscribe trong email
  * @returns True nếu hủy thành công, false nếu token không hợp lệ
