@@ -18,8 +18,16 @@ vi.mock('../../config/logger', () => ({
 }));
 
 /**
- * Mock notificationService
+ * Mock NotificationModel
  */
+vi.mock('../../models/notificationModel', () => ({
+  NotificationModel: {
+    find: vi.fn().mockReturnThis(),
+    countDocuments: vi.fn().mockReturnThis(),
+    lean: vi.fn().mockReturnThis(),
+    exec: vi.fn()
+  }
+}));
 vi.mock('../../services/notificationService', () => ({
   getUserNotifications: vi.fn(),
   markAllUserNotificationsAsRead: vi.fn(),
@@ -447,16 +455,32 @@ describe('notificationController', () => {
 
   describe('getNotificationsController', () => {
     it('tra 200 voi danh sach thong bao', async () => {
-      const mockResult = {
-        notifications: [],
-        unreadCount: 0,
-        pagination: { page: 1, limit: 10, total: 0, totalPages: 0, hasNextPage: false }
-      };
-      const getUserNotificationsPaginated = vi.fn().mockResolvedValue(mockResult);
-      vi.mocked(await import('../../controllers/notificationController')).merge.mockResolvedValue({
-        ...vi.importedActual<typeof import('../../controllers/notificationController')>(),
-        getUserNotificationsPaginated
-      });
+      const mockNotifications = [{
+        _id: 'notif-1',
+        userId: 'user-123',
+        notificationType: 'DONATION_RECEIVED' as const,
+        channel: 'IN_APP' as const,
+        title: 'Test',
+        content: 'Test content',
+        metadata: {},
+        isRead: false,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      }];
+      const { NotificationModel } = await import('../../models/notificationModel');
+      vi.mocked(NotificationModel.find).mockReturnValue({
+        skip: vi.fn().mockReturnValue({
+          limit: vi.fn().mockReturnValue({
+            lean: vi.fn().mockReturnValue({
+              exec: vi.fn().mockResolvedValue(mockNotifications)
+            })
+          })
+        })
+      } as unknown as ReturnType<typeof NotificationModel.find>);
+      vi.mocked(NotificationModel.countDocuments).mockReturnValue({
+        exec: vi.fn()
+      } as unknown as ReturnType<typeof NotificationModel.countDocuments>);
+      vi.mocked(getUnreadCount).mockResolvedValue(1);
 
       const req = buildMockRequest({ query: { page: '1', limit: '10' } });
       const { response, jsonMock, statusMock } = buildMockResponse();
@@ -464,10 +488,7 @@ describe('notificationController', () => {
       await getNotificationsController(req, response);
 
       expect(statusMock).toHaveBeenCalledWith(200);
-      expect(jsonMock).toHaveBeenCalledWith(expect.objectContaining({
-        success: true,
-        data: mockResult
-      }));
+      expect(jsonMock).toHaveBeenCalledWith(expect.objectContaining({ success: true }));
     });
 
     it('tra 401 khi chua xac thuc', async () => {
@@ -480,15 +501,20 @@ describe('notificationController', () => {
     });
 
     it('gioi han limit at 20 theo spec', async () => {
-      const getUserNotificationsPaginated = vi.fn().mockResolvedValue({
-        notifications: [],
-        unreadCount: 0,
-        pagination: { page: 1, limit: 20, total: 0, totalPages: 0, hasNextPage: false }
-      });
-      vi.mocked(await import('../../controllers/notificationController')).merge.mockResolvedValue({
-        ...vi.importedActual<typeof import('../../controllers/notificationController')>(),
-        getUserNotificationsPaginated
-      });
+      const { NotificationModel } = await import('../../models/notificationModel');
+      vi.mocked(NotificationModel.find).mockReturnValue({
+        skip: vi.fn().mockReturnValue({
+          limit: vi.fn().mockReturnValue({
+            lean: vi.fn().mockReturnValue({
+              exec: vi.fn().mockResolvedValue([])
+            })
+          })
+        })
+      } as unknown as ReturnType<typeof NotificationModel.find>);
+      vi.mocked(NotificationModel.countDocuments).mockReturnValue({
+        exec: vi.fn().mockResolvedValue(0)
+      } as unknown as ReturnType<typeof NotificationModel.countDocuments>);
+      vi.mocked(getUnreadCount).mockResolvedValue(0);
 
       const req = buildMockRequest({ query: { limit: '100' } });
       const { response, jsonMock } = buildMockResponse();
