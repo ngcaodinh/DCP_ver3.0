@@ -11,7 +11,10 @@ export const beneficiaryFeedbackRowSchema = z.object({
     .int('rating phải là số nguyên.')
     .min(1, 'Rating must be 1-5')
     .max(5, 'Rating must be 1-5'),
-  comment: z.string({ required_error: 'comment là bắt buộc.' }).trim().min(1, 'comment không được để trống.'),
+  comment: z.string({ required_error: 'comment là bắt buộc.' })
+    .trim()
+    .min(1, 'comment không được để trống.')
+    .max(5000, 'Comment vượt quá giới hạn 5000 ký tự.'),
   submittedAt: z.string({ required_error: 'submittedAt là bắt buộc.' })
     .datetime('submittedAt phải theo định dạng ISO datetime.'),
   location: z.string().trim().optional()

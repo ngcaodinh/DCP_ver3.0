@@ -412,7 +412,7 @@ proj2,Nguyen B,99,Invalid,2024-01-15T11:00:00Z`;
       expect(result.success).toBe(1);
     });
 
-    it('nên xử lý JSON batch và gọi insertMany', async () => {
+    it('nên xử lý JSON batch và gọi insertMany với đúng payload structure', async () => {
       (BeneficiaryFeedbackModel.insertMany as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
 
       const payload = [
@@ -429,6 +429,23 @@ proj2,Nguyen B,99,Invalid,2024-01-15T11:00:00Z`;
 
       expect(result.success).toBe(1);
       expect(BeneficiaryFeedbackModel.insertMany).toHaveBeenCalled();
+      // NIT #6: Strengthen assertion - verify insertMany payload structure
+      expect(BeneficiaryFeedbackModel.insertMany).toHaveBeenCalledWith(
+        [
+          expect.objectContaining({
+            feedbackId: expect.stringMatching(/^FB-/),
+            projectId: 'proj1',
+            beneficiaryNameHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+            rating: 4,
+            comment: 'Good',
+            submittedAt: expect.any(Date),
+            uploadedByOrganizationId: 'org123',
+            riskScore: expect.any(Number),
+            isFlagged: expect.any(Boolean)
+          })
+        ],
+        { ordered: false }
+      );
     });
   });
 

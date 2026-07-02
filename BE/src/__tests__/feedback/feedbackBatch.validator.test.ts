@@ -124,6 +124,48 @@ describe('feedbackBatchValidator', () => {
       expect(result.isValid).toBe(false);
     });
 
+    it('nên pass với comment đúng 5000 ký tự', () => {
+      const validRow = {
+        projectId: 'proj123',
+        beneficiaryName: 'Nguyen Van A',
+        rating: 5,
+        comment: 'A'.repeat(5000),
+        submittedAt: '2024-01-15T10:00:00Z'
+      };
+
+      const result = validateFeedbackRow(validRow, 1);
+      expect(result.isValid).toBe(true);
+    });
+
+    it('nên reject row với comment vượt quá 5000 ký tự', () => {
+      const invalidRow = {
+        projectId: 'proj123',
+        beneficiaryName: 'Nguyen Van A',
+        rating: 5,
+        comment: 'A'.repeat(5001),
+        submittedAt: '2024-01-15T10:00:00Z'
+      };
+
+      const result = validateFeedbackRow(invalidRow, 1);
+      expect(result.isValid).toBe(false);
+      expect(result.errors?.some(e => e.message.includes('5000'))).toBe(true);
+    });
+
+    it('nên reject row với rating là string và verify error message chứa từ khóa rating', () => {
+      const invalidRow = {
+        projectId: 'proj123',
+        beneficiaryName: 'Nguyen Van A',
+        rating: 'abc',
+        comment: 'Good',
+        submittedAt: '2024-01-15T10:00:00Z'
+      };
+
+      const result = validateFeedbackRow(invalidRow, 1);
+      expect(result.isValid).toBe(false);
+      expect(result.errors?.some(e => e.field === 'rating')).toBe(true);
+      expect(result.errors?.some(e => e.message.toLowerCase().includes('rating'))).toBe(true);
+    });
+
     it('nên reject row với projectId chỉ có whitespace', () => {
       const invalidRow = {
         projectId: '   ',
