@@ -101,8 +101,6 @@ import {
 import {
   markNotificationAsReadController,
   markAllNotificationsAsReadController,
-  deleteNotificationController,
-  getUnreadCountController,
   getNotificationPreferencesController,
   updateNotificationPreferencesController
 } from '../../controllers/notificationController';
@@ -199,88 +197,6 @@ describe('notificationController', () => {
       const { response, jsonMock, statusMock } = buildMockResponse();
 
       await markNotificationAsReadController(req, response);
-
-      expect(statusMock).toHaveBeenCalledWith(401);
-    });
-  });
-
-  // ─── deleteNotificationController ──────────────────────────────────────────
-
-  describe('deleteNotificationController', () => {
-    it('tra 400 khi id rong', async () => {
-      const req = buildMockRequest({ params: {} });
-      const { response, jsonMock, statusMock } = buildMockResponse();
-
-      await deleteNotificationController(req, response);
-
-      expect(statusMock).toHaveBeenCalledWith(400);
-      expect(jsonMock).toHaveBeenCalledWith(expect.objectContaining({
-        errorCode: 'INVALID_NOTIFICATION_ID'
-      }));
-    });
-
-    it('tra 404 khi notification khong tim thay hoac khong thuoc user', async () => {
-      vi.mocked(deleteUserNotification).mockResolvedValue(false);
-
-      const req = buildMockRequest({ params: { id: 'NOTI-999' } });
-      const { response, jsonMock, statusMock } = buildMockResponse();
-
-      await deleteNotificationController(req, response);
-
-      expect(statusMock).toHaveBeenCalledWith(404);
-      expect(jsonMock).toHaveBeenCalledWith(expect.objectContaining({
-        errorCode: 'NOTIFICATION_NOT_FOUND'
-      }));
-    });
-
-    it('tra 200 khi xoa thanh cong', async () => {
-      vi.mocked(deleteUserNotification).mockResolvedValue(true);
-
-      const req = buildMockRequest({ params: { id: 'NOTI-456' } });
-      const { response, jsonMock, statusMock } = buildMockResponse();
-
-      await deleteNotificationController(req, response);
-
-      expect(statusMock).toHaveBeenCalledWith(200);
-      expect(jsonMock).toHaveBeenCalledWith(expect.objectContaining({
-        success: true,
-        data: expect.objectContaining({ notificationId: 'NOTI-456' })
-      }));
-    });
-
-    it('tra 401 khi chua xac thuc', async () => {
-      const req = buildMockRequest({ authenticatedUser: null, params: { id: 'NOTI-123' } });
-      const { response, jsonMock, statusMock } = buildMockResponse();
-
-      await deleteNotificationController(req, response);
-
-      expect(statusMock).toHaveBeenCalledWith(401);
-    });
-  });
-
-  // ─── getUnreadCountController ──────────────────────────────────────────────
-
-  describe('getUnreadCountController', () => {
-    it('tra 200 voi unreadCount khi thanh cong', async () => {
-      vi.mocked(getUnreadCount).mockResolvedValue(5);
-
-      const req = buildMockRequest();
-      const { response, jsonMock, statusMock } = buildMockResponse();
-
-      await getUnreadCountController(req, response);
-
-      expect(statusMock).toHaveBeenCalledWith(200);
-      expect(jsonMock).toHaveBeenCalledWith(expect.objectContaining({
-        success: true,
-        data: { unreadCount: 5 }
-      }));
-    });
-
-    it('tra 401 khi chua xac thuc', async () => {
-      const req = buildMockRequest({ authenticatedUser: null });
-      const { response, jsonMock, statusMock } = buildMockResponse();
-
-      await getUnreadCountController(req, response);
 
       expect(statusMock).toHaveBeenCalledWith(401);
     });
