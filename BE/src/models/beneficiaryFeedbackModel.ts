@@ -103,6 +103,16 @@ beneficiaryFeedbackSchema.index({ projectId: 1, submittedAt: -1 });
 // Index cho việc tìm kiếm feedback đã flagged
 beneficiaryFeedbackSchema.index({ isFlagged: 1, riskScore: -1 });
 
+/**
+ * Compound unique index cho idempotency check.
+ * Đảm bảo không có 2 batch trùng lặp (cùng org + cùng content hash) được insert.
+ * unique: true với sparse: false sẽ reject duplicate inserts ngay tại DB layer.
+ */
+beneficiaryFeedbackSchema.index(
+  { uploadedByOrganizationId: 1, batchContentHash: 1 },
+  { unique: true, background: true }
+);
+
 export const BeneficiaryFeedbackModel =
   mongoose.models.BeneficiaryFeedback ||
   mongoose.model<BeneficiaryFeedback>('BeneficiaryFeedback', beneficiaryFeedbackSchema);

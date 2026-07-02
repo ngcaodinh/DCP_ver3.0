@@ -9,12 +9,17 @@ import { batchUploadFeedbackController } from '../controllers/feedbackBatchContr
 import { createAuthenticationMiddleware } from '../middleware/authenticationMiddleware';
 import { createRoleAuthorizationMiddleware } from '../middleware/roleAuthorizationMiddleware';
 import { createRateLimitMiddleware } from '../middleware/rateLimitMiddleware';
-import { FEEDBACK_BATCH_RATE_LIMIT_CONFIG } from '../controllers/feedbackBatchController';
+import { FEEDBACK_BATCH_RATE_LIMIT_CONFIG, MAX_BATCH_SIZE, MAX_UPLOAD_SIZE_BYTES } from '../controllers/feedbackBatchController';
+
+/**
+ * Giới hạn file size cho upload (tái sử dụng từ service).
+ */
+const MULTER_FILE_SIZE_LIMIT = MAX_UPLOAD_SIZE_BYTES;
 
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 5 * 1024 * 1024 // 5MB limit
+    fileSize: MULTER_FILE_SIZE_LIMIT
   }
 });
 

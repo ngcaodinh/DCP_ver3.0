@@ -23,6 +23,11 @@ vi.mock('../../services/feedbackBatch.service', () => ({
 import { batchUploadFeedbackController } from '../../controllers/feedbackBatchController';
 import { processCsvBatchFeedback, processJsonBatchFeedback } from '../../services/feedbackBatch.service';
 import { AuthenticatedRequest } from '../../middleware/authenticationMiddleware';
+import {
+  BatchSizeExceededError,
+  FileTooLargeError,
+  InvalidCsvError
+} from '../../utils/feedbackBatchError';
 
 describe('feedbackBatchController', () => {
   let mockRequest: Partial<AuthenticatedRequest>;
@@ -208,7 +213,7 @@ describe('feedbackBatchController', () => {
       }));
     });
 
-    it('nên accept text/plain MIME type cho CSV', async () => {
+    it('nên accept application/csv MIME type cho CSV', async () => {
       const mockResult = {
         success: 1,
         failed: 0,
@@ -218,6 +223,25 @@ describe('feedbackBatchController', () => {
 
       (processCsvBatchFeedback as ReturnType<typeof vi.fn>).mockResolvedValueOnce(mockResult);
 
+      mockRequest.headers = { 'content-type': 'multipart/form-data' };
+      mockRequest.file = {
+        fieldname: 'file',
+        originalname: 'feedback.csv',
+        encoding: '7bit',
+        mimetype: 'application/csv',
+        buffer: Buffer.from('test'),
+        size: 100
+      } as any;
+
+      await batchUploadFeedbackController(
+        mockRequest as AuthenticatedRequest,
+        mockResponse as Response
+      );
+
+      expect(processCsvBatchFeedback).toHaveBeenCalled();
+    });
+
+    it('nên return 400 khi text/plain MIME type (không còn được chấp nhận)', async () => {
       mockRequest.headers = { 'content-type': 'multipart/form-data' };
       mockRequest.file = {
         fieldname: 'file',
@@ -233,7 +257,8 @@ describe('feedbackBatchController', () => {
         mockResponse as Response
       );
 
-      expect(processCsvBatchFeedback).toHaveBeenCalled();
+      // text/plain đã bị loại bỏ vì quá rộng
+      expect(mockStatus).toHaveBeenCalledWith(400);
     });
   });
 
@@ -370,7 +395,7 @@ describe('feedbackBatchController', () => {
 
     it('nên return 400 khi Batch size exceeds limit', async () => {
       (processJsonBatchFeedback as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-        new Error('Batch size exceeds 1000 limit')
+        new BatchSizeExceededError()
       );
 
       mockRequest.headers = { 'content-type': 'application/json' };
@@ -392,13 +417,13 @@ describe('feedbackBatchController', () => {
       expect(mockStatus).toHaveBeenCalledWith(400);
       expect(mockJson).toHaveBeenCalledWith(expect.objectContaining({
         success: false,
-        message: expect.stringContaining('1000')
+        errorCode: 'BATCH_SIZE_EXCEEDED'
       }));
     });
 
     it('nên return 400 khi File size exceeds', async () => {
       (processCsvBatchFeedback as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-        new Error('File size exceeds 5MB limit')
+        new FileTooLargeError()
       );
 
       mockRequest.headers = { 'content-type': 'multipart/form-data' };
@@ -419,13 +444,13 @@ describe('feedbackBatchController', () => {
       expect(mockStatus).toHaveBeenCalledWith(400);
       expect(mockJson).toHaveBeenCalledWith(expect.objectContaining({
         success: false,
-        message: expect.stringContaining('size exceeds')
+        errorCode: 'FILE_TOO_LARGE'
       }));
     });
 
     it('nên return 400 khi Invalid CSV format', async () => {
       (processCsvBatchFeedback as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-        new Error('Invalid CSV format')
+        new InvalidCsvError()
       );
 
       mockRequest.headers = { 'content-type': 'multipart/form-data' };
@@ -446,7 +471,7 @@ describe('feedbackBatchController', () => {
       expect(mockStatus).toHaveBeenCalledWith(400);
       expect(mockJson).toHaveBeenCalledWith(expect.objectContaining({
         success: false,
-        message: expect.stringContaining('Invalid CSV')
+        errorCode: 'INVALID_CSV_FORMAT'
       }));
     });
 

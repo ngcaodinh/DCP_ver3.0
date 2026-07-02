@@ -9,16 +9,74 @@ import { getLogger } from '../config/logger';
 import { BeneficiaryFeedbackModel } from '../models/beneficiaryFeedbackModel';
 import {
   validateBatchFeedback,
-  type BeneficiaryFeedbackRow,
-  type FeedbackValidationResult
+  type BeneficiaryFeedbackRow
 } from '../validators/feedbackBatchValidator';
 import {
   computeRiskScore,
   shouldFlagFeedback,
   RISK_SCORE_AUTO_FLAG_THRESHOLD
 } from './feedbackSpamDetection.service';
+import {
+  BatchSizeExceededError,
+  FileTooLargeError,
+  InvalidCsvError,
+  PayloadMustBeArrayError
+} from '../utils/feedbackBatchError';
 
 const logger = getLogger();
+
+/**
+ * Các ký tự đầu dòng nguy hiểm trong CSV có thể kích hoạt formula injection.
+ * Bao gồm: =, +, -, @, \t, \r, \n
+ */
+const FORMULA_PREFIX_CHARS = ['=', '+', '-', '@', '\t', '\r', '\n'];
+
+/**
+ * Kiểm tra xem string có chứa prefix nguy hiểm cho CSV formula injection không.
+ * Trim leading whitespace trước khi check vì Excel vẫn nhận diện formula
+ * ngay cả khi có spaces ở đầu dòng (VD: "   =HYPERLINK(...)" vẫn nguy hiểm).
+ * @param value String cần kiểm tra
+ * @returns true nếu có prefix nguy hiểm
+ */
+function hasFormulaPrefix(value: string): boolean {
+  if (!value || value.length === 0) {
+    return false;
+  }
+  const trimmed = value.trimStart();
+  if (trimmed.length === 0) {
+    return false;
+  }
+  const firstChar = trimmed.charAt(0);
+  return FORMULA_PREFIX_CHARS.includes(firstChar);
+}
+
+/**
+ * Ngăn chặn CSV formula injection bằng cách escape các prefix nguy hiểm.
+ * Thêm space prefix cho các giá trị bắt đầu bằng =, +, -, @ hoặc whitespace.
+ * @param value String cần escape
+ * @returns String đã được escape an toàn cho CSV
+ */
+function escapeFormulaInjection(value: string): string {
+  if (hasFormulaPrefix(value)) {
+    return ` ${value}`;
+  }
+  return value;
+}
+
+/**
+ * Escape tất cả các formula prefixes trong một feedback row.
+ * Chỉ các field free-text (comment) có nguy cơ formula injection.
+ * Các field khác (projectId, beneficiaryName, rating, submittedAt) đã được
+ * validate bởi Zod schema với format nghiêm ngặt nên không cần escape.
+ * @param row Dòng feedback cần escape
+ * @returns Dòng feedback đã được escape
+ */
+function sanitizeFeedbackRow(row: BeneficiaryFeedbackRow): BeneficiaryFeedbackRow {
+  return {
+    ...row,
+    comment: escapeFormulaInjection(row.comment)
+  };
+}
 
 /**
  * Giới hạn số dòng tối đa trong một batch.
@@ -45,6 +103,7 @@ export interface BatchFeedbackResult {
   flaggedCount: number;
   isDuplicate?: boolean;
   duplicateOfBatchContentHash?: string;
+  inputType?: BatchInputType;
 }
 
 /**
@@ -97,7 +156,7 @@ export function parseCsvBuffer(csvBuffer: Buffer): unknown[] {
     return records as unknown[];
   } catch (error) {
     logger.error('CSV parse error', { errorMessage: (error as Error).message });
-    throw new Error('Invalid CSV format');
+    throw new InvalidCsvError('Invalid CSV format');
   }
 }
 
@@ -123,13 +182,15 @@ function processFeedbackRows(rows: unknown[]): {
 
   for (const validRow of validationResult.validRows) {
     const { data, rowNumber } = validRow;
-    const beneficiaryNameHash = hashBeneficiaryName(data.beneficiaryName);
-    const riskScore = computeRiskScore(data.rating, data.comment);
+    // Escape formula injection characters trong comment field
+    const sanitizedData = sanitizeFeedbackRow(data);
+    const beneficiaryNameHash = hashBeneficiaryName(sanitizedData.beneficiaryName);
+    const riskScore = computeRiskScore(sanitizedData.rating, sanitizedData.comment);
     const isFlagged = shouldFlagFeedback(riskScore);
 
     processedRows.push({
       rowNumber,
-      data,
+      data: sanitizedData,
       beneficiaryNameHash,
       riskScore,
       isFlagged
@@ -181,10 +242,40 @@ async function saveBatchFeedback(
  * @returns Hex string of SHA-256 hash
  */
 function computeBatchContentHash(content: Buffer | unknown[]): string {
-  const rawContent = Buffer.isBuffer(content)
-    ? content.toString('utf-8')
-    : JSON.stringify(content);
+  let rawContent: string;
+
+  if (Buffer.isBuffer(content)) {
+    // Strip BOM and convert to string for consistent hashing
+    rawContent = content.toString('utf-8');
+  } else {
+    // JSON stringify with sorted keys ensures deterministic output
+    // regardless of key order in the original object
+    // This prevents hash bypass when objects have same values but different key order
+    rawContent = JSON.stringify(sortObjectKeys(content));
+  }
+
   return crypto.createHash('sha256').update(rawContent).digest('hex');
+}
+
+/**
+ * Recursively sort object keys for deterministic JSON serialization.
+ * @param obj Object to sort
+ * @returns New object with sorted keys
+ */
+function sortObjectKeys(obj: unknown): unknown {
+  if (Array.isArray(obj)) {
+    return obj.map(sortObjectKeys);
+  }
+
+  if (obj !== null && typeof obj === 'object') {
+    const sortedEntries = Object.entries(obj)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([k, v]) => [k, sortObjectKeys(v)]);
+
+    return Object.fromEntries(sortedEntries);
+  }
+
+  return obj;
 }
 
 /**
@@ -199,16 +290,16 @@ export async function processCsvBatchFeedback(
 ): Promise<BatchFeedbackResult> {
   const csvSize = csvBuffer.length;
   if (csvSize > MAX_UPLOAD_SIZE_BYTES) {
-    throw new Error('File size exceeds 5MB limit');
+    throw new FileTooLargeError('File size exceeds 5MB limit');
   }
 
   const rows = parseCsvBuffer(csvBuffer);
   if (rows.length > MAX_BATCH_SIZE) {
-    throw new Error('Batch size exceeds 1000 limit');
+    throw new BatchSizeExceededError('Batch size exceeds 1000 limit');
   }
 
   const batchContentHash = computeBatchContentHash(csvBuffer);
-  return processBatch(rows, uploadedByOrganizationId, batchContentHash);
+  return processBatch(rows, uploadedByOrganizationId, batchContentHash, 'csv');
 }
 
 /**
@@ -222,15 +313,15 @@ export async function processJsonBatchFeedback(
   uploadedByOrganizationId: string
 ): Promise<BatchFeedbackResult> {
   if (!Array.isArray(jsonPayload)) {
-    throw new Error('Payload must be a JSON array');
+    throw new PayloadMustBeArrayError('Payload must be a JSON array');
   }
 
   if (jsonPayload.length > MAX_BATCH_SIZE) {
-    throw new Error('Batch size exceeds 1000 limit');
+    throw new BatchSizeExceededError('Batch size exceeds 1000 limit');
   }
 
   const batchContentHash = computeBatchContentHash(jsonPayload);
-  return processBatch(jsonPayload, uploadedByOrganizationId, batchContentHash);
+  return processBatch(jsonPayload, uploadedByOrganizationId, batchContentHash, 'json');
 }
 
 /**
@@ -238,12 +329,14 @@ export async function processJsonBatchFeedback(
  * @param rows Mảng dòng feedback
  * @param uploadedByOrganizationId ID của NGO upload
  * @param batchContentHash Hash nội dung batch cho idempotency
+ * @param inputType Loại dữ liệu đầu vào (CSV hoặc JSON)
  * @returns Kết quả xử lý batch
  */
 async function processBatch(
   rows: unknown[],
   uploadedByOrganizationId: string,
-  batchContentHash: string
+  batchContentHash: string,
+  inputType: BatchInputType = 'json'
 ): Promise<BatchFeedbackResult> {
   // Kiểm tra duplicate: nếu batch với cùng hash đã được upload bởi cùng org
   const existingBatch = await BeneficiaryFeedbackModel.findOne({
@@ -262,7 +355,8 @@ async function processBatch(
       errors: [],
       flaggedCount: 0,
       isDuplicate: true,
-      duplicateOfBatchContentHash: batchContentHash
+      duplicateOfBatchContentHash: batchContentHash,
+      inputType
     };
   }
 
@@ -288,6 +382,7 @@ async function processBatch(
     success: savedCount,
     failed: validationErrors.length,
     errors: validationErrors,
-    flaggedCount
+    flaggedCount,
+    inputType
   };
 }

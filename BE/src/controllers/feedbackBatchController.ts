@@ -13,6 +13,8 @@ import {
   MAX_UPLOAD_SIZE_BYTES
 } from '../services/feedbackBatch.service';
 import { getLogger } from '../config/logger';
+import { isFeedbackBatchError } from '../utils/feedbackBatchError';
+import { ApplicationError } from '../utils/applicationError';
 
 const logger = getLogger();
 
@@ -81,8 +83,9 @@ export async function batchUploadFeedbackController(
         return;
       }
 
-      // Validate MIME type (CSV)
-      const allowedMimeTypes = ['text/csv', 'text/plain', 'application/csv'];
+      // Validate MIME type (CSV) - chỉ chấp nhận CSV MIME types
+      // Loại bỏ text/plain vì quá rộng và có thể bị lợi dụng
+      const allowedMimeTypes = ['text/csv', 'application/csv'];
       if (!allowedMimeTypes.includes(file.mimetype.toLowerCase())) {
         sendErrorResponse(response, 400, 'File phải là CSV.', 'INVALID_FILE_TYPE');
         return;
@@ -96,7 +99,8 @@ export async function batchUploadFeedbackController(
         fileSize: file.size,
         totalItems: result.success,
         failedCount: result.failed,
-        flaggedCount: result.flaggedCount
+        flaggedCount: result.flaggedCount,
+        inputType: 'csv'
       });
     } else {
       // Xử lý JSON array
@@ -131,7 +135,8 @@ export async function batchUploadFeedbackController(
         totalItems: feedbacks.length,
         successCount: result.success,
         failedCount: result.failed,
-        flaggedCount: result.flaggedCount
+        flaggedCount: result.flaggedCount,
+        inputType: 'json'
       });
     }
 
@@ -145,7 +150,8 @@ export async function batchUploadFeedbackController(
           failed: 0,
           errors: [],
           flaggedCount: 0,
-          isDuplicate: true
+          isDuplicate: true,
+          inputType: result.inputType
         }
       );
       return;
@@ -159,30 +165,21 @@ export async function batchUploadFeedbackController(
         success: result.success,
         failed: result.failed,
         errors: result.errors,
-        flaggedCount: result.flaggedCount
+        flaggedCount: result.flaggedCount,
+        inputType: result.inputType
       }
     );
   } catch (error: unknown) {
-    const errorMessage = (error as Error).message;
-
-    if (errorMessage.includes('Batch size exceeds 1000 limit')) {
-      sendErrorResponse(response, 400, 'Batch size exceeds 1000 limit.', 'BATCH_SIZE_EXCEEDED');
-      return;
-    }
-
-    if (errorMessage.includes('File size exceeds')) {
-      sendErrorResponse(response, 400, errorMessage, 'FILE_TOO_LARGE');
-      return;
-    }
-
-    if (errorMessage.includes('Invalid CSV')) {
-      sendErrorResponse(response, 400, 'Invalid CSV format.', 'INVALID_CSV');
+    // Xử lý type-safe với custom error classes
+    if (isFeedbackBatchError(error)) {
+      const appError = error as ApplicationError;
+      sendErrorResponse(response, appError.statusCode, appError.message, appError.errorCode);
       return;
     }
 
     logger.error('Batch feedback processing error', {
       organizationId: userId,
-      errorMessage: errorMessage
+      errorMessage: (error as Error).message
     });
 
     sendErrorFromUnknown(response, error, 'Không thể xử lý batch feedback.');
@@ -197,3 +194,8 @@ export const FEEDBACK_BATCH_RATE_LIMIT_CONFIG = {
   windowMs: FEEDBACK_BATCH_RATE_LIMIT_WINDOW_MS,
   bucketName: 'feedback-batch'
 };
+
+/**
+ * Re-export constants từ service để routes có thể import tập trung từ controller.
+ */
+export { MAX_BATCH_SIZE, MAX_UPLOAD_SIZE_BYTES } from '../services/feedbackBatch.service';

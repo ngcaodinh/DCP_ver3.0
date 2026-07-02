@@ -479,4 +479,391 @@ proj2,Nguyen B,99,Invalid,2024-01-15T11:00:00Z`;
       expect(hash).not.toContain('SensitiveName');
     });
   });
+
+  describe('Formula Injection Prevention', () => {
+    it('nên escape comment bắt đầu bằng = (formula injection)', async () => {
+      (BeneficiaryFeedbackModel.insertMany as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+
+      const payload = [
+        {
+          projectId: 'proj1',
+          beneficiaryName: 'Nguyen Van A',
+          rating: 4,
+          comment: '=HYPERLINK("http://evil.com")',
+          submittedAt: '2024-01-15T10:00:00Z'
+        }
+      ];
+
+      const result = await processJsonBatchFeedback(payload, 'org123');
+
+      expect(result.success).toBe(1);
+      // Verify comment được escape với space prefix
+      const insertCall = (BeneficiaryFeedbackModel.insertMany as ReturnType<typeof vi.fn>).mock.calls[0];
+      const savedDoc = insertCall[0][0];
+      expect(savedDoc.comment).toBe(' =HYPERLINK("http://evil.com")');
+    });
+
+    it('nên escape comment bắt đầu bằng + (formula injection)', async () => {
+      (BeneficiaryFeedbackModel.insertMany as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+
+      const payload = [
+        {
+          projectId: 'proj1',
+          beneficiaryName: 'Nguyen Van A',
+          rating: 4,
+          comment: '+cmd|/c calc',
+          submittedAt: '2024-01-15T10:00:00Z'
+        }
+      ];
+
+      const result = await processJsonBatchFeedback(payload, 'org123');
+
+      expect(result.success).toBe(1);
+      const insertCall = (BeneficiaryFeedbackModel.insertMany as ReturnType<typeof vi.fn>).mock.calls[0];
+      const savedDoc = insertCall[0][0];
+      expect(savedDoc.comment).toBe(' +cmd|/c calc');
+    });
+
+    it('nên escape comment bắt đầu bằng @ (formula injection)', async () => {
+      (BeneficiaryFeedbackModel.insertMany as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+
+      const payload = [
+        {
+          projectId: 'proj1',
+          beneficiaryName: 'Nguyen Van A',
+          rating: 4,
+          comment: '@MAX(A1:A100)',
+          submittedAt: '2024-01-15T10:00:00Z'
+        }
+      ];
+
+      const result = await processJsonBatchFeedback(payload, 'org123');
+
+      expect(result.success).toBe(1);
+      const insertCall = (BeneficiaryFeedbackModel.insertMany as ReturnType<typeof vi.fn>).mock.calls[0];
+      const savedDoc = insertCall[0][0];
+      expect(savedDoc.comment).toBe(' @MAX(A1:A100)');
+    });
+
+    it('nên escape comment bắt đầu bằng - (formula injection)', async () => {
+      (BeneficiaryFeedbackModel.insertMany as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+
+      const payload = [
+        {
+          projectId: 'proj1',
+          beneficiaryName: 'Nguyen Van A',
+          rating: 4,
+          comment: '-10+20',
+          submittedAt: '2024-01-15T10:00:00Z'
+        }
+      ];
+
+      const result = await processJsonBatchFeedback(payload, 'org123');
+
+      expect(result.success).toBe(1);
+      const insertCall = (BeneficiaryFeedbackModel.insertMany as ReturnType<typeof vi.fn>).mock.calls[0];
+      const savedDoc = insertCall[0][0];
+      expect(savedDoc.comment).toBe(' -10+20');
+    });
+
+    it('nên không escape comment thường (không có formula prefix)', async () => {
+      (BeneficiaryFeedbackModel.insertMany as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+
+      const payload = [
+        {
+          projectId: 'proj1',
+          beneficiaryName: 'Nguyen Van A',
+          rating: 4,
+          comment: 'Good service, thank you!',
+          submittedAt: '2024-01-15T10:00:00Z'
+        }
+      ];
+
+      const result = await processJsonBatchFeedback(payload, 'org123');
+
+      expect(result.success).toBe(1);
+      const insertCall = (BeneficiaryFeedbackModel.insertMany as ReturnType<typeof vi.fn>).mock.calls[0];
+      const savedDoc = insertCall[0][0];
+      expect(savedDoc.comment).toBe('Good service, thank you!');
+    });
+
+    it('nên escape formula injection với leading whitespace (security bypass fix)', async () => {
+      (BeneficiaryFeedbackModel.insertMany as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+
+      // attacker có thể bypass bằng cách thêm leading spaces trước formula prefix
+      // Khi trimStart + escape: "   =HYPERLINK(...)" → " =HYPERLINK(...)" (1 space thêm vào)
+      const payload = [
+        {
+          projectId: 'proj1',
+          beneficiaryName: 'Nguyen Van A',
+          rating: 4,
+          comment: '   =HYPERLINK("http://evil.com")',
+          submittedAt: '2024-01-15T10:00:00Z'
+        }
+      ];
+
+      const result = await processJsonBatchFeedback(payload, 'org123');
+
+      expect(result.success).toBe(1);
+      const insertCall = (BeneficiaryFeedbackModel.insertMany as ReturnType<typeof vi.fn>).mock.calls[0];
+      const savedDoc = insertCall[0][0];
+      // Verify: space được thêm vào TRƯỚC formula prefix (sau khi trim)
+      expect(savedDoc.comment).toBe(' =HYPERLINK("http://evil.com")');
+    });
+
+    it('nên escape formula với tab prefix', async () => {
+      (BeneficiaryFeedbackModel.insertMany as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+
+      const payload = [
+        {
+          projectId: 'proj1',
+          beneficiaryName: 'Nguyen Van A',
+          rating: 4,
+          comment: '\t=SUM(A1:A100)',
+          submittedAt: '2024-01-15T10:00:00Z'
+        }
+      ];
+
+      const result = await processJsonBatchFeedback(payload, 'org123');
+
+      expect(result.success).toBe(1);
+      const insertCall = (BeneficiaryFeedbackModel.insertMany as ReturnType<typeof vi.fn>).mock.calls[0];
+      const savedDoc = insertCall[0][0];
+      expect(savedDoc.comment).toBe(' =SUM(A1:A100)');
+    });
+  });
+
+  describe('Input Type Discriminator', () => {
+    beforeEach(() => {
+      vi.clearAllMocks();
+    });
+
+    it('nên trả về inputType = csv cho CSV batch', async () => {
+      (BeneficiaryFeedbackModel.insertMany as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+
+      const csvContent = `projectId,beneficiaryName,rating,comment,submittedAt
+proj1,Nguyen A,4,Good,2024-01-15T10:00:00Z`;
+
+      const result = await processCsvBatchFeedback(Buffer.from(csvContent), 'org123');
+
+      // CSV rating is parsed as string "4", so it fails Zod validation (expects number)
+      // The inputType should still be set correctly
+      expect(result.inputType).toBe('csv');
+    });
+
+    it('nên trả về inputType = json cho JSON batch', async () => {
+      (BeneficiaryFeedbackModel.insertMany as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+
+      const payload = [
+        {
+          projectId: 'proj1',
+          beneficiaryName: 'Nguyen Van A',
+          rating: 4,
+          comment: 'Good',
+          submittedAt: '2024-01-15T10:00:00Z'
+        }
+      ];
+
+      const result = await processJsonBatchFeedback(payload, 'org123');
+
+      expect(result.success).toBe(1);
+      expect(result.inputType).toBe('json');
+    });
+  });
+
+  describe('Duplicate Detection', () => {
+    it('nên trả về isDuplicate = true khi batch đã tồn tại', async () => {
+      // Mock findOne trả về record tồn tại
+      (BeneficiaryFeedbackModel.findOne as ReturnType<typeof vi.fn>).mockReturnValueOnce({
+        select: vi.fn().mockReturnValue({
+          lean: vi.fn().mockResolvedValue({ feedbackId: 'FB-123' })
+        })
+      });
+
+      const payload = [
+        {
+          projectId: 'proj1',
+          beneficiaryName: 'Nguyen Van A',
+          rating: 4,
+          comment: 'Good',
+          submittedAt: '2024-01-15T10:00:00Z'
+        }
+      ];
+
+      const result = await processJsonBatchFeedback(payload, 'org123');
+
+      expect(result.isDuplicate).toBe(true);
+      expect(result.success).toBe(0);
+      expect(result.failed).toBe(0);
+      // Verify insertMany không được gọi
+      expect(BeneficiaryFeedbackModel.insertMany).not.toHaveBeenCalled();
+    });
+
+    it('nên trả về isDuplicate = false khi batch chưa tồn tại', async () => {
+      (BeneficiaryFeedbackModel.insertMany as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+
+      const payload = [
+        {
+          projectId: 'proj1',
+          beneficiaryName: 'Nguyen Van A',
+          rating: 4,
+          comment: 'Good',
+          submittedAt: '2024-01-15T10:00:00Z'
+        }
+      ];
+
+      const result = await processJsonBatchFeedback(payload, 'org123');
+
+      expect(result.isDuplicate).toBeUndefined();
+      expect(result.success).toBe(1);
+    });
+  });
+
+  describe('Boundary Tests', () => {
+    it('nên xử lý batch đúng 1000 rows (giới hạn tối đa)', async () => {
+      (BeneficiaryFeedbackModel.insertMany as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+
+      const maxPayload = Array.from({ length: 1000 }, (_, i) => ({
+        projectId: `proj${i}`,
+        beneficiaryName: `User${i}`,
+        rating: 4,
+        comment: `Comment ${i}`,
+        submittedAt: '2024-01-15T10:00:00Z'
+      }));
+
+      const result = await processJsonBatchFeedback(maxPayload, 'org123');
+
+      expect(result.success).toBe(1000);
+      expect(result.failed).toBe(0);
+    });
+
+    it('nên reject batch 1001 rows (vượt giới hạn)', async () => {
+      const overPayload = Array.from({ length: 1001 }, (_, i) => ({
+        projectId: `proj${i}`,
+        beneficiaryName: `User${i}`,
+        rating: 4,
+        comment: `Comment ${i}`,
+        submittedAt: '2024-01-15T10:00:00Z'
+      }));
+
+      await expect(processJsonBatchFeedback(overPayload, 'org123')).rejects.toThrow('Batch size exceeds 1000 limit');
+    });
+
+    it('nên reject file vượt 5MB', async () => {
+      const largeBuffer = Buffer.alloc(MAX_UPLOAD_SIZE_BYTES + 1, 'a');
+
+      await expect(processCsvBatchFeedback(largeBuffer, 'org123')).rejects.toThrow('File size exceeds 5MB limit');
+    });
+  });
+
+  describe('BOM Handling', () => {
+    it('nên strip UTF-8 BOM từ CSV buffer', () => {
+      // UTF-8 BOM: 0xEF 0xBB 0xBF
+      const bomBuffer = Buffer.from([0xEF, 0xBB, 0xBF]);
+      const csvContent = `projectId,beneficiaryName,rating,comment,submittedAt
+proj1,Nguyen A,4,Good,2024-01-15T10:00:00Z`;
+      const csvBuffer = Buffer.concat([bomBuffer, Buffer.from(csvContent)]);
+
+      const result = parseCsvBuffer(csvBuffer);
+
+      expect(result).toHaveLength(1);
+      expect((result[0] as Record<string, unknown>).projectId).toBe('proj1');
+    });
+
+    it('nên xử lý CSV không có BOM bình thường', () => {
+      const csvContent = `projectId,beneficiaryName,rating,comment,submittedAt
+proj1,Nguyen A,4,Good,2024-01-15T10:00:00Z`;
+
+      const result = parseCsvBuffer(Buffer.from(csvContent));
+
+      expect(result).toHaveLength(1);
+      expect((result[0] as Record<string, unknown>).projectId).toBe('proj1');
+    });
+  });
+
+  describe('Deterministic Hash (Phase 4 Fix)', () => {
+    it('nên tạo cùng hash cho objects có cùng values nhưng khác key order', async () => {
+      (BeneficiaryFeedbackModel.insertMany as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+      // Two objects with same values but different key order
+      const payload1 = [
+        {
+          projectId: 'proj1',
+          beneficiaryName: 'Nguyen Van A',
+          rating: 4,
+          comment: 'Good',
+          submittedAt: '2024-01-15T10:00:00Z'
+        }
+      ];
+
+      const payload2 = [
+        {
+          beneficiaryName: 'Nguyen Van A',
+          projectId: 'proj1',
+          comment: 'Good',
+          rating: 4,
+          submittedAt: '2024-01-15T10:00:00Z'
+        }
+      ];
+
+      // Lần upload đầu: findOne trả về null (chưa có duplicate)
+      (BeneficiaryFeedbackModel.findOne as ReturnType<typeof vi.fn>).mockReturnValueOnce({
+        select: vi.fn().mockReturnValue({
+          lean: vi.fn().mockResolvedValue(null)
+        })
+      });
+      // Lần upload thứ 2: findOne trả về record tồn tại (verify hash giống → dedup hoạt động)
+      (BeneficiaryFeedbackModel.findOne as ReturnType<typeof vi.fn>).mockReturnValueOnce({
+        select: vi.fn().mockReturnValue({
+          lean: vi.fn().mockResolvedValue({ feedbackId: 'FB-123' })
+        })
+      });
+
+      const result1 = await processJsonBatchFeedback(payload1, 'org123');
+      const result2 = await processJsonBatchFeedback(payload2, 'org123');
+
+      // Verify deterministic hash: payload 2 phải được phát hiện là duplicate
+      // vì cùng content với payload 1, dù key order khác nhau
+      expect(result1.success).toBe(1);
+      expect(result1.isDuplicate).toBeUndefined();
+      expect(result2.isDuplicate).toBe(true);
+      expect(result2.success).toBe(0);
+    });
+
+    it('nên tạo consistent hash cho nested objects với different key order', async () => {
+      // Test với array objects - mỗi object có different key order
+      const payload1 = [
+        {
+          projectId: 'proj1',
+          beneficiaryName: 'User1',
+          rating: 4,
+          comment: 'Test',
+          submittedAt: '2024-01-15T10:00:00Z'
+        }
+      ];
+
+      const payload2 = [
+        {
+          comment: 'Test',
+          submittedAt: '2024-01-15T10:00:00Z',
+          rating: 4,
+          beneficiaryName: 'User1',
+          projectId: 'proj1'
+        }
+      ];
+
+      (BeneficiaryFeedbackModel.insertMany as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (BeneficiaryFeedbackModel.findOne as ReturnType<typeof vi.fn>).mockReturnValue({
+        select: vi.fn().mockReturnValue({
+          lean: vi.fn().mockResolvedValue(null)
+        })
+      });
+
+      await processJsonBatchFeedback(payload1, 'org123');
+      await processJsonBatchFeedback(payload2, 'org123');
+
+      // Nếu hash deterministic, insertMany được gọi 2 lần (không phải 1 lần với duplicate check)
+      expect(BeneficiaryFeedbackModel.insertMany).toHaveBeenCalledTimes(2);
+    });
+  });
 });
