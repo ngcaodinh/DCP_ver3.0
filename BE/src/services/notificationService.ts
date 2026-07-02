@@ -314,26 +314,6 @@ export async function markNotificationAsRead(notificationId: string, userId: str
 }
 
 /**
- * Hàm đánh dấu nhiều notifications là đã đọc trong 1 query.
- * Dùng cho mark-all (nhưng spec E3 chỉ yêu cầu mark-all cụ thể, nên giữ helper).
- *
- * @param notificationIds Danh sách ID notifications cần đánh dấu
- * @param userId ID của user
- * @returns Số lượng notifications đã được cập nhật
- */
-export async function markMultipleNotificationsAsRead(
-  notificationIds: string[],
-  userId: string
-): Promise<number> {
-  if (notificationIds.length === 0) return 0;
-  const result = await NotificationModel.updateMany(
-    { notificationId: { $in: notificationIds }, userId, isRead: false },
-    { $set: { isRead: true } }
-  );
-  return result.modifiedCount;
-}
-
-/**
  * Hàm lấy user preferences cho notification.
  * Nếu chưa có record → tạo mới với default preferences (opt-out ngoài IN_APP).
  *
@@ -559,6 +539,7 @@ export async function processUnsubscribe(token: string): Promise<boolean> {
   const pref = await UserNotificationPreferenceModel.findOne({ unsubscribeToken: token });
   if (!pref) return false;
   pref.globalEnabled = false;
+  pref.unsubscribeToken = null;
   await pref.save();
   return true;
 }

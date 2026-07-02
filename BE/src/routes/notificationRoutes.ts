@@ -2,6 +2,8 @@ import { Router } from 'express';
 import {
   getNotificationsController,
   markNotificationAsReadController,
+  deleteNotificationController,
+  getUnreadCountController,
   markAllNotificationsAsReadController,
   streamNotificationsController,
   unsubscribeController,
@@ -41,6 +43,8 @@ export function createNotificationRoutes(): Router {
   router.get('/', authenticationMiddleware, getNotificationsController);
   router.patch('/read-all', authenticationMiddleware, markAllNotificationsAsReadController);
   router.patch('/:id/read', authenticationMiddleware, markNotificationAsReadController);
+  router.delete('/:id', authenticationMiddleware, deleteNotificationController);
+  router.get('/unread-count', authenticationMiddleware, getUnreadCountController);
   router.get('/preferences', authenticationMiddleware, getNotificationPreferencesController);
   router.put('/preferences', authenticationMiddleware, updateNotificationPreferencesController);
 

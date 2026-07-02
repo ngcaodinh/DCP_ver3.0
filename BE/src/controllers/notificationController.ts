@@ -13,7 +13,8 @@ import {
 import { sendErrorFromUnknown, sendErrorResponse, sendSuccessResponse } from '../utils/apiResponse';
 import { getLogger } from '../config/logger';
 import { notificationEvents } from '../events/notificationEvents';
-import { NotificationValidationError } from '../services/constants/notification.constants';
+import { VISIBLE_NOTIFICATION_TYPES, NotificationValidationError } from '../services/constants/notification.constants';
+import { NotificationModel } from '../models/notificationModel';
 import type { NotificationPreferencesMap } from '../models/notificationPreferenceModel';
 
 const logger = getLogger();
@@ -79,29 +80,20 @@ async function getUserNotificationsPaginated(userId: string, skip: number, limit
     hasNextPage: boolean;
   };
 }> {
-  const visibleNotificationTypes = [
-    'DONATION_RECEIVED',
-    'DISBURSEMENT_SIGNED',
-    'LARGE_DONATION',
-    'DISBURSEMENT_COMPLETED',
-    'OVERRIDE_APPROVED',
-    'SBT_MINT_FAILED'
-  ] as const;
-
-  const query = { userId, notificationType: { $in: visibleNotificationTypes } };
+  const query = { userId, notificationType: { $in: VISIBLE_NOTIFICATION_TYPES } };
 
   const [notifications, total, unreadCount] = await Promise.all([
-    (await import('../models/notificationModel')).NotificationModel
+    NotificationModel
       .find(query)
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
       .lean<import('../models/notificationModel').Notification[]>()
       .exec(),
-    (await import('../models/notificationModel')).NotificationModel.countDocuments(query).exec(),
-    (await import('../models/notificationModel')).NotificationModel.countDocuments({
+    NotificationModel.countDocuments(query).exec(),
+    NotificationModel.countDocuments({
       userId,
-      notificationType: { $in: visibleNotificationTypes },
+      notificationType: { $in: VISIBLE_NOTIFICATION_TYPES },
       isRead: false
     }).exec()
   ]);
@@ -353,30 +345,30 @@ export async function streamNotificationsController(request: AuthenticatedReques
 
   const userEventChannel = `notification:read:${authenticatedUserId}`;
 
-  // Gửi snapshot thông báo. Dùng hàm riêng để reuse khi trigger từ EventEmitter.
-  const sendNotificationSnapshot = async (): Promise<void> => {
+  // Gửi unread count thay vì full list để giảm bandwidth — SSE poll mỗi 5s.
+  const sendUnreadCount = async (): Promise<void> => {
     try {
-      const snapshot = await getUserNotifications(authenticatedUserId);
-      response.write(`event: notifications\n`);
-      response.write(`data: ${JSON.stringify(snapshot)}\n\n`);
+      const unreadCount = await getUnreadCount(authenticatedUserId);
+      response.write(`event: unread-count\n`);
+      response.write(`data: ${JSON.stringify({ unreadCount })}\n\n`);
     } catch (error) {
-      logger.warn(`Không thể gửi snapshot thông báo SSE. userId=${authenticatedUserId} error=${(error as Error).message}`);
+      logger.warn(`Không thể gửi unread count SSE. userId=${authenticatedUserId} error=${(error as Error).message}`);
       response.write(`event: heartbeat\n`);
       response.write(`data: {}\n\n`);
     }
   };
 
-  // Gửi snapshot ngay khi kết nối
-  await sendNotificationSnapshot();
+  // Gửi unread count ngay khi kết nối
+  await sendUnreadCount();
 
   // Poll định kỳ mỗi 5 giây (fallback khi event bị miss)
   const pollInterval = setInterval(() => {
-    void sendNotificationSnapshot();
+    void sendUnreadCount();
   }, 5000);
 
   // Lắng nghe user-scoped event — không cần filter userId vì channel đã là riêng
   const onNotificationRead = (): void => {
-    void sendNotificationSnapshot();
+    void sendUnreadCount();
   };
   notificationEvents.on(userEventChannel, onNotificationRead);
 

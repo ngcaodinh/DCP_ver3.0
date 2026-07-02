@@ -30,13 +30,10 @@ export type NotificationFailedEventPayload = {
 
 /**
  * Payload khi notification được đánh dấu là đã đọc.
- * E3 SSE stream controller lắng nghe event này để gửi snapshot realtime tới client.
+ * E3 SSE stream controller lắng nghe event này để gửi unread count realtime tới client.
  */
 export type NotificationReadEventPayload = {
   userId: string;
-  notificationId?: string;
-  /** True khi mark-all, false/undefined khi mark 1 notification */
-  isMarkAll?: boolean;
 };
 
 export const notificationEvents = new EventEmitter();
