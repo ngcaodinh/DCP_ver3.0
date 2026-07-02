@@ -105,6 +105,8 @@ type LogMetadata = {
   riskScore?: number;
   trustMultiplier?: number;
   newPaymasterType?: string;
+  successCount?: number;
+  flaggedCount?: number;
   chainId?: number;
   token?: string;
   status?: string | number;
