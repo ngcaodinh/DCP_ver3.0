@@ -9,6 +9,7 @@ import {
   updateNotificationPreferencesController
 } from '../controllers/notificationController';
 import { createAuthenticationMiddleware } from '../middleware/authenticationMiddleware';
+import { createRateLimitMiddleware } from '../middleware/rateLimitMiddleware';
 
 /**
  * Hàm tạo routes thông báo cho E3 - Notification API Endpoints.
@@ -21,15 +22,20 @@ import { createAuthenticationMiddleware } from '../middleware/authenticationMidd
  * 5. PUT    /api/notifications/preferences           - update user preferences
  *
  * Các endpoints bổ sung:
- * - GET /unsubscribe          - unsubscribe via token (no auth)
+ * - GET /unsubscribe          - unsubscribe via token (no auth, rate-limited)
  * - GET /stream               - SSE realtime stream
  */
 export function createNotificationRoutes(): Router {
   const router = Router();
   const authenticationMiddleware = createAuthenticationMiddleware();
 
+  // Rate-limit unsubscribe endpoint: 10 attempts/min/IP — ngăn chặn token enumeration.
+  const unsubscribeRateLimit = createRateLimitMiddleware(10, 60 * 1000, {
+    bucketName: 'notification:unsubscribe'
+  });
+
   // Không auth — token đã đủ identity (entropy 256-bit)
-  router.get('/unsubscribe', unsubscribeController);
+  router.get('/unsubscribe', unsubscribeRateLimit, unsubscribeController);
 
   // Authenticated endpoints theo spec E3
   router.get('/', authenticationMiddleware, getNotificationsController);
