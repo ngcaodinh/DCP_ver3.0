@@ -317,13 +317,12 @@ export async function unsubscribeController(request: { query: { token?: string }
   try {
     const success = await processUnsubscribe(token);
     if (success) {
-      sendSuccessResponse(response, 200, 'Da huy dang ky nhan thong bao thanh cong.', { unsubscribed: true });
+      sendSuccessResponse(response, 200, 'Đã hủy đăng ký nhận thông báo thành công.', { unsubscribed: true });
     } else {
-      // Không trả 404 để tránh status-code oracle (attacker phân biệt valid/invalid token).
-      // Thay vào đó trả 200 với unsubscribed: false — nhưng note: điều này có thể gây confusion
-      // cho người dùng hợp lệ. Tốt hơn là dùng thêm CAPTCHA hoặc confirm dialog.
-      // Hiện tại: giữ 404 vì 1) token là 256-bit, brute-force không khả thi, 2) lợi ích UX lớn hơn.
-      sendErrorResponse(response, 404, 'Token khong ton tai hoac da het han.', 'TOKEN_NOT_FOUND');
+      // Trả 404 cho token không hợp lệ/hết hạn — token là 256-bit nên không khả thi brute-force,
+      // lợi ích UX cho user hợp lệ lớn hơn rủi ro status-code oracle. Rate limit ở route
+      // đã mitigate phần lớn brute-force attacks.
+      sendErrorResponse(response, 404, 'Token không tồn tại hoặc đã hết hạn.', 'TOKEN_NOT_FOUND');
     }
   } catch (error: unknown) {
     sendErrorFromUnknown(response, error, 'Không thể xử lý hủy đăng ký.');

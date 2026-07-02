@@ -58,11 +58,20 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
     const userId = socket.data.userId as string;
     const role = socket.data.role as string;
 
-    // Admin tham gia cả 'admin' room (nhận transfer alerts) và 'commissioners' (nhận override alerts)
-    // Regular user tham gia 'user:${userId}' room (nhận notification:read events)
-    // Regulatory chỉ tham gia 'commissioners'
-    if (role === 'admin') void socket.join('admin');
-    void socket.join('commissioners');
+    // Room isolation theo role:
+    // - admin: join 'admin' (transfer alerts) + 'commissioners' (override alerts) + 'user:${userId}'
+    // - regulatory: join 'commissioners' (override alerts) + 'user:${userId}'
+    // - regular user (donor/organization): chỉ join 'user:${userId}' — KHÔNG nhận override/transfer events
+    //
+    // Đây là E3 extension: trước đó chỉ admin/regulatory được connect. Sau khi mở cho tất cả
+    // authenticated users, phải giới hạn room access để tránh information disclosure
+    // (regular user không được thấy override:new / override:resolved events).
+    if (role === 'admin') {
+      void socket.join('admin');
+      void socket.join('commissioners');
+    } else if (role === 'regulatory') {
+      void socket.join('commissioners');
+    }
     void socket.join(`user:${userId}`);
     logger.info('User connected via Socket.io.', {
       userId,
