@@ -28,5 +28,13 @@ export type NotificationFailedEventPayload = {
   failedAt: Date;
 };
 
+/**
+ * Payload khi notification được đánh dấu là đã đọc.
+ * E3 SSE stream controller lắng nghe event này để gửi unread count realtime tới client.
+ */
+export type NotificationReadEventPayload = {
+  userId: string;
+};
+
 export const notificationEvents = new EventEmitter();
 notificationEvents.setMaxListeners(100);

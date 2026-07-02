@@ -35,7 +35,7 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
     path: '/socket.io'
   });
 
-  // Auth middleware: chỉ admin mới được kết nối
+  // Auth middleware: chỉ user đã đăng nhập mới được kết nối
   io.use((socket, next) => {
     const token = socket.handshake.auth?.token as string | undefined;
     if (!token) return next(new Error('UNAUTHORIZED'));
@@ -46,8 +46,6 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
         issuer: cfg.issuer,
         audience: cfg.audience
       }) as JwtClaims;
-      // Cho phép cả admin và regulatory kết nối — cả hai đều là commissioner có thể vote override
-      if (payload.role !== 'admin' && payload.role !== 'regulatory') return next(new Error('FORBIDDEN'));
       socket.data.userId = payload.userId;
       socket.data.role = payload.role;
       next();
@@ -57,18 +55,31 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
   });
 
   io.on('connection', (socket) => {
+    const userId = socket.data.userId as string;
     const role = socket.data.role as string;
-    // Admin tham gia cả 'admin' room (nhận transfer alerts) và 'commissioners' (nhận override alerts)
-    // Regulatory chỉ tham gia 'commissioners' — không cần transfer alerts
-    if (role === 'admin') void socket.join('admin');
-    void socket.join('commissioners');
+
+    // Room isolation theo role:
+    // - admin: join 'admin' (transfer alerts) + 'commissioners' (override alerts) + 'user:${userId}'
+    // - regulatory: join 'commissioners' (override alerts) + 'user:${userId}'
+    // - regular user (donor/organization): chỉ join 'user:${userId}' — KHÔNG nhận override/transfer events
+    //
+    // Đây là E3 extension: trước đó chỉ admin/regulatory được connect. Sau khi mở cho tất cả
+    // authenticated users, phải giới hạn room access để tránh information disclosure
+    // (regular user không được thấy override:new / override:resolved events).
+    if (role === 'admin') {
+      void socket.join('admin');
+      void socket.join('commissioners');
+    } else if (role === 'regulatory') {
+      void socket.join('commissioners');
+    }
+    void socket.join(`user:${userId}`);
     logger.info('User connected via Socket.io.', {
-      userId: socket.data.userId as string,
+      userId,
       context: { role }
     });
     socket.on('disconnect', (reason) => {
       logger.info('User disconnected from Socket.io.', {
-        context: { reason, role }
+        context: { reason, userId }
       });
     });
   });

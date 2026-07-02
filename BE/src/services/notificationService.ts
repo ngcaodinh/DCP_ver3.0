@@ -9,8 +9,10 @@ import {
 } from '../models/notificationModel';
 export type { NotificationDeliveryStatusMap };
 import { UserNotificationPreferenceModel } from '../models/notificationPreferenceModel';
+import type { NotificationPreferencesMap } from '../models/notificationPreferenceModel';
 import { getLogger } from '../config/logger';
 import { enqueueNotification, NOTIFICATION_ALLOWLIST } from '../queues/notificationQueue';
+import { VISIBLE_NOTIFICATION_TYPES, NotificationValidationError } from './constants/notification.constants';
 import crypto from 'crypto';
 
 const logger = getLogger();
@@ -258,22 +260,14 @@ export async function createUserNotification(payload: CreateNotificationPayload)
  * Hàm lấy danh sách thông báo của người dùng. Mục đích: cung cấp dữ liệu thật cho dropdown thông báo.
  */
 export async function getUserNotifications(userId: string): Promise<NotificationListResult> {
-  const visibleNotificationTypes: NotificationType[] = [
-    'DONATION_RECEIVED',
-    'DISBURSEMENT_SIGNED',
-    'LARGE_DONATION',
-    'DISBURSEMENT_COMPLETED',
-    'OVERRIDE_APPROVED',
-    'SBT_MINT_FAILED'
-  ];
   const [notifications, unreadCount] = await Promise.all([
-    NotificationModel.find({ userId, notificationType: { $in: visibleNotificationTypes } })
+    NotificationModel.find({ userId, notificationType: { $in: VISIBLE_NOTIFICATION_TYPES } })
       .sort({ createdAt: -1 })
       .limit(100)
       .lean<Notification[]>(),
     NotificationModel.countDocuments({
       userId,
-      notificationType: { $in: visibleNotificationTypes },
+      notificationType: { $in: VISIBLE_NOTIFICATION_TYPES },
       isRead: false
     })
   ]);
@@ -285,16 +279,8 @@ export async function getUserNotifications(userId: string): Promise<Notification
  * Hàm đánh dấu tất cả thông báo đã đọc. Mục đích: xóa badge chưa đọc của người dùng hiện tại.
  */
 export async function markAllUserNotificationsAsRead(userId: string): Promise<NotificationListResult> {
-  const visibleNotificationTypes: NotificationType[] = [
-    'DONATION_RECEIVED',
-    'DISBURSEMENT_SIGNED',
-    'LARGE_DONATION',
-    'DISBURSEMENT_COMPLETED',
-    'OVERRIDE_APPROVED',
-    'SBT_MINT_FAILED'
-  ];
   await NotificationModel.updateMany(
-    { userId, notificationType: { $in: visibleNotificationTypes }, isRead: false },
+    { userId, notificationType: { $in: VISIBLE_NOTIFICATION_TYPES }, isRead: false },
     { $set: { isRead: true } }
   );
   return getUserNotifications(userId);
@@ -307,6 +293,146 @@ export async function markAllUserNotificationsAsRead(userId: string): Promise<No
 export async function findNotificationById(notificationId: string): Promise<Notification | null> {
   const result = await NotificationModel.findOne({ notificationId }).lean<Notification>().exec();
   return result as Notification | null;
+}
+
+/**
+ * Hàm đánh dấu 1 notification là đã đọc.
+ * Chỉ cho phép user đánh dấu notification thuộc về mình (IDOR prevention).
+ *
+ * @param notificationId ID của notification
+ * @param userId ID của user (từ auth context)
+ * @returns Notification đã được cập nhật, hoặc null nếu không tìm thấy / không thuộc user
+ */
+export async function markNotificationAsRead(notificationId: string, userId: string): Promise<Notification | null> {
+  const result = await NotificationModel.findOneAndUpdate(
+    { notificationId, userId, isRead: false },
+    { $set: { isRead: true } },
+    { returnDocument: 'after' }
+  ).lean<Notification>().exec();
+
+  return result as Notification | null;
+}
+
+/**
+ * Hàm lấy user preferences cho notification.
+ * Nếu chưa có record → tạo mới với default preferences (opt-out ngoài IN_APP).
+ *
+ * @param userId ID của người dùng
+ * @returns UserNotificationPreference record
+ */
+export async function getUserPreferences(userId: string): Promise<{
+  globalEnabled: boolean;
+  preferences: NotificationPreferencesMap;
+}> {
+  let pref = await UserNotificationPreferenceModel.findOne({ userId }).lean().exec();
+
+  if (!pref) {
+    pref = await UserNotificationPreferenceModel.create({
+      userId,
+      preferences: {},
+      globalEnabled: true
+    });
+    return { globalEnabled: pref.globalEnabled, preferences: pref.preferences };
+  }
+
+  return { globalEnabled: pref.globalEnabled, preferences: pref.preferences };
+}
+
+/**
+ * Hàm cập nhật user preferences cho notification.
+ * Validate payload và merge với preferences hiện tại.
+ *
+ * @param userId ID của người dùng
+ * @param payload Payload cập nhật từ client
+ * @returns Updated preferences
+ */
+const ALL_NOTIFICATION_TYPES = [
+  'DONATION_RECEIVED',
+  'DISBURSEMENT_SIGNED',
+  'PROJECT_APPROVED',
+  'KYC_EXPIRING',
+  'LARGE_DONATION',
+  'DISBURSEMENT_COMPLETED',
+  'MANUAL_REVIEW_ESCALATION',
+  'OVERRIDE_APPROVED',
+  'SBT_MINT_FAILED',
+  'SYSTEM'
+] as const;
+
+const ALL_CHANNELS = ['IN_APP', 'EMAIL', 'PUSH', 'SMS'] as const;
+
+export async function updateUserPreferences(
+  userId: string,
+  payload: {
+    globalEnabled?: boolean;
+    preferences?: NotificationPreferencesMap;
+  }
+): Promise<{
+  globalEnabled: boolean;
+  preferences: NotificationPreferencesMap;
+}> {
+  const updateFields: Record<string, unknown> = {};
+
+  if (typeof payload.globalEnabled === 'boolean') {
+    updateFields.globalEnabled = payload.globalEnabled;
+  }
+
+  if (payload.preferences !== undefined) {
+    for (const [notificationType, channels] of Object.entries(payload.preferences)) {
+      if (!ALL_NOTIFICATION_TYPES.includes(notificationType as typeof ALL_NOTIFICATION_TYPES[number])) {
+        throw new NotificationValidationError('INVALID_TYPE', `Loại thông báo không hợp lệ: ${notificationType}`);
+      }
+
+      if (channels && typeof channels === 'object') {
+        for (const channel of Object.keys(channels)) {
+          if (!ALL_CHANNELS.includes(channel as typeof ALL_CHANNELS[number])) {
+            throw new NotificationValidationError('INVALID_CHANNEL', `Kênh không hợp lệ: ${channel}`);
+          }
+        }
+      }
+    }
+    updateFields.preferences = payload.preferences;
+  }
+
+  const updated = await UserNotificationPreferenceModel.findOneAndUpdate(
+    { userId },
+    { $set: updateFields },
+    { upsert: true, returnDocument: 'after', runValidators: true }
+  ).lean().exec();
+
+  return {
+    globalEnabled: (updated as { globalEnabled: boolean }).globalEnabled,
+    preferences: (updated as { preferences: NotificationPreferencesMap }).preferences
+  };
+}
+
+/**
+ * Xóa 1 notification của user.
+ * Chỉ cho phép user xóa notification thuộc về mình (IDOR prevention).
+ *
+ * @param notificationId ID của notification cần xóa
+ * @param userId ID của user (từ auth context)
+ * @returns true nếu đã xóa, false nếu không tìm thấy hoặc không thuộc user
+ */
+export async function deleteUserNotification(notificationId: string, userId: string): Promise<boolean> {
+  const result = await NotificationModel.deleteOne({ notificationId, userId }).exec();
+  return result.deletedCount > 0;
+}
+
+/**
+ * Lấy số notification chưa đọc của user.
+ * Dùng cho badge count trên notification bell icon.
+ *
+ * @param userId ID của người dùng
+ * @returns Số lượng notification chưa đọc
+ */
+export async function getUnreadCount(userId: string): Promise<number> {
+  const count = await NotificationModel.countDocuments({
+    userId,
+    notificationType: { $in: VISIBLE_NOTIFICATION_TYPES },
+    isRead: false
+  }).exec();
+  return count;
 }
 
 /**
@@ -412,6 +538,7 @@ export async function processUnsubscribe(token: string): Promise<boolean> {
   const pref = await UserNotificationPreferenceModel.findOne({ unsubscribeToken: token });
   if (!pref) return false;
   pref.globalEnabled = false;
+  pref.unsubscribeToken = null;
   await pref.save();
   return true;
 }
