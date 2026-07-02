@@ -64,7 +64,11 @@ export type ApplicationErrorCode =
   | 'TOTAL_AMOUNT_EXCEEDED'
   | 'PENDING_DONATION_EXISTS'
   | 'DECRYPTION_ERROR'
-  | 'TRANSACTION_FAILED';
+  | 'TRANSACTION_FAILED'
+  | 'BATCH_SIZE_EXCEEDED'
+  | 'FILE_TOO_LARGE'
+  | 'INVALID_CSV_FORMAT'
+  | 'PAYLOAD_MUST_BE_ARRAY';
 
 /**
  * Hàm lớp lỗi nghiệp vụ dùng chung.

@@ -19,9 +19,11 @@ import { createGuestRoutes } from './routes/guestRoutes';
 import { createPayosWebhookRoutes } from './routes/webhooks/payos.webhook';
 import { createTransparencyRoutes } from './routes/transparencyRoutes';
 import { createVerificationRoutes } from './routes/verification.routes';
+import { createFeedbackRoutes } from './routes/feedback.routes';
 import { validateGuestJwtConfig } from './config/guestJsonWebToken';
 import { applySeoAndCacheHeaders } from './middleware/seoCacheMiddleware';
 import { API_GUEST_PREFIX } from './config/apiPrefixes';
+import { getLogger } from './config/logger';
 
 const application = express();
 
@@ -114,10 +116,34 @@ function registerRoutes(): void {
   application.use('/api/webhooks/payos', createPayosWebhookRoutes());
   application.use('/api/transparency', createTransparencyRoutes());
   application.use('/api/transparency', createVerificationRoutes());
+  application.use('/api/feedback', createFeedbackRoutes());
   application.use(API_GUEST_PREFIX, createGuestRoutes());
 }
 
 configureMiddlewares();
 registerRoutes();
+
+/**
+ * Global error handler phải được đăng ký SAU tất cả routes.
+ * Express 4 không handle async errors nếu không có error handler này.
+ * Nếu không có error handler, unhandled promise rejection trong route handlers
+ * sẽ crash process mà không trả về response cho client.
+ */
+application.use((err: Error, _req: Request, res: Response, _next: NextFunction): void => {
+  const logger = getLogger();
+  logger.error('Unhandled error in request', {
+    errorMessage: err.message,
+    errorStack: err.stack
+  });
+
+  // Không leak stack trace ở production
+  const isDevelopment = process.env.NODE_ENV === 'development';
+  res.status(500).json({
+    success: false,
+    message: 'Đã xảy ra lỗi nội bộ. Vui lòng thử lại sau.',
+    errorCode: 'INTERNAL_ERROR',
+    details: isDevelopment && err.stack ? [{ field: 'stack', message: err.stack }] : []
+  });
+});
 
 export default application;

@@ -105,6 +105,8 @@ type LogMetadata = {
   riskScore?: number;
   trustMultiplier?: number;
   newPaymasterType?: string;
+  successCount?: number;
+  flaggedCount?: number;
   chainId?: number;
   token?: string;
   status?: string | number;
@@ -198,6 +200,8 @@ type LogMetadata = {
   types?: string | string[];
   rowCount?: number;
   maxRows?: number;
+  // F1 — batch feedback upload
+  inputType?: string;
   // SBT Auto-Mint (C2)
   sbtId?: string;
   mintRequestId?: string;
@@ -257,6 +261,7 @@ type LogMetadata = {
   oldBlock?: number;
   fromBlock?: number;
   toBlock?: number;
+  batchContentHash?: string;
 };
 
 
