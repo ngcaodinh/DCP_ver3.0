@@ -259,6 +259,7 @@ type LogMetadata = {
   oldBlock?: number;
   fromBlock?: number;
   toBlock?: number;
+  batchContentHash?: string;
 };
 
 

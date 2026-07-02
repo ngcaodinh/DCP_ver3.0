@@ -43,6 +43,8 @@ export interface BatchFeedbackResult {
   failed: number;
   errors: Array<{ rowNumber: number; reason: string }>;
   flaggedCount: number;
+  isDuplicate?: boolean;
+  duplicateOfBatchContentHash?: string;
 }
 
 /**
@@ -66,13 +68,27 @@ export function hashBeneficiaryName(beneficiaryName: string): string {
 }
 
 /**
+ * Strip UTF-8 BOM prefix from buffer to prevent column name corruption.
+ * BOM (U+FEFF) at the start of a CSV can cause the first column header
+ * to include the invisible BOM character, breaking validation for all rows.
+ */
+function stripBom(buffer: Buffer): Buffer {
+  // UTF-8 BOM is 3 bytes: 0xEF 0xBB 0xBF
+  if (buffer.length >= 3 && buffer[0] === 0xEF && buffer[1] === 0xBB && buffer[2] === 0xBF) {
+    return buffer.subarray(3);
+  }
+  return buffer;
+}
+
+/**
  * Parse CSV buffer thành mảng objects.
  * @param csvBuffer Buffer chứa nội dung CSV
  * @returns Mảng objects từ CSV
  */
 export function parseCsvBuffer(csvBuffer: Buffer): unknown[] {
   try {
-    const records = parse(csvBuffer.toString('utf-8'), {
+    const cleanBuffer = stripBom(csvBuffer);
+    const records = parse(cleanBuffer.toString('utf-8'), {
       columns: true,
       skip_empty_lines: true,
       trim: true,
@@ -131,7 +147,8 @@ function processFeedbackRows(rows: unknown[]): {
  */
 async function saveBatchFeedback(
   feedbacks: ProcessedFeedbackRow[],
-  uploadedByOrganizationId: string
+  uploadedByOrganizationId: string,
+  batchContentHash: string
 ): Promise<number> {
   if (feedbacks.length === 0) {
     return 0;
@@ -149,12 +166,25 @@ async function saveBatchFeedback(
       location: row.data.location,
       riskScore: row.riskScore,
       isFlagged: row.isFlagged,
-      uploadedByOrganizationId
+      uploadedByOrganizationId,
+      batchContentHash
     };
   });
 
   await BeneficiaryFeedbackModel.insertMany(documents, { ordered: false });
   return documents.length;
+}
+
+/**
+ * Compute SHA-256 hash of batch content for idempotency deduplication.
+ * @param content Buffer (CSV) or unknown[] (JSON) to hash
+ * @returns Hex string of SHA-256 hash
+ */
+function computeBatchContentHash(content: Buffer | unknown[]): string {
+  const rawContent = Buffer.isBuffer(content)
+    ? content.toString('utf-8')
+    : JSON.stringify(content);
+  return crypto.createHash('sha256').update(rawContent).digest('hex');
 }
 
 /**
@@ -177,7 +207,8 @@ export async function processCsvBatchFeedback(
     throw new Error('Batch size exceeds 1000 limit');
   }
 
-  return processBatch(rows, uploadedByOrganizationId);
+  const batchContentHash = computeBatchContentHash(csvBuffer);
+  return processBatch(rows, uploadedByOrganizationId, batchContentHash);
 }
 
 /**
@@ -198,26 +229,50 @@ export async function processJsonBatchFeedback(
     throw new Error('Batch size exceeds 1000 limit');
   }
 
-  return processBatch(jsonPayload, uploadedByOrganizationId);
+  const batchContentHash = computeBatchContentHash(jsonPayload);
+  return processBatch(jsonPayload, uploadedByOrganizationId, batchContentHash);
 }
 
 /**
  * Xử lý batch feedback chung.
  * @param rows Mảng dòng feedback
  * @param uploadedByOrganizationId ID của NGO upload
+ * @param batchContentHash Hash nội dung batch cho idempotency
  * @returns Kết quả xử lý batch
  */
 async function processBatch(
   rows: unknown[],
-  uploadedByOrganizationId: string
+  uploadedByOrganizationId: string,
+  batchContentHash: string
 ): Promise<BatchFeedbackResult> {
+  // Kiểm tra duplicate: nếu batch với cùng hash đã được upload bởi cùng org
+  const existingBatch = await BeneficiaryFeedbackModel.findOne({
+    uploadedByOrganizationId,
+    batchContentHash
+  }).select('feedbackId').lean();
+
+  if (existingBatch) {
+    logger.warn('Duplicate batch upload detected', {
+      organizationId: uploadedByOrganizationId,
+      batchContentHash
+    });
+    return {
+      success: 0,
+      failed: 0,
+      errors: [],
+      flaggedCount: 0,
+      isDuplicate: true,
+      duplicateOfBatchContentHash: batchContentHash
+    };
+  }
+
   const { processedRows, validationErrors } = processFeedbackRows(rows);
 
   let savedCount = 0;
   let flaggedCount = 0;
 
   if (processedRows.length > 0) {
-    savedCount = await saveBatchFeedback(processedRows, uploadedByOrganizationId);
+    savedCount = await saveBatchFeedback(processedRows, uploadedByOrganizationId, batchContentHash);
     flaggedCount = processedRows.filter((r) => r.isFlagged).length;
 
     logger.info('Batch feedback processed', {

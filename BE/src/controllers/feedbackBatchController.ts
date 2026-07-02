@@ -135,6 +135,22 @@ export async function batchUploadFeedbackController(
       });
     }
 
+    if (result.isDuplicate) {
+      sendSuccessResponse(
+        response,
+        200,
+        'Batch already submitted. Duplicate detected based on content hash.',
+        {
+          success: 0,
+          failed: 0,
+          errors: [],
+          flaggedCount: 0,
+          isDuplicate: true
+        }
+      );
+      return;
+    }
+
     sendSuccessResponse(
       response,
       200,

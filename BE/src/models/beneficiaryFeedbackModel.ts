@@ -25,6 +25,8 @@ export interface BeneficiaryFeedback {
   isFlagged: boolean;
   /** ID của NGO đã upload feedback này */
   uploadedByOrganizationId: string;
+  /** Hash nội dung batch để phát hiện duplicate uploads (idempotency) */
+  batchContentHash: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -82,6 +84,11 @@ const beneficiaryFeedbackSchema = new Schema<BeneficiaryFeedback>(
     uploadedByOrganizationId: {
       type: String,
       required: true,
+      index: true
+    },
+    batchContentHash: {
+      type: String,
+      required: false,
       index: true
     }
   },

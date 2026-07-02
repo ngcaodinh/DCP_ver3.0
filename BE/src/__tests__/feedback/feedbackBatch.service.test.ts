@@ -15,7 +15,12 @@ vi.mock('../../config/logger', () => ({
 
 vi.mock('../../models/beneficiaryFeedbackModel', () => ({
   BeneficiaryFeedbackModel: {
-    insertMany: vi.fn().mockResolvedValue([])
+    insertMany: vi.fn().mockResolvedValue([]),
+    findOne: vi.fn().mockReturnValue({
+      select: vi.fn().mockReturnValue({
+        lean: vi.fn().mockResolvedValue(null)
+      })
+    })
   }
 }));
 
