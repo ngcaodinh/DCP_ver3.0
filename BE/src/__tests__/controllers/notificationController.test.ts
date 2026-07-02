@@ -1,6 +1,6 @@
 /**
  * Unit tests cho notificationController.ts — E3 Notification API Endpoints.
- * Test cac chuc nang moi: mark single read, delete, unread count, preferences.
+ * Test cac chuc nang: mark single read, delete, unread count, preferences, get list, unsubscribe, SSE stream.
  */
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { Response } from 'express';
@@ -102,6 +102,9 @@ import {
   markNotificationAsReadController,
   deleteNotificationController,
   getUnreadCountController,
+  getNotificationsController,
+  unsubscribeController,
+  streamNotificationsController,
   markAllNotificationsAsReadController,
   getNotificationPreferencesController,
   updateNotificationPreferencesController
@@ -437,6 +440,153 @@ describe('notificationController', () => {
       await getUnreadCountController(req, response);
 
       expect(statusMock).toHaveBeenCalledWith(401);
+    });
+  });
+
+  // ─── getNotificationsController ────────────────────────────────────────────────
+
+  describe('getNotificationsController', () => {
+    it('tra 200 voi danh sach thong bao', async () => {
+      const mockResult = {
+        notifications: [],
+        unreadCount: 0,
+        pagination: { page: 1, limit: 10, total: 0, totalPages: 0, hasNextPage: false }
+      };
+      const getUserNotificationsPaginated = vi.fn().mockResolvedValue(mockResult);
+      vi.mocked(await import('../../controllers/notificationController')).merge.mockResolvedValue({
+        ...vi.importedActual<typeof import('../../controllers/notificationController')>(),
+        getUserNotificationsPaginated
+      });
+
+      const req = buildMockRequest({ query: { page: '1', limit: '10' } });
+      const { response, jsonMock, statusMock } = buildMockResponse();
+
+      await getNotificationsController(req, response);
+
+      expect(statusMock).toHaveBeenCalledWith(200);
+      expect(jsonMock).toHaveBeenCalledWith(expect.objectContaining({
+        success: true,
+        data: mockResult
+      }));
+    });
+
+    it('tra 401 khi chua xac thuc', async () => {
+      const req = buildMockRequest({ authenticatedUser: undefined, query: {} });
+      const { response, statusMock } = buildMockResponse();
+
+      await getNotificationsController(req, response);
+
+      expect(statusMock).toHaveBeenCalledWith(401);
+    });
+
+    it('gioi han limit at 20 theo spec', async () => {
+      const getUserNotificationsPaginated = vi.fn().mockResolvedValue({
+        notifications: [],
+        unreadCount: 0,
+        pagination: { page: 1, limit: 20, total: 0, totalPages: 0, hasNextPage: false }
+      });
+      vi.mocked(await import('../../controllers/notificationController')).merge.mockResolvedValue({
+        ...vi.importedActual<typeof import('../../controllers/notificationController')>(),
+        getUserNotificationsPaginated
+      });
+
+      const req = buildMockRequest({ query: { limit: '100' } });
+      const { response, jsonMock } = buildMockResponse();
+
+      await getNotificationsController(req, response);
+
+      expect(jsonMock).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({
+          pagination: expect.objectContaining({ limit: 20 })
+        })
+      }));
+    });
+  });
+
+  // ─── unsubscribeController ────────────────────────────────────────────────────
+
+  describe('unsubscribeController', () => {
+    it('tra 400 khi token rong', async () => {
+      const req = { query: {} } as { query: { token?: string } };
+      const { response, jsonMock, statusMock } = buildMockResponse();
+
+      await unsubscribeController(req, response);
+
+      expect(statusMock).toHaveBeenCalledWith(400);
+      expect(jsonMock).toHaveBeenCalledWith(expect.objectContaining({
+        errorCode: 'INVALID_TOKEN'
+      }));
+    });
+
+    it('tra 400 khi token khong dung do dai', async () => {
+      const req = { query: { token: 'abc123' } } as { query: { token?: string } };
+      const { response, statusMock } = buildMockResponse();
+
+      await unsubscribeController(req, response);
+
+      expect(statusMock).toHaveBeenCalledWith(400);
+    });
+
+    it('tra 400 khi token khong dung dinh dang hex', async () => {
+      const req = { query: { token: 'INVALID'.padEnd(64, 'Z') } } as { query: { token?: string } };
+      const { response, statusMock } = buildMockResponse();
+
+      await unsubscribeController(req, response);
+
+      expect(statusMock).toHaveBeenCalledWith(400);
+    });
+
+    it('tra 404 khi token khong ton tai', async () => {
+      vi.mocked(processUnsubscribe).mockResolvedValue(false);
+
+      const req = { query: { token: 'a'.repeat(64) } } as { query: { token?: string } };
+      const { response, jsonMock, statusMock } = buildMockResponse();
+
+      await unsubscribeController(req, response);
+
+      expect(statusMock).toHaveBeenCalledWith(404);
+      expect(jsonMock).toHaveBeenCalledWith(expect.objectContaining({
+        errorCode: 'TOKEN_NOT_FOUND'
+      }));
+    });
+
+    it('tra 200 khi unsubscribe thanh cong', async () => {
+      vi.mocked(processUnsubscribe).mockResolvedValue(true);
+
+      const req = { query: { token: 'a'.repeat(64) } } as { query: { token?: string } };
+      const { response, jsonMock, statusMock } = buildMockResponse();
+
+      await unsubscribeController(req, response);
+
+      expect(statusMock).toHaveBeenCalledWith(200);
+      expect(jsonMock).toHaveBeenCalledWith(expect.objectContaining({
+        success: true,
+        data: { unsubscribed: true }
+      }));
+    });
+  });
+
+  // ─── streamNotificationsController ───────────────────────────────────────────
+
+  describe('streamNotificationsController', () => {
+    it('tra 401 khi chua xac thuc', async () => {
+      const req = buildMockRequest({ authenticatedUser: undefined }) as unknown as Parameters<typeof streamNotificationsController>[0];
+      const { response, statusMock } = buildMockResponse();
+
+      await streamNotificationsController(req, response);
+
+      expect(statusMock).toHaveBeenCalledWith(401);
+    });
+
+    it('setHeader SSE headers', async () => {
+      const req = buildMockRequest() as unknown as Parameters<typeof streamNotificationsController>[0];
+      const { response } = buildMockResponse();
+
+      await streamNotificationsController(req, response);
+
+      expect(response.setHeader).toHaveBeenCalledWith('Content-Type', 'text/event-stream');
+      expect(response.setHeader).toHaveBeenCalledWith('Cache-Control', 'no-cache, no-transform');
+      expect(response.setHeader).toHaveBeenCalledWith('Connection', 'keep-alive');
     });
   });
 });

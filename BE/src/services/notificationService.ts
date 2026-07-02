@@ -330,8 +330,7 @@ export async function getUserPreferences(userId: string): Promise<{
     pref = await UserNotificationPreferenceModel.create({
       userId,
       preferences: {},
-      globalEnabled: true,
-      unsubscribeToken: undefined
+      globalEnabled: true
     });
     return { globalEnabled: pref.globalEnabled, preferences: pref.preferences };
   }

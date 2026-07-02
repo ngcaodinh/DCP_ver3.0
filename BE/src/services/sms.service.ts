@@ -189,6 +189,8 @@ function normalizePhoneNumber(phone: string): string | null {
   if (/^\d{8,15}$/.test(cleaned)) {
     return '+' + cleaned;
   }
+
+  return null;
 }
 
 /**
