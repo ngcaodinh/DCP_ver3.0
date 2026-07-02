@@ -193,7 +193,7 @@ describe('notificationController', () => {
     });
 
     it('tra 401 khi chua xac thuc', async () => {
-      const req = buildMockRequest({ authenticatedUser: null, params: { id: 'NOTI-123' } });
+      const req = buildMockRequest({ authenticatedUser: undefined, params: { id: 'NOTI-123' } });
       const { response, jsonMock, statusMock } = buildMockResponse();
 
       await markNotificationAsReadController(req, response);
@@ -227,7 +227,7 @@ describe('notificationController', () => {
     });
 
     it('tra 401 khi chua xac thuc', async () => {
-      const req = buildMockRequest({ authenticatedUser: null });
+      const req = buildMockRequest({ authenticatedUser: undefined });
       const { response, jsonMock, statusMock } = buildMockResponse();
 
       await getNotificationPreferencesController(req, response);
@@ -321,7 +321,7 @@ describe('notificationController', () => {
     });
 
     it('tra 401 khi chua xac thuc', async () => {
-      const req = buildMockRequest({ authenticatedUser: null, body: {} });
+      const req = buildMockRequest({ authenticatedUser: undefined, body: {} });
       const { response, jsonMock, statusMock } = buildMockResponse();
 
       await updateNotificationPreferencesController(req, response);
@@ -351,7 +351,7 @@ describe('notificationController', () => {
     });
 
     it('tra 401 khi chua xac thuc', async () => {
-      const req = buildMockRequest({ authenticatedUser: null });
+      const req = buildMockRequest({ authenticatedUser: undefined });
       const { response, jsonMock, statusMock } = buildMockResponse();
 
       await markAllNotificationsAsReadController(req, response);

@@ -3,7 +3,7 @@
  * Bao gồm: deleteUserNotification, getUnreadCount, markNotificationAsRead,
  * getUserPreferences, updateUserPreferences.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   deleteUserNotification,
   getUnreadCount,
@@ -215,9 +215,9 @@ describe('updateUserPreferences', () => {
   it('nem loi khi channel khong hop le', async () => {
     await expect(
       updateUserPreferences('user-1', {
-        preferences: { LARGE_DONATION: { FAX: true } }
+        preferences: { LARGE_DONATION: { PUSH: true } }
       })
-    ).rejects.toThrow('Kênh không hợp lệ: FAX');
+    ).rejects.toThrow('Kênh không hợp lệ: PUSH');
   });
 
   it('update preferences cu the khi hop le', async () => {
