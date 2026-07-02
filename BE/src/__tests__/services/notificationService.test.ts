@@ -213,11 +213,12 @@ describe('updateUserPreferences', () => {
   });
 
   it('nem loi khi channel khong hop le', async () => {
+    // Cast payload thành 'any' để inject channel không tồn tại trong literal type union
     await expect(
       updateUserPreferences('user-1', {
-        preferences: { LARGE_DONATION: { PUSH: true } }
-      })
-    ).rejects.toThrow('Kênh không hợp lệ: PUSH');
+        preferences: { LARGE_DONATION: { FAX: true } as unknown as { IN_APP?: boolean } }
+      } as Parameters<typeof updateUserPreferences>[1])
+    ).rejects.toThrow('Kênh không hợp lệ: FAX');
   });
 
   it('update preferences cu the khi hop le', async () => {

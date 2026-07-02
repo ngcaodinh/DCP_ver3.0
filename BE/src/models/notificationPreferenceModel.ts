@@ -25,6 +25,8 @@ export type UserNotificationPreference = {
   preferences: NotificationPreferencesMap;
   /** Master switch: nếu false → skip toàn bộ notification dù type nào. */
   globalEnabled: boolean;
+  /** Token để user hủy đăng ký notification qua link email (không cần login). */
+  unsubscribeToken?: string;
   createdAt: Date;
   updatedAt: Date;
 };

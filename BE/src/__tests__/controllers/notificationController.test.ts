@@ -103,7 +103,8 @@ import {
   getUserPreferences,
   updateUserPreferences,
   deleteUserNotification,
-  getUnreadCount
+  getUnreadCount,
+  processUnsubscribe
 } from '../../services/notificationService';
 
 import {
