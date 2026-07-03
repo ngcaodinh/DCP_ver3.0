@@ -14,6 +14,7 @@ import {
 import {
   computeRiskScore,
   shouldFlagFeedback,
+  analyzeFeedbackWithLocation,
   RISK_SCORE_AUTO_FLAG_THRESHOLD
 } from './feedbackSpamDetection.service';
 import {
@@ -22,6 +23,7 @@ import {
   InvalidCsvError,
   PayloadMustBeArrayError
 } from '../utils/feedbackBatchError';
+import { findGeofenceByProjectId } from '../models/projectGeofenceModel';
 
 const logger = getLogger();
 
@@ -161,11 +163,52 @@ export function parseCsvBuffer(csvBuffer: Buffer): unknown[] {
 }
 
 /**
+ * Fetch geofence context cho một danh sách projectId song song.
+ * Trả về Map để tra cứu O(1) trong loop xử lý feedback.
+ * Nếu geofence không tồn tại cho projectId nào → entry không có trong Map (lookup trả về undefined).
+ * 
+ * @param projectIds Danh sách projectId unique cần fetch geofence
+ * @returns Map<projectId, GeofenceContext>
+ */
+async function fetchGeofenceContexts(
+  projectIds: string[]
+): Promise<Map<string, { centroid: { lat: number; lng: number }; radiusMeters: number }>> {
+  if (projectIds.length === 0) {
+    return new Map();
+  }
+
+  // Promise.all thay vì sequential — tránh N round-trip latency
+  const geofences = await Promise.all(
+    projectIds.map((projectId) => findGeofenceByProjectId(projectId))
+  );
+
+  const geofenceByProjectId = new Map<
+    string,
+    { centroid: { lat: number; lng: number }; radiusMeters: number }
+  >();
+  for (let i = 0; i < projectIds.length; i++) {
+    const geofence = geofences[i];
+    if (geofence) {
+      geofenceByProjectId.set(projectIds[i], {
+        centroid: geofence.centroid,
+        radiusMeters: geofence.radiusMeters
+      });
+    }
+  }
+
+  return geofenceByProjectId;
+}
+
+/**
  * Validate và xử lý từng dòng feedback.
  * @param rows Mảng dòng feedback
+ * @param geofenceByProjectId Map geofence context theo projectId (đã pre-fetch) để tránh N+1 query.
  * @returns Kết quả phân tách valid/invalid
  */
-function processFeedbackRows(rows: unknown[]): {
+function processFeedbackRows(
+  rows: unknown[],
+  geofenceByProjectId: Map<string, { centroid: { lat: number; lng: number }; radiusMeters: number }>
+): {
   processedRows: ProcessedFeedbackRow[];
   validationErrors: Array<{ rowNumber: number; reason: string }>;
 } {
@@ -185,7 +228,18 @@ function processFeedbackRows(rows: unknown[]): {
     // Escape formula injection characters trong comment field
     const sanitizedData = sanitizeFeedbackRow(data);
     const beneficiaryNameHash = hashBeneficiaryName(sanitizedData.beneficiaryName);
-    const riskScore = computeRiskScore(sanitizedData.rating, sanitizedData.comment);
+
+    // F2.1: location mismatch check — lấy geofence từ cache đã pre-fetch.
+    // Nếu projectId chưa có geofence → cache miss → coi như không có geofence (location check bị skip).
+    const geofence = geofenceByProjectId.get(sanitizedData.projectId) ?? null;
+    const analysis = analyzeFeedbackWithLocation(
+      sanitizedData.rating,
+      sanitizedData.comment,
+      sanitizedData.location,
+      geofence
+    );
+
+    const riskScore = analysis.riskScore;
     const isFlagged = shouldFlagFeedback(riskScore);
 
     processedRows.push({
@@ -360,7 +414,18 @@ async function processBatch(
     };
   }
 
-  const { processedRows, validationErrors } = processFeedbackRows(rows);
+  // F2.1: pre-fetch geofence context cho tất cả projectId unique trong batch.
+  // Tránh N+1 query khi mỗi row cần kiểm tra location mismatch với project geofence.
+  // ProjectIds không tồn tại trong cache sẽ được coi là không có geofence (location check bị skip).
+  const uniqueProjectIds = Array.from(new Set(
+    rows
+      .filter((row): row is Record<string, unknown> => typeof row === 'object' && row !== null)
+      .map((row) => typeof row.projectId === 'string' ? row.projectId : null)
+      .filter((id): id is string => id !== null)
+  ));
+  const geofenceByProjectId = await fetchGeofenceContexts(uniqueProjectIds);
+
+  const { processedRows, validationErrors } = processFeedbackRows(rows, geofenceByProjectId);
 
   let savedCount = 0;
   let flaggedCount = 0;

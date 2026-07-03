@@ -228,6 +228,8 @@ export async function handleFlagFeedback(
 /**
  * Handler unflag một feedback.
  * Endpoint: POST /api/feedback/:id/unflag
+ * 
+ * Body: { reason: string (5-500 ký tự) } — bắt buộc cho audit trail.
  */
 export async function handleUnflagFeedback(
   request: AuthenticatedRequest,
@@ -245,12 +247,22 @@ export async function handleUnflagFeedback(
       return;
     }
 
-    // Unflag feedback
-    const updatedFeedback = await unflagFeedback(feedbackId, adminUserId);
+    const { reason } = request.body as { reason?: string };
 
+    // Validate reason presence trước khi gọi service (tránh throw không cần thiết).
+    if (!reason || typeof reason !== 'string' || reason.trim().length === 0) {
+      sendErrorResponse(response, 400, 'Lý do unflag là bắt buộc.', 'VALIDATION_ERROR');
+      return;
+    }
+
+    // Unflag feedback
+    const updatedFeedback = await unflagFeedback(feedbackId, adminUserId, reason);
+
+    // Log chỉ độ dài reason thay vì raw text để giảm risk log PII nhạy cảm.
     logger.info('Feedback unflagged', {
       feedbackId,
-      adminUserId
+      adminUserId,
+      reasonLength: reason.trim().length
     });
 
     sendSuccessResponse(
@@ -264,6 +276,11 @@ export async function handleUnflagFeedback(
     );
   } catch (error: unknown) {
     if (error instanceof FeedbackNotFoundError) {
+      sendErrorResponse(response, error.statusCode, error.message, error.errorCode);
+      return;
+    }
+
+    if (error instanceof FlagValidationError) {
       sendErrorResponse(response, error.statusCode, error.message, error.errorCode);
       return;
     }

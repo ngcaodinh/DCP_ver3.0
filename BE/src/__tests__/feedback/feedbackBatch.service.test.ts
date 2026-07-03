@@ -24,6 +24,12 @@ vi.mock('../../models/beneficiaryFeedbackModel', () => ({
   }
 }));
 
+// Mock geofence lookup để tránh gọi MongoDB thật trong tests.
+// Mặc định trả về null (project không có geofence) — các tests có thể override khi cần test location mismatch.
+vi.mock('../../models/projectGeofenceModel', () => ({
+  findGeofenceByProjectId: vi.fn().mockResolvedValue(null)
+}));
+
 // Import sau khi mock
 import {
   hashBeneficiaryName,

@@ -357,11 +357,11 @@ describe('feedbackFlagging.service', () => {
     it('nên set isFlagged=false khi unflag', async () => {
       const findOneChain = createFindOneChain(flaggedFeedback);
       mockFindOne.mockReturnValue(findOneChain);
-      
+
       const updateChain = createFindOneAndUpdateChain(unflaggedFeedback);
       mockFindOneAndUpdate.mockReturnValue(updateChain);
 
-      const result = await unflagFeedback('fb001', 'admin2');
+      const result = await unflagFeedback('fb001', 'admin2', 'Manual review by admin - legitimate feedback');
 
       expect(result.isFlagged).toBe(false);
     });
@@ -369,11 +369,11 @@ describe('feedbackFlagging.service', () => {
     it('nên thêm flagHistory entry với action=unflagged', async () => {
       const findOneChain = createFindOneChain(flaggedFeedback);
       mockFindOne.mockReturnValue(findOneChain);
-      
+
       const updateChain = createFindOneAndUpdateChain(unflaggedFeedback);
       mockFindOneAndUpdate.mockReturnValue(updateChain);
 
-      await unflagFeedback('fb001', 'admin2');
+      await unflagFeedback('fb001', 'admin2', 'Manual review by admin - legitimate feedback');
 
       expect(mockFindOneAndUpdate).toHaveBeenCalledWith(
         { feedbackId: 'fb001' },
@@ -383,6 +383,7 @@ describe('feedbackFlagging.service', () => {
               $each: expect.arrayContaining([
                 expect.objectContaining({
                   action: 'unflagged',
+                  reason: 'Manual review by admin - legitimate feedback',
                   previousFlaggedState: true
                 })
               ]),
@@ -398,9 +399,28 @@ describe('feedbackFlagging.service', () => {
       const findOneChain = createFindOneChain(null);
       mockFindOne.mockReturnValue(findOneChain);
 
-      await expect(unflagFeedback('nonexistent', 'admin1'))
+      await expect(unflagFeedback('nonexistent', 'admin1', 'Test unflag reason'))
         .rejects
         .toThrow(FeedbackNotFoundError);
+    });
+
+    it('nên ném FlagValidationError khi reason < 5 ký tự', async () => {
+      await expect(unflagFeedback('fb001', 'admin1', 'abc'))
+        .rejects
+        .toThrow(FlagValidationError);
+    });
+
+    it('nên ném FlagValidationError khi reason > 500 ký tự', async () => {
+      const longReason = 'a'.repeat(501);
+      await expect(unflagFeedback('fb001', 'admin1', longReason))
+        .rejects
+        .toThrow(FlagValidationError);
+    });
+
+    it('nên ném FlagValidationError khi reason là undefined', async () => {
+      await expect(unflagFeedback('fb001', 'admin1', undefined as unknown as string))
+        .rejects
+        .toThrow(FlagValidationError);
     });
   });
 

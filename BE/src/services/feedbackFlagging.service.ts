@@ -134,24 +134,24 @@ async function findFeedbackById(feedbackId: string): Promise<BeneficiaryFeedback
 }
 
 /**
- * Validate reason string.
+ * Validate reason string cho flag và unflag.
  * 
  * @param reason Lý do cần validate
  * @throws FlagValidationError nếu không hợp lệ
  */
 function validateReason(reason: string | undefined): void {
   if (!reason || typeof reason !== 'string') {
-    throw new FlagValidationError('Lý do flag là bắt buộc.');
+    throw new FlagValidationError('Lý do là bắt buộc.');
   }
 
   const trimmedReason = reason.trim();
 
   if (trimmedReason.length < 5) {
-    throw new FlagValidationError('Lý do flag phải có ít nhất 5 ký tự.');
+    throw new FlagValidationError('Lý do phải có ít nhất 5 ký tự.');
   }
 
   if (trimmedReason.length > 500) {
-    throw new FlagValidationError('Lý do flag không được vượt quá 500 ký tự.');
+    throw new FlagValidationError('Lý do không được vượt quá 500 ký tự.');
   }
 }
 
@@ -222,16 +222,23 @@ export async function flagFeedbackManually(
 
 /**
  * Admin unflag một feedback.
+ * Unflag bắt buộc phải có lý do để audit trail — vì unflag có thể bị lạm dụng để "tha" cho spam đã được auto-detect.
  * 
  * @param feedbackId ID của feedback cần unflag
  * @param adminUserId User ID của admin thực hiện
+ * @param reason Lý do unflag (5-500 ký tự)
  * @returns Feedback đã được update
  * @throws FeedbackNotFoundError nếu feedback không tồn tại
+ * @throws FlagValidationError nếu reason không hợp lệ
  */
 export async function unflagFeedback(
   feedbackId: string,
-  adminUserId: string
+  adminUserId: string,
+  reason: string
 ): Promise<BeneficiaryFeedback> {
+  // Validate inputs
+  validateReason(reason);
+
   // Tìm feedback hiện tại
   const currentFeedback = await findFeedbackById(feedbackId);
 
@@ -241,7 +248,7 @@ export async function unflagFeedback(
   // Tạo flag history entry
   const flagHistoryEntry: FlagHistoryEntry = {
     action: 'unflagged',
-    reason: 'Manual unflag by admin',
+    reason: reason.trim(),
     performedBy: adminUserId,
     performedAt: new Date(),
     previousFlaggedState

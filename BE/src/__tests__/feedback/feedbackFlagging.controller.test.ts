@@ -389,7 +389,8 @@ describe('feedbackFlaggingController', () => {
       (unflagFeedback as ReturnType<typeof vi.fn>).mockResolvedValueOnce(updatedFeedback);
 
       mockRequest = createAuthenticatedRequest({
-        params: { id: 'fb001' }
+        params: { id: 'fb001' },
+        body: { reason: 'Manual review by admin - legitimate feedback' }
       });
 
       await handleUnflagFeedback(
@@ -414,7 +415,8 @@ describe('feedbackFlaggingController', () => {
       );
 
       mockRequest = createAuthenticatedRequest({
-        params: { id: 'nonexistent' }
+        params: { id: 'nonexistent' },
+        body: { reason: 'Test unflag reason' }
       });
 
       await handleUnflagFeedback(
@@ -427,7 +429,59 @@ describe('feedbackFlaggingController', () => {
 
     it('nên return 400 khi feedbackId không được cung cấp', async () => {
       mockRequest = createAuthenticatedRequest({
-        params: {}
+        params: {},
+        body: { reason: 'Test unflag reason' }
+      });
+
+      await handleUnflagFeedback(
+        mockRequest as AuthenticatedRequest,
+        mockResponse as Response
+      );
+
+      expect(mockStatus).toHaveBeenCalledWith(400);
+    });
+
+    it('nên return 400 khi reason không được cung cấp', async () => {
+      mockRequest = createAuthenticatedRequest({
+        params: { id: 'fb001' },
+        body: {}
+      });
+
+      await handleUnflagFeedback(
+        mockRequest as AuthenticatedRequest,
+        mockResponse as Response
+      );
+
+      expect(mockStatus).toHaveBeenCalledWith(400);
+      expect(mockJson).toHaveBeenCalledWith(expect.objectContaining({
+        success: false,
+        message: expect.stringContaining('bắt buộc')
+      }));
+    });
+
+    it('nên return 400 khi reason là empty/whitespace', async () => {
+      mockRequest = createAuthenticatedRequest({
+        params: { id: 'fb001' },
+        body: { reason: '   ' }
+      });
+
+      await handleUnflagFeedback(
+        mockRequest as AuthenticatedRequest,
+        mockResponse as Response
+      );
+
+      expect(mockStatus).toHaveBeenCalledWith(400);
+    });
+
+    it('nên return 400 khi reason quá ngắn (service throws FlagValidationError)', async () => {
+      const { FlagValidationError } = await import('../../services/feedbackFlagging.service');
+      (unflagFeedback as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new FlagValidationError('Lý do phải có ít nhất 5 ký tự.')
+      );
+
+      mockRequest = createAuthenticatedRequest({
+        params: { id: 'fb001' },
+        body: { reason: 'abc' }
       });
 
       await handleUnflagFeedback(
