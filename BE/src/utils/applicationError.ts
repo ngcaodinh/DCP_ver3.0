@@ -68,7 +68,8 @@ export type ApplicationErrorCode =
   | 'BATCH_SIZE_EXCEEDED'
   | 'FILE_TOO_LARGE'
   | 'INVALID_CSV_FORMAT'
-  | 'PAYLOAD_MUST_BE_ARRAY';
+  | 'PAYLOAD_MUST_BE_ARRAY'
+  | 'FEEDBACK_NOT_FOUND';
 
 /**
  * Hàm lớp lỗi nghiệp vụ dùng chung.

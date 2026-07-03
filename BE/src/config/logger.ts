@@ -262,6 +262,14 @@ type LogMetadata = {
   fromBlock?: number;
   toBlock?: number;
   batchContentHash?: string;
+  // F2 — feedback flagging
+  adminUserId?: string;
+  feedbackId?: string;
+  flaggedFeedbackId?: string;
+  reasonLength?: number;
+  page?: number;
+  limit?: number;
+  total?: number;
 };
 
 

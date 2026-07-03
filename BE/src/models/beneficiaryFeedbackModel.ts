@@ -23,12 +23,36 @@ export interface BeneficiaryFeedback {
   riskScore: number;
   /** Đã bị flag là spam tiềm năng hay chưa */
   isFlagged: boolean;
+  /** Lý do flag (từ spam detection hoặc admin) */
+  flagReason?: string;
+  /** Thời điểm được flag */
+  flaggedAt?: Date;
+  /** User ID của admin đã flag (cho admin actions) */
+  flaggedBy?: string;
+  /** Lịch sử các hành động flag/unflag */
+  flagHistory?: FlagHistoryEntry[];
   /** ID của NGO đã upload feedback này */
   uploadedByOrganizationId: string;
   /** Hash nội dung batch để phát hiện duplicate uploads (idempotency) */
   batchContentHash: string;
   createdAt: Date;
   updatedAt: Date;
+}
+
+/**
+ * Bản ghi lịch sử hành động flag/unflag.
+ */
+export interface FlagHistoryEntry {
+  /** Hành động thực hiện */
+  action: 'flagged' | 'unflagged';
+  /** Lý do hành động */
+  reason: string;
+  /** User ID của admin thực hiện */
+  performedBy: string;
+  /** Thời điểm thực hiện */
+  performedAt: Date;
+  /** Trạng thái flagged trước khi thực hiện hành động */
+  previousFlaggedState: boolean;
 }
 
 const beneficiaryFeedbackSchema = new Schema<BeneficiaryFeedback>(
@@ -81,6 +105,42 @@ const beneficiaryFeedbackSchema = new Schema<BeneficiaryFeedback>(
       default: false,
       index: true
     },
+    flagReason: {
+      type: String,
+      required: false
+    },
+    flaggedAt: {
+      type: Date,
+      required: false
+    },
+    flaggedBy: {
+      type: String,
+      required: false
+    },
+    flagHistory: [{
+      action: {
+        type: String,
+        enum: ['flagged', 'unflagged'],
+        required: true
+      },
+      reason: {
+        type: String,
+        required: true
+      },
+      performedBy: {
+        type: String,
+        required: true
+      },
+      performedAt: {
+        type: Date,
+        required: true,
+        default: Date.now
+      },
+      previousFlaggedState: {
+        type: Boolean,
+        required: true
+      }
+    }],
     uploadedByOrganizationId: {
       type: String,
       required: true,
@@ -102,6 +162,9 @@ const beneficiaryFeedbackSchema = new Schema<BeneficiaryFeedback>(
 beneficiaryFeedbackSchema.index({ projectId: 1, submittedAt: -1 });
 // Index cho việc tìm kiếm feedback đã flagged
 beneficiaryFeedbackSchema.index({ isFlagged: 1, riskScore: -1 });
+// Compound index hỗ trợ sort theo flaggedAt + createdAt trong admin listing.
+// Tránh in-memory sort khi admin sort theo thời điểm flag gần nhất.
+beneficiaryFeedbackSchema.index({ isFlagged: 1, flaggedAt: -1, createdAt: -1 });
 
 /**
  * Compound unique index cho idempotency check.

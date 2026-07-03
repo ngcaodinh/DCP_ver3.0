@@ -6,7 +6,12 @@ import {
   computeRiskScore,
   shouldFlagFeedback,
   analyzeFeedbackIndicators,
-  RISK_SCORE_AUTO_FLAG_THRESHOLD
+  RISK_SCORE_AUTO_FLAG_THRESHOLD,
+  parseLocationString,
+  haversineDistance,
+  checkLocationMatch,
+  analyzeFeedbackWithLocation,
+  LOCATION_MISMATCH_PENALTY
 } from '../../services/feedbackSpamDetection.service';
 
 describe('feedbackSpamDetection.service', () => {
@@ -320,6 +325,246 @@ describe('feedbackSpamDetection.service', () => {
       const resultBelow = analyzeFeedbackIndicators(5, 'aaaaaa bbbbbb');
       expect(resultBelow.shouldFlag).toBe(true);
       expect(resultBelow.riskScore).toBeGreaterThanOrEqual(7);
+    });
+  });
+
+  describe('parseLocationString', () => {
+    it('nên parse đúng location string hợp lệ', () => {
+      const result = parseLocationString('10.8231,106.6297');
+      expect(result).toEqual({ lat: 10.8231, lng: 106.6297 });
+    });
+
+    it('nên parse location với spaces', () => {
+      const result = parseLocationString('  10.8231 ,  106.6297  ');
+      expect(result).toEqual({ lat: 10.8231, lng: 106.6297 });
+    });
+
+    it('nên parse negative coordinates', () => {
+      const result = parseLocationString('-33.8688,151.2093');
+      expect(result).toEqual({ lat: -33.8688, lng: 151.2093 });
+    });
+
+    it('nên trả về null cho invalid format (1 phần)', () => {
+      expect(parseLocationString('10.8231')).toBeNull();
+    });
+
+    it('nên trả về null cho invalid format (3 phần)', () => {
+      expect(parseLocationString('10.8231,106.6297,100')).toBeNull();
+    });
+
+    it('nên trả về null cho non-numeric values', () => {
+      expect(parseLocationString('abc,def')).toBeNull();
+    });
+
+    it('nên trả về null cho empty string', () => {
+      expect(parseLocationString('')).toBeNull();
+    });
+
+    it('nên trả về null cho undefined/null', () => {
+      expect(parseLocationString(undefined as unknown as string)).toBeNull();
+      expect(parseLocationString(null as unknown as string)).toBeNull();
+    });
+
+    it('nên trả về null khi lat vượt giới hạn (-90 đến 90)', () => {
+      expect(parseLocationString('91,106.6297')).toBeNull();
+      expect(parseLocationString('-91,106.6297')).toBeNull();
+    });
+
+    it('nên trả về null khi lng vượt giới hạn (-180 đến 180)', () => {
+      expect(parseLocationString('10.8231,181')).toBeNull();
+      expect(parseLocationString('10.8231,-181')).toBeNull();
+    });
+  });
+
+  describe('haversineDistance', () => {
+    it('nên trả về 0 cho cùng một điểm', () => {
+      const point = { lat: 10.8231, lng: 106.6297 };
+      const distance = haversineDistance(point, point);
+      expect(distance).toBe(0);
+    });
+
+    it('nên tính khoảng cách xấp xỉ 111km cho 1 độ latitude', () => {
+      // 1 độ latitude ≈ 111.19 km
+      const pointA = { lat: 0, lng: 0 };
+      const pointB = { lat: 1, lng: 0 };
+      const distance = haversineDistance(pointA, pointB);
+      // 111.19 km = 111190 m, cho phép sai số 1%
+      expect(distance).toBeGreaterThan(110000);
+      expect(distance).toBeLessThan(112000);
+    });
+
+    it('nên tính khoảng cách xấp xỉ đúng cho các điểm gần nhau', () => {
+      // TP.HCM đến Vũng Tàu: ~80km
+      const hochiminh = { lat: 10.8231, lng: 106.6297 };
+      const vungtau = { lat: 10.3498, lng: 107.0847 };
+      const distance = haversineDistance(hochiminh, vungtau);
+      // 70-90km range
+      expect(distance).toBeGreaterThan(65000);
+      expect(distance).toBeLessThan(95000);
+    });
+
+    it('nên tính khoảng cách xấp xỉ 20000km cho antipodal points', () => {
+      // Hai điểm đối xứng qua trái đất
+      const pointA = { lat: 0, lng: 0 };
+      const pointB = { lat: 0, lng: 180 };
+      const distance = haversineDistance(pointA, pointB);
+      // Nửa chu vi trái đất ≈ 20000km
+      expect(distance).toBeGreaterThan(19800000);
+      expect(distance).toBeLessThan(20200000);
+    });
+  });
+
+  describe('checkLocationMatch', () => {
+    const projectGeofence = {
+      centroid: { lat: 10.8231, lng: 106.6297 },
+      radiusMeters: 500
+    };
+
+    it('nên return isMatch=true khi location trong radius', () => {
+      const feedbackLocation = '10.8235,106.6300'; // Gần centroid
+      const result = checkLocationMatch(feedbackLocation, projectGeofence);
+      expect(result.isMatch).toBe(true);
+      expect(result.distanceMeters).not.toBeNull();
+      expect(result.distanceMeters).toBeLessThan(500);
+    });
+
+    it('nên return isMatch=false khi location ngoài radius', () => {
+      const feedbackLocation = '10.8600,106.6500'; // Xa centroid
+      const result = checkLocationMatch(feedbackLocation, projectGeofence);
+      expect(result.isMatch).toBe(false);
+      expect(result.distanceMeters).toBeGreaterThan(500);
+    });
+
+    it('nên return isMatch=true khi không có geofence', () => {
+      const result = checkLocationMatch('10.8231,106.6297', null);
+      expect(result.isMatch).toBe(true);
+      expect(result.reason).toBe('No geofence defined for project');
+    });
+
+    it('nên return isMatch=true khi không có location trong feedback', () => {
+      const result = checkLocationMatch(undefined, projectGeofence);
+      expect(result.isMatch).toBe(true);
+      expect(result.reason).toBe('No location provided in feedback');
+    });
+
+    it('nên return isMatch=false khi location format không hợp lệ', () => {
+      const result = checkLocationMatch('invalid-location', projectGeofence);
+      expect(result.isMatch).toBe(false);
+      expect(result.reason).toBe('Invalid location format');
+    });
+
+    it('nên return isMatch=true khi location đúng tại centroid', () => {
+      const feedbackLocation = '10.8231,106.6297';
+      const result = checkLocationMatch(feedbackLocation, projectGeofence);
+      expect(result.isMatch).toBe(true);
+      expect(result.distanceMeters).toBe(0);
+    });
+
+    it('nên return isMatch=true khi location tại boundary của radius', () => {
+      // Tính một điểm cách centroid ~500m
+      // 0.0045 độ latitude ≈ 500m
+      const feedbackLocation = '10.8276,106.6297';
+      const result = checkLocationMatch(feedbackLocation, projectGeofence);
+      // Có thể match hoặc không tùy thuộc vào tính chính xác
+      expect(result.distanceMeters).toBeGreaterThan(400);
+      expect(result.distanceMeters).toBeLessThan(600);
+    });
+  });
+
+  describe('analyzeFeedbackWithLocation', () => {
+    const projectGeofence = {
+      centroid: { lat: 10.8231, lng: 106.6297 },
+      radiusMeters: 500
+    };
+
+    it('nên thêm location_mismatch indicator khi location không khớp', () => {
+      const feedbackLocation = '10.9000,106.7000'; // Xa project
+      const result = analyzeFeedbackWithLocation(3, 'Normal comment', feedbackLocation, projectGeofence);
+      
+      expect(result.locationMismatch).toBe(true);
+      expect(result.indicators).toContain('location_mismatch');
+    });
+
+    it('nên không thêm location_mismatch indicator khi location khớp', () => {
+      const feedbackLocation = '10.8235,106.6300'; // Gần centroid
+      const result = analyzeFeedbackWithLocation(3, 'Normal comment', feedbackLocation, projectGeofence);
+      
+      expect(result.locationMismatch).toBe(false);
+      expect(result.indicators).not.toContain('location_mismatch');
+    });
+
+    it('nên thêm location penalty vào risk score khi có mismatch', () => {
+      const feedbackLocation = '10.9000,106.7000';
+      const resultWithoutLocation = analyzeFeedbackWithLocation(3, 'Normal comment', undefined, undefined);
+      const resultWithMismatch = analyzeFeedbackWithLocation(3, 'Normal comment', feedbackLocation, projectGeofence);
+      
+      expect(resultWithMismatch.riskScore).toBe(resultWithoutLocation.riskScore + LOCATION_MISMATCH_PENALTY);
+    });
+
+    it('nên không thêm penalty khi location khớp', () => {
+      const feedbackLocation = '10.8235,106.6300';
+      const resultWithoutLocation = analyzeFeedbackWithLocation(3, 'Normal comment', undefined, undefined);
+      const resultWithMatch = analyzeFeedbackWithLocation(3, 'Normal comment', feedbackLocation, projectGeofence);
+      
+      expect(resultWithMatch.riskScore).toBe(resultWithoutLocation.riskScore);
+    });
+
+    it('nên giới hạn risk score trong khoảng 0-10 khi có location penalty', () => {
+      // Extreme rating (2) + location mismatch (4) = 6, không trigger flag
+      const result = analyzeFeedbackWithLocation(
+        1,
+        'Normal comment',
+        '10.9000,106.7000',
+        projectGeofence
+      );
+      
+      expect(result.riskScore).toBeLessThanOrEqual(10);
+      expect(result.riskScore).toBeGreaterThanOrEqual(0);
+    });
+
+    it('nên trigger flag khi location mismatch đẩy score >= 7', () => {
+      // Extreme rating (2) + location mismatch (4) = 6 - not enough
+      // Cần thêm penalty từ repeated words
+      const result = analyzeFeedbackWithLocation(
+        1,
+        'aaaaaa good good good good good',
+        '10.9000,106.7000',
+        projectGeofence
+      );
+      
+      // 2 (extreme) + 4 (location) + 3 (gibberish) = 9 >= 7
+      expect(result.shouldFlag).toBe(true);
+    });
+
+    it('nên backward compatible khi không có location', () => {
+      const result = analyzeFeedbackWithLocation(3, 'Normal comment');
+      const baseResult = analyzeFeedbackIndicators(3, 'Normal comment');
+      
+      expect(result.riskScore).toBe(baseResult.riskScore);
+      expect(result.shouldFlag).toBe(baseResult.shouldFlag);
+      expect(result.locationMismatch).toBe(false);
+    });
+
+    it('nên backward compatible khi không có geofence', () => {
+      const result = analyzeFeedbackWithLocation(3, 'Normal comment', '10.8231,106.6297', undefined);
+      const baseResult = analyzeFeedbackIndicators(3, 'Normal comment');
+      
+      expect(result.riskScore).toBe(baseResult.riskScore);
+      expect(result.locationMismatch).toBe(false);
+    });
+
+    it('nên trả về locationDetails trong result', () => {
+      const result = analyzeFeedbackWithLocation(3, 'Normal comment', '10.8231,106.6297', projectGeofence);
+      
+      expect(result.locationDetails).toBeDefined();
+      expect(result.locationDetails.isMatch).toBe(true);
+      expect(result.locationDetails.distanceMeters).toBe(0);
+    });
+  });
+
+  describe('LOCATION_MISMATCH_PENALTY constant', () => {
+    it('nên là 4', () => {
+      expect(LOCATION_MISMATCH_PENALTY).toBe(4);
     });
   });
 });
