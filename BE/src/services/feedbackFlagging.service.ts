@@ -31,6 +31,16 @@ export class FlagValidationError extends ApplicationError {
 }
 
 /**
+ * Lỗi khi user không có quyền thực hiện action.
+ */
+export class AuthorizationError extends ApplicationError {
+  constructor(message: string) {
+    super(message, 403, 'FORBIDDEN');
+    this.name = 'AuthorizationError';
+  }
+}
+
+/**
  * Query options cho việc lấy danh sách flagged feedback.
  */
 export interface GetFlaggedFeedbackOptions {
@@ -226,16 +236,24 @@ export async function flagFeedbackManually(
  * 
  * @param feedbackId ID của feedback cần unflag
  * @param adminUserId User ID của admin thực hiện
+ * @param adminRole Vai trò của admin (phải là 'ADMIN')
  * @param reason Lý do unflag (5-500 ký tự)
  * @returns Feedback đã được update
+ * @throws AuthorizationError nếu không có quyền ADMIN
  * @throws FeedbackNotFoundError nếu feedback không tồn tại
  * @throws FlagValidationError nếu reason không hợp lệ
  */
 export async function unflagFeedback(
   feedbackId: string,
   adminUserId: string,
+  adminRole: string,
   reason: string
 ): Promise<BeneficiaryFeedback> {
+  // RBAC check tại service layer để prevent bypass từ worker/test/direct API calls.
+  if (adminRole !== 'ADMIN') {
+    throw new AuthorizationError('Chỉ admin mới có quyền unflag feedback.');
+  }
+
   // Validate inputs
   validateReason(reason);
 

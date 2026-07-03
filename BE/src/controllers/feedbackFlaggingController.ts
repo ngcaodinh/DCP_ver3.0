@@ -11,7 +11,8 @@ import {
   flagFeedbackManually,
   unflagFeedback,
   FeedbackNotFoundError,
-  FlagValidationError
+  FlagValidationError,
+  AuthorizationError
 } from '../services/feedbackFlagging.service';
 import { ApplicationError } from '../utils/applicationError';
 import { getLogger } from '../config/logger';
@@ -256,7 +257,7 @@ export async function handleUnflagFeedback(
     }
 
     // Unflag feedback
-    const updatedFeedback = await unflagFeedback(feedbackId, adminUserId, reason);
+    const updatedFeedback = await unflagFeedback(feedbackId, adminUserId, request.authenticatedUser.role, reason);
 
     // Log chỉ độ dài reason thay vì raw text để giảm risk log PII nhạy cảm.
     logger.info('Feedback unflagged', {
@@ -285,7 +286,7 @@ export async function handleUnflagFeedback(
       return;
     }
 
-    if (error instanceof ApplicationError) {
+    if (error instanceof AuthorizationError) {
       sendErrorResponse(response, error.statusCode, error.message, error.errorCode);
       return;
     }

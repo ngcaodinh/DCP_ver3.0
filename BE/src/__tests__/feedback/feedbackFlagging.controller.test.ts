@@ -33,6 +33,14 @@ vi.mock('../../services/feedbackFlagging.service', () => ({
       super(message);
       this.name = 'FlagValidationError';
     }
+  },
+  AuthorizationError: class AuthorizationError extends Error {
+    statusCode = 403;
+    errorCode = 'FORBIDDEN';
+    constructor(message: string) {
+      super(message);
+      this.name = 'AuthorizationError';
+    }
   }
 }));
 
@@ -494,6 +502,26 @@ describe('feedbackFlaggingController', () => {
       );
 
       expect(mockStatus).toHaveBeenCalledWith(400);
+    });
+
+    it('nên return 403 khi user role không phải ADMIN (service throws AuthorizationError)', async () => {
+      const { AuthorizationError } = await import('../../services/feedbackFlagging.service');
+      (unflagFeedback as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new AuthorizationError('Chỉ admin mới có quyền unflag feedback.')
+      );
+
+      mockRequest = createAuthenticatedRequest({
+        authenticatedUser: { userId: 'user123', role: 'USER' },
+        params: { id: 'fb001' },
+        body: { reason: 'Test reason' }
+      });
+
+      await handleUnflagFeedback(
+        mockRequest as AuthenticatedRequest,
+        mockResponse as Response
+      );
+
+      expect(mockStatus).toHaveBeenCalledWith(403);
     });
   });
 });
