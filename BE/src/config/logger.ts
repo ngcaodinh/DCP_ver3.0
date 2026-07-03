@@ -52,6 +52,11 @@ function redactSensitiveData(metadata?: Record<string, unknown>): Record<string,
     redacted.guestWalletAddress = `${redacted.guestWalletAddress.substring(0, 6)}...[REDACTED]`;
   }
 
+  // Redact feedback ID - có thể dùng để track feedback trong logs
+  if (redacted.feedbackId && typeof redacted.feedbackId === 'string') {
+    redacted.feedbackId = '[FEEDBACK_ID_REDACTED]';
+  }
+
   return redacted;
 }
 

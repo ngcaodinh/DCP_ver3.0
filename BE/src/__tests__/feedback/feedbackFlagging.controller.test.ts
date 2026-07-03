@@ -252,11 +252,12 @@ describe('feedbackFlaggingController', () => {
 
   describe('handleFlagFeedback - functionality', () => {
     it('nên return 200 khi flag thành công', async () => {
+      const flaggedAt = new Date();
       const updatedFeedback = {
         feedbackId: 'fb001',
         isFlagged: true,
         flagReason: 'Manual flag',
-        flaggedAt: new Date(),
+        flaggedAt: flaggedAt,
         flaggedBy: 'admin123'
       };
 
@@ -277,7 +278,10 @@ describe('feedbackFlaggingController', () => {
         success: true,
         data: expect.objectContaining({
           feedbackId: 'fb001',
-          isFlagged: true
+          isFlagged: true,
+          flagReason: 'Manual flag',
+          flaggedAt: expect.any(Date),
+          flaggedBy: 'admin123'
         })
       }));
     });

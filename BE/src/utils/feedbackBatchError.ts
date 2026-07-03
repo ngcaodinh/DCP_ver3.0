@@ -51,8 +51,21 @@ export class PayloadMustBeArrayError extends ApplicationError {
  * @returns true nếu là FeedbackBatch error
  */
 export function isFeedbackBatchError(error: unknown): boolean {
-  return error instanceof BatchSizeExceededError
+  // Check by class instanceof cho F1 errors
+  if (error instanceof BatchSizeExceededError
     || error instanceof FileTooLargeError
     || error instanceof InvalidCsvError
-    || error instanceof PayloadMustBeArrayError;
+    || error instanceof PayloadMustBeArrayError) {
+    return true;
+  }
+
+  // Check by errorCode string cho F2 errors (tránh circular import)
+  // FeedbackNotFoundError: errorCode = 'FEEDBACK_NOT_FOUND'
+  // FlagValidationError: errorCode = 'VALIDATION_ERROR'
+  if (error instanceof ApplicationError) {
+    const errorCode = (error as ApplicationError).errorCode;
+    return errorCode === 'FEEDBACK_NOT_FOUND' || errorCode === 'VALIDATION_ERROR';
+  }
+
+  return false;
 }

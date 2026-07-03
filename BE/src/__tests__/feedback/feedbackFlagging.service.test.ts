@@ -301,6 +301,73 @@ describe('feedbackFlagging.service', () => {
         .rejects
         .toThrow(FlagValidationError);
     });
+
+    it('nên update feedback đã được flag sẵn với previousFlaggedState=true', async () => {
+      const alreadyFlaggedFeedback = {
+        ...existingFeedback,
+        isFlagged: true,
+        flagReason: 'Old spam reason',
+        flaggedAt: new Date(),
+        flaggedBy: 'admin0',
+        flagHistory: [{
+          action: 'flagged',
+          reason: 'Old spam reason',
+          performedBy: 'admin0',
+          performedAt: new Date(),
+          previousFlaggedState: false
+        }]
+      };
+
+      const updatedFeedbackWithNewFlag = {
+        ...alreadyFlaggedFeedback,
+        isFlagged: true,
+        flagReason: 'Updated spam reason',
+        flaggedAt: new Date(),
+        flaggedBy: 'admin1',
+        flagHistory: [
+          ...alreadyFlaggedFeedback.flagHistory,
+          {
+            action: 'flagged',
+            reason: 'Updated spam reason',
+            performedBy: 'admin1',
+            performedAt: new Date(),
+            previousFlaggedState: true
+          }
+        ]
+      };
+
+      const findOneChain = createFindOneChain(alreadyFlaggedFeedback);
+      mockFindOne.mockReturnValue(findOneChain);
+
+      const updateChain = createFindOneAndUpdateChain(updatedFeedbackWithNewFlag);
+      mockFindOneAndUpdate.mockReturnValue(updateChain);
+
+      const result = await flagFeedbackManually('fb001', 'admin1', 'Updated spam reason');
+
+      expect(result.isFlagged).toBe(true);
+      expect(result.flagReason).toBe('Updated spam reason');
+      expect(result.flaggedBy).toBe('admin1');
+
+      // Verify flagHistory entry có previousFlaggedState=true
+      expect(mockFindOneAndUpdate).toHaveBeenCalledWith(
+        { feedbackId: 'fb001' },
+        expect.objectContaining({
+          $push: expect.objectContaining({
+            flagHistory: expect.objectContaining({
+              $each: expect.arrayContaining([
+                expect.objectContaining({
+                  action: 'flagged',
+                  reason: 'Updated spam reason',
+                  performedBy: 'admin1',
+                  previousFlaggedState: true
+                })
+              ])
+            })
+          })
+        }),
+        { new: true }
+      );
+    });
   });
 
   describe('unflagFeedback', () => {
