@@ -28,7 +28,10 @@ import {
   type GuestSessionSummary
 } from '../repositories/guestWalletSessionRepository';
 import { GuestWalletSession } from '../models/guestWalletSessionModel';
-import { ApplicationError } from '../utils/applicationError';
+import { ApplicationError, AuthorizationError } from '../utils/applicationError';
+
+// Re-export để controller có thể catch ApplicationError
+export { ApplicationError };
 
 export type AdminDashboardMetrics = {
   pendingProjects: number;
@@ -1061,12 +1064,24 @@ export async function getAdminSystemErrorLogs(
 /**
  * Hàm cập nhật trạng thái đã đọc/chưa đọc cho một log lỗi hệ thống.
  * Mục đích: cho phép Admin đánh dấu log để kiểm soát danh sách lỗi cần xử lý.
+ *
+ * @param adminUserId - User ID của admin
+ * @param logId - ID của log cần cập nhật
+ * @param isRead - Trạng thái đọc mới
+ * @param adminRole - Vai trò của admin (phải là 'ADMIN')
  */
 export async function updateAdminSystemErrorLogReadState(
   adminUserId: string,
   logId: string,
-  isRead: boolean
+  isRead: boolean,
+  adminRole: string
 ): Promise<{ logId: string; isRead: boolean; readAt: string | null }> {
+  // RBAC check tại service layer để prevent bypass từ worker/test/direct API calls.
+  // So sánh case-insensitive để cover cả 'admin' và 'ADMIN'.
+  if (!adminRole || adminRole.toUpperCase() !== 'ADMIN') {
+    throw new AuthorizationError('Chỉ admin mới có quyền cập nhật trạng thái log lỗi.');
+  }
+
   const normalizedLogId = String(logId || '').trim();
   if (!normalizedLogId) {
     throw new ApplicationError('logId không hợp lệ.', 400, 'VALIDATION_ERROR');
@@ -1243,11 +1258,18 @@ export async function listAdminGuestSessions(
  * Mục đích: cho phép admin manually expire session đang ACTIVE khi phát hiện hành vi bất thường.
  *
  * @param sessionId - ID của session cần vô hiệu hóa
+ * @param adminRole - Vai trò của admin (phải là 'ADMIN')
  */
-export async function invalidateAdminGuestSession(sessionId: string): Promise<{
+export async function invalidateAdminGuestSession(sessionId: string, adminRole: string): Promise<{
   sessionId: string;
   status: string;
 }> {
+  // RBAC check tại service layer để prevent bypass từ worker/test/direct API calls.
+  // So sánh case-insensitive để cover cả 'admin' và 'ADMIN'.
+  if (!adminRole || adminRole.toUpperCase() !== 'ADMIN') {
+    throw new AuthorizationError('Chỉ admin mới có quyền vô hiệu hóa guest session.');
+  }
+
   const normalizedSessionId = String(sessionId || '').trim();
   if (!normalizedSessionId) {
     throw new ApplicationError('sessionId không hợp lệ.', 400, 'VALIDATION_ERROR');

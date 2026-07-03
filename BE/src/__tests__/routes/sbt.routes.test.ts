@@ -228,7 +228,7 @@ describe('sbt routes - POST /api/sbt/retry-job/:mintRequestId', () => {
     });
 
     expect(res.status).toBe(200);
-    expect(rerunSbtMintJob).toHaveBeenCalledWith('SBT-MINT-123', 'admin-1');
+    expect(rerunSbtMintJob).toHaveBeenCalledWith('SBT-MINT-123', 'admin-1', 'admin');
   });
 });
 

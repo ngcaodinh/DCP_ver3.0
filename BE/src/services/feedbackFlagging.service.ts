@@ -4,11 +4,14 @@
  */
 
 import { BeneficiaryFeedbackModel, BeneficiaryFeedback, FlagHistoryEntry } from '../models/beneficiaryFeedbackModel';
-import { ApplicationError } from '../utils/applicationError';
+import { ApplicationError, AuthorizationError } from '../utils/applicationError';
 
 /**
  * Lỗi khi feedback không tồn tại.
  */
+// Re-export để backward compatibility với controller đang import từ service file
+export { AuthorizationError } from '../utils/applicationError';
+
 export class FeedbackNotFoundError extends ApplicationError {
   constructor(feedbackId: string) {
     super(
@@ -27,16 +30,6 @@ export class FlagValidationError extends ApplicationError {
   constructor(message: string) {
     super(message, 400, 'VALIDATION_ERROR');
     this.name = 'FlagValidationError';
-  }
-}
-
-/**
- * Lỗi khi user không có quyền thực hiện action.
- */
-export class AuthorizationError extends ApplicationError {
-  constructor(message: string) {
-    super(message, 403, 'FORBIDDEN');
-    this.name = 'AuthorizationError';
   }
 }
 
@@ -250,7 +243,8 @@ export async function unflagFeedback(
   reason: string
 ): Promise<BeneficiaryFeedback> {
   // RBAC check tại service layer để prevent bypass từ worker/test/direct API calls.
-  if (adminRole !== 'ADMIN') {
+  // So sánh case-insensitive để cover cả 'admin' và 'ADMIN'.
+  if (!adminRole || adminRole.toUpperCase() !== 'ADMIN') {
     throw new AuthorizationError('Chỉ admin mới có quyền unflag feedback.');
   }
 

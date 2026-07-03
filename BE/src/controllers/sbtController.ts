@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { getLogger } from '../config/logger';
-import { ApplicationError } from '../utils/applicationError';
+import { ApplicationError, AuthorizationError } from '../utils/applicationError';
 import { rerunSbtMintJob } from '../services/sbtMintService';
 import {
   findSbtMintDlqByStatus,
@@ -80,7 +80,13 @@ export async function handleRetrySbtMintJob(req: Request, res: Response): Promis
       return;
     }
 
-    const result = await rerunSbtMintJob(mintRequestId.trim(), userId);
+    const role = (req as unknown as { authenticatedUser?: { role?: string } }).authenticatedUser?.role;
+    if (!role) {
+      res.status(401).json({ error: 'Không có quyền truy cập.' });
+      return;
+    }
+
+    const result = await rerunSbtMintJob(mintRequestId.trim(), userId, role);
 
     logger.info('Admin re-run SBT mint job thành công.', {
       mintRequestId,

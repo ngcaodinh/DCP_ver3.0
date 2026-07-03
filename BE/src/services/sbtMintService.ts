@@ -35,7 +35,7 @@
 import { randomUUID } from 'crypto';
 import { ethers } from 'ethers';
 import { getLogger } from '../config/logger';
-import { ApplicationError } from '../utils/applicationError';
+import { ApplicationError, AuthorizationError } from '../utils/applicationError';
 import { extractErrorMessage } from '../utils/extractErrorMessage';
 
 // Re-export để giữ backward compatibility cho tests và các module đang import
@@ -649,8 +649,15 @@ export async function handleSbtMintFailure(
  */
 export async function rerunSbtMintJob(
   mintRequestId: string,
-  adminUserId: string
+  adminUserId: string,
+  adminRole: string
 ): Promise<{ record: ImpactSbtMetadataRecord; jobId: string | number | undefined; enqueued: boolean }> {
+  // RBAC check tại service layer để prevent bypass từ worker/test/direct API calls.
+  // So sánh case-insensitive để cover cả 'admin' và 'ADMIN'.
+  if (!adminRole || adminRole.toUpperCase() !== 'ADMIN') {
+    throw new AuthorizationError('Chỉ admin mới có quyền re-run SBT mint job.');
+  }
+
   const record = await findImpactSbtMetadataByMintRequestId(mintRequestId);
   if (!record) {
     throw new Error(`Không tìm thấy mint request: ${mintRequestId}`);

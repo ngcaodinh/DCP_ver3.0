@@ -14,6 +14,7 @@ import {
   updateAdminSystemErrorLogReadState
 } from '../services/adminDashboardService';
 import { sendErrorFromUnknown, sendErrorResponse, sendSuccessResponse } from '../utils/apiResponse';
+import { AuthorizationError } from '../utils/applicationError';
 
 /**
  * Hàm parse giá trị category cho API log lỗi.
@@ -247,10 +248,17 @@ export async function handleUpdateAdminSystemErrorLogReadState(request: Authenti
   }
 
   try {
+    const role = request.authenticatedUser.role;
+    if (!role) {
+      sendErrorResponse(response, 401, 'Bạn chưa đăng nhập hoặc phiên đăng nhập không hợp lệ.', 'UNAUTHENTICATED');
+      return;
+    }
+
     const updatedReadState = await updateAdminSystemErrorLogReadState(
       request.authenticatedUser.userId,
       normalizedLogId,
-      isRead
+      isRead,
+      role
     );
 
     sendSuccessResponse(response, 200, 'Cập nhật trạng thái đọc log lỗi thành công.', updatedReadState);
@@ -354,9 +362,21 @@ export async function handleInvalidateAdminGuestSession(
   }
 
   try {
-    const result = await invalidateAdminGuestSession(sessionId);
+    const role = request.authenticatedUser.role;
+    if (!role) {
+      sendErrorResponse(response, 401, 'Bạn chưa đăng nhập hoặc phiên đăng nhập không hợp lệ.', 'UNAUTHENTICATED');
+      return;
+    }
+
+    const result = await invalidateAdminGuestSession(sessionId, role);
     sendSuccessResponse(response, 200, 'Vô hiệu hóa guest session thành công.', result);
   } catch (error) {
+    // AuthorizationError check trước sendErrorFromUnknown vì test mocks có thể không align,
+    // dẫn đến instanceof ApplicationError trong sendErrorFromUnknown bị false.
+    if (error instanceof AuthorizationError) {
+      sendErrorResponse(response, error.statusCode, error.message, error.errorCode);
+      return;
+    }
     sendErrorFromUnknown(response, error, 'Không thể vô hiệu hóa guest session.');
   }
 }

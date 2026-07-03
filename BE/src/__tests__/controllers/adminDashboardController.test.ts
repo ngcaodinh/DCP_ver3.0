@@ -27,10 +27,12 @@ vi.mock('../../services/adminDashboardService', () => ({
 }));
 
 /**
- * Mock ApplicationError để controller có thể dùng instanceof check.
+ * Mock ApplicationError và AuthorizationError để controller có thể dùng instanceof check.
+ * AuthorizationError phải extend ApplicationError để instanceof check trong
+ * sendErrorFromUnknown (dùng mock ApplicationError) hoạt động đúng trong tests.
  */
-const { ApplicationError } = vi.hoisted(() => {
-  class ApplicationError extends Error {
+vi.mock('../../utils/applicationError', () => {
+  class MockApplicationError extends Error {
     public readonly statusCode: number;
     public readonly errorCode: string;
 
@@ -41,12 +43,22 @@ const { ApplicationError } = vi.hoisted(() => {
       this.errorCode = errorCode;
     }
   }
-  return { ApplicationError };
+
+  class MockAuthorizationError extends MockApplicationError {
+    constructor(message: string) {
+      super(message, 403, 'FORBIDDEN');
+      this.name = 'AuthorizationError';
+    }
+  }
+
+  return {
+    ApplicationError: MockApplicationError,
+    AuthorizationError: MockAuthorizationError
+  };
 });
 
-vi.mock('../../utils/applicationError', () => ({
-  ApplicationError
-}));
+// Import sau vi.mock để dùng class đã bị mock trong test bodies
+import { ApplicationError } from '../../utils/applicationError';
 
 import {
   handleGetAdminGuestSessionSummary,
@@ -541,7 +553,7 @@ describe('handleInvalidateAdminGuestSession', () => {
 
     await handleInvalidateAdminGuestSession(req, res);
 
-    expect(invalidateAdminGuestSession).toHaveBeenCalledWith(validSessionId);
+    expect(invalidateAdminGuestSession).toHaveBeenCalledWith(validSessionId, 'admin');
     expect(res.status).toHaveBeenCalledWith(200);
     expect(res.json).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -628,7 +640,7 @@ describe('handleInvalidateAdminGuestSession', () => {
 
     await handleInvalidateAdminGuestSession(req, res);
 
-    expect(invalidateAdminGuestSession).toHaveBeenCalledWith('550e8400-e29b-41d4-a716-446655440000');
+    expect(invalidateAdminGuestSession).toHaveBeenCalledWith('550e8400-e29b-41d4-a716-446655440000', 'admin');
     expect(res.status).toHaveBeenCalledWith(200);
   });
 
@@ -649,6 +661,28 @@ describe('handleInvalidateAdminGuestSession', () => {
       expect.objectContaining({
         success: false,
         errorCode: 'INTERNAL_ERROR'
+      })
+    );
+  });
+
+  it('should return 403 when service throws AuthorizationError', async () => {
+    const { AuthorizationError } = await import('../../utils/applicationError');
+    vi.mocked(invalidateAdminGuestSession).mockRejectedValue(
+      new AuthorizationError('Chỉ admin mới có quyền vô hiệu hóa guest session.')
+    );
+    const req = createMockRequest({
+      authenticatedUser: mockAdminUser,
+      params: { sessionId: validSessionId }
+    });
+    const res = createMockResponse();
+
+    await handleInvalidateAdminGuestSession(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: false,
+        errorCode: 'FORBIDDEN'
       })
     );
   });

@@ -66,6 +66,16 @@ vi.mock('../../utils/applicationError', () => ({
       this.statusCode = statusCode;
       this.code = code;
     }
+  },
+  AuthorizationError: class AuthorizationError extends Error {
+    public statusCode: number;
+    public code: string;
+    constructor(message: string) {
+      super(message);
+      this.name = 'AuthorizationError';
+      this.statusCode = 403;
+      this.code = 'FORBIDDEN';
+    }
   }
 }));
 
@@ -613,7 +623,7 @@ describe('sbtMintService - rerunSbtMintJob', () => {
     } as any;
     (findImpactSbtMetadataByMintRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(record);
 
-    await expect(rerunSbtMintJob('SBT-MINT-confirmed', 'admin-1'))
+    await expect(rerunSbtMintJob('SBT-MINT-confirmed', 'admin-1', 'ADMIN'))
       .rejects.toThrow('đã CONFIRMED');
   });
 
@@ -632,11 +642,11 @@ describe('sbtMintService - rerunSbtMintJob', () => {
 
     // Test DLQ status
     (findImpactSbtMetadataByMintRequestId as ReturnType<typeof vi.fn>).mockResolvedValueOnce(dlqRecord);
-    await expect(rerunSbtMintJob('SBT-MINT-dlq', 'admin-1')).rejects.toThrow();
+    await expect(rerunSbtMintJob('SBT-MINT-dlq', 'admin-1', 'ADMIN')).rejects.toThrow();
 
     // Test FAILED status
     (findImpactSbtMetadataByMintRequestId as ReturnType<typeof vi.fn>).mockResolvedValueOnce(failedRecord);
-    await expect(rerunSbtMintJob('SBT-MINT-failed', 'admin-1')).rejects.not.toThrow('đã CONFIRMED');
+    await expect(rerunSbtMintJob('SBT-MINT-failed', 'admin-1', 'ADMIN')).rejects.not.toThrow('đã CONFIRMED');
   });
 
   it('throw ApplicationError(409) khi status=SUBMITTED', async () => {
@@ -647,14 +657,14 @@ describe('sbtMintService - rerunSbtMintJob', () => {
     } as any;
     (findImpactSbtMetadataByMintRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(record);
 
-    await expect(rerunSbtMintJob('SBT-MINT-sub', 'admin-1'))
+    await expect(rerunSbtMintJob('SBT-MINT-sub', 'admin-1', 'ADMIN'))
       .rejects.toThrow('đang SUBMITTED');
   });
 
   it('throw error khi record không tồn tại', async () => {
     (findImpactSbtMetadataByMintRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(null);
 
-    await expect(rerunSbtMintJob('SBT-MINT-nonexistent', 'admin-1'))
+    await expect(rerunSbtMintJob('SBT-MINT-nonexistent', 'admin-1', 'ADMIN'))
       .rejects.toThrow('Không tìm thấy mint request');
   });
 
@@ -675,7 +685,7 @@ describe('sbtMintService - rerunSbtMintJob', () => {
     } as any);
     (enqueueSbtMint as ReturnType<typeof vi.fn>).mockResolvedValue({ jobId: 'job-rerun', enqueued: true });
 
-    const result = await rerunSbtMintJob('SBT-MINT-rerun', 'admin-1');
+    const result = await rerunSbtMintJob('SBT-MINT-rerun', 'admin-1', 'ADMIN');
 
     expect(resetImpactSbtForReRun).toHaveBeenCalledWith('SBT-MINT-rerun', expect.objectContaining({
       reRunBy: 'admin-1',
@@ -691,6 +701,12 @@ describe('sbtMintService - rerunSbtMintJob', () => {
       expect.objectContaining({ priority: 3 })
     );
     expect(result.record.status).toBe('PENDING');
+  });
+
+  it('nên ném AuthorizationError khi role không phải ADMIN', async () => {
+    await expect(rerunSbtMintJob('SBT-MINT-rerun', 'admin-1', 'USER'))
+      .rejects
+      .toThrow('Chỉ admin mới có quyền re-run SBT mint job.');
   });
 });
 

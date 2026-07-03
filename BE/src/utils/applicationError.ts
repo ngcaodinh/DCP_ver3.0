@@ -87,3 +87,14 @@ export class ApplicationError extends Error {
     this.errorCode = errorCode;
   }
 }
+
+/**
+ * Lớp lỗi authorization 403 Forbidden.
+ * Mục đích: chuẩn hóa lỗi khi user không có quyền thực hiện action.
+ */
+export class AuthorizationError extends ApplicationError {
+  constructor(message: string) {
+    super(message, 403, 'FORBIDDEN');
+    this.name = 'AuthorizationError';
+  }
+}
