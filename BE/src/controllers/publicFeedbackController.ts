@@ -9,6 +9,9 @@ import {
   getPublicFeedbackList,
   getPublicFeedbackStats
 } from '../services/publicFeedback.service';
+import { getLogger } from '../config/logger';
+
+const logger = getLogger();
 
 /**
  * Default page size cho pagination.
@@ -36,9 +39,8 @@ export async function getPublicFeedbackListController(
   request: Request,
   response: Response
 ): Promise<void> {
+  const { projectId } = request.params;
   try {
-    const { projectId } = request.params;
-
     if (!projectId || typeof projectId !== 'string') {
       sendErrorResponse(response, 400, 'Thiếu hoặc không hợp lệ projectId.', 'VALIDATION_ERROR');
       return;
@@ -79,7 +81,10 @@ export async function getPublicFeedbackListController(
       result
     );
   } catch (error) {
-    console.error('Error in getPublicFeedbackListController:', error);
+    logger.error('Error in getPublicFeedbackListController', {
+      errorMessage: (error as Error).message,
+      projectId: projectId ?? 'unknown'
+    });
     sendErrorResponse(response, 500, 'Đã xảy ra lỗi khi lấy danh sách feedback.', 'INTERNAL_ERROR');
   }
 }
@@ -95,9 +100,8 @@ export async function getPublicFeedbackStatsController(
   request: Request,
   response: Response
 ): Promise<void> {
+  const { projectId } = request.params;
   try {
-    const { projectId } = request.params;
-
     if (!projectId || typeof projectId !== 'string') {
       sendErrorResponse(response, 400, 'Thiếu hoặc không hợp lệ projectId.', 'VALIDATION_ERROR');
       return;
@@ -112,7 +116,10 @@ export async function getPublicFeedbackStatsController(
       stats
     );
   } catch (error) {
-    console.error('Error in getPublicFeedbackStatsController:', error);
+    logger.error('Error in getPublicFeedbackStatsController', {
+      errorMessage: (error as Error).message,
+      projectId: projectId ?? 'unknown'
+    });
     sendErrorResponse(response, 500, 'Đã xảy ra lỗi khi lấy thống kê feedback.', 'INTERNAL_ERROR');
   }
 }

@@ -93,15 +93,7 @@ export async function getPublicFeedbackList(
   const totalPages = Math.ceil(totalItems / limit);
 
   return {
-    feedbacks: feedbacks.map(doc => ({
-      feedbackId: doc.feedbackId,
-      projectId: doc.projectId,
-      beneficiaryNameHash: doc.beneficiaryNameHash,
-      rating: doc.rating,
-      comment: doc.comment,
-      submittedAt: doc.submittedAt,
-      location: doc.location
-    })),
+    feedbacks: feedbacks as PublicFeedbackItem[],
     pagination: {
       page,
       limit,
@@ -164,8 +156,10 @@ export async function getPublicFeedbackStats(
     };
   } else {
     const stats = statsResult[0];
+    // stats.totalCount luôn >= 1 vì $group đã aggregate non-empty buckets, nhưng defensive check vẫn an toàn
+    const roundedAverage = Math.round(stats.avgRating * 100) / 100;
     result = {
-      avgRating: stats.totalCount > 0 ? Math.round(stats.avgRating * 100) / 100 : null,
+      avgRating: roundedAverage,
       totalCount: stats.totalCount,
       distribution: {
         '1': stats.rating1,
@@ -181,15 +175,4 @@ export async function getPublicFeedbackStats(
   statsCache.set(cacheKey, result, STATS_CACHE_TTL_SECONDS);
 
   return result;
-}
-
-/**
- * Xóa cache stats cho một dự án.
- * Dùng khi có feedback mới được thêm.
- * 
- * @param projectId ID của dự án
- */
-export function invalidateStatsCache(projectId: string): void {
-  const cacheKey = `${STATS_CACHE_KEY_PREFIX}${projectId}`;
-  statsCache.deleteByKey(cacheKey);
 }

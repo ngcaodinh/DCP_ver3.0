@@ -1,11 +1,13 @@
 /**
  * Test cho public feedback routes - không yêu cầu authentication.
+ * Tests này MOCK rate limiter để tập trung vào logic route/controller.
+ * Test rate limit riêng ở file publicFeedback.rateLimit.test.ts.
  */
 import express from 'express';
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi, afterEach } from 'vitest';
 
-// Mock dependencies trước khi import routes
+// Mock logger để tránh in ra console khi test
 vi.mock('../../config/logger', () => ({
   getLogger: vi.fn(() => ({
     info: vi.fn(),
@@ -14,23 +16,22 @@ vi.mock('../../config/logger', () => ({
   }))
 }));
 
+// Mock rate limit middleware để các test logic không bị ảnh hưởng bởi rate limit store shared
 vi.mock('../../middleware/rateLimitMiddleware', () => ({
   createRateLimitMiddleware: () => (_request: express.Request, _response: express.Response, next: express.NextFunction) => {
     next();
   }
 }));
 
-// Mock toán bộ service để test route mà không bị cache pollution
+// Mock toàn bộ service để test route mà không bị cache pollution
 vi.mock('../../services/publicFeedback.service', () => ({
   getPublicFeedbackList: vi.fn(),
-  getPublicFeedbackStats: vi.fn(),
-  invalidateStatsCache: vi.fn()
+  getPublicFeedbackStats: vi.fn()
 }));
 
 import { createPublicFeedbackRoutes } from '../../routes/public-feedback.routes';
 import { getPublicFeedbackList, getPublicFeedbackStats } from '../../services/publicFeedback.service';
 
-// Tạo test app
 function createTestApplication() {
   const testApplication = express();
   testApplication.use(express.json());
@@ -38,7 +39,7 @@ function createTestApplication() {
   return testApplication;
 }
 
-describe('publicFeedbackRoutes', () => {
+describe('publicFeedbackRoutes - logic tests', () => {
   let testApplication: express.Application;
 
   beforeEach(async () => {
@@ -52,7 +53,6 @@ describe('publicFeedbackRoutes', () => {
 
   describe('GET /api/feedback/public/:projectId', () => {
     it('trả về chỉ feedback không bị flag', async () => {
-      // Mock service trả về kết quả với chỉ non-flagged feedback
       (getPublicFeedbackList as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         feedbacks: [
           { feedbackId: 'fb1', projectId: 'proj1', beneficiaryNameHash: 'hash1', rating: 5, comment: 'Good', submittedAt: new Date() },
@@ -70,7 +70,7 @@ describe('publicFeedbackRoutes', () => {
       expect(getPublicFeedbackList).toHaveBeenCalledWith('proj1', 1, 20);
     });
 
-    it('response không bao gồm uploadedByOrganizationId', async () => {
+    it('response không bao gồm uploadedByOrganizationId, batchContentHash, riskScore', async () => {
       (getPublicFeedbackList as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         feedbacks: [
           { feedbackId: 'fb1', projectId: 'proj1', beneficiaryNameHash: 'hash1', rating: 5, comment: 'Good', submittedAt: new Date() }
@@ -148,7 +148,7 @@ describe('publicFeedbackRoutes', () => {
       expect(getPublicFeedbackList).toHaveBeenCalledWith('proj1', 1, 20);
     });
 
-    it('limit tối đa là 50', async () => {
+    it('limit tối đa là 50 (hard cap)', async () => {
       (getPublicFeedbackList as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         feedbacks: Array(50).fill({}),
         pagination: { page: 1, limit: 50, totalItems: 50, totalPages: 1, hasNextPage: false, hasPreviousPage: false }
@@ -232,7 +232,7 @@ describe('publicFeedbackRoutes', () => {
       });
     });
 
-    it('chỉ tính feedback không bị flag (service trả về đã filtered)', async () => {
+    it('chỉ tính feedback không bị flag (service filter trước khi trả)', async () => {
       (getPublicFeedbackStats as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         avgRating: 5,
         totalCount: 1,
@@ -263,4 +263,3 @@ describe('publicFeedbackRoutes', () => {
     });
   });
 });
-
