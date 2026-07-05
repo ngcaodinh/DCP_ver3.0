@@ -3,9 +3,9 @@
  * Hỗ trợ retry 3 lần, interval 1 phút, fallback to IN_APP khi exhausted.
  */
 import nodemailer from 'nodemailer';
+import SMTPPool from 'nodemailer/lib/smtp-pool';
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
 import Handlebars from 'handlebars';
 import { getLogger } from '../config/logger';
 import {
@@ -17,14 +17,22 @@ import {
 } from './constants/notification.constants';
 import type { DeliveryResult, DispatchContext } from './types/delivery.types';
 
+/**
+ * Timeout cho toàn bộ thao tác sendMail() (bao gồm cả thời gian upload payload tới SMTP server).
+ * Phân biệt với EMAIL_TIMEOUT_MS (connectionTimeout) — chỉ giới hạn establish connection, không giới hạn
+ * thời gian gửi MIME data. Pattern Promise.race đảm bảo abort request nếu SMTP server treo giữa chừng.
+ * 30 giây — đủ cho email dung lượng lớn (HTML + inline images) nhưng vẫn fail-fast
+ * nếu server không phản hồi.
+ */
+const EMAIL_SEND_TIMEOUT_MS = 30_000;
+
 const logger = getLogger();
 
 /**
- * ESM-compatible __dirname — hoạt động đúng trong bundled app, Docker, và TypeScript compiled output.
- * `__dirname` không tồn tại trong ESM; dùng `import.meta.url` thay thế.
+ * CommonJS-compatible __dirname — dùng path.resolve từ thư mục hiện tại.
+ * Project dùng CommonJS module (tsconfig module: commonjs) nên __dirname có sẵn natively.
  */
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const EMAIL_TEMPLATES_DIR = path.resolve(__dirname, '../../templates/email');
 
 /**
  * Chuyển đổi HTML special characters thành entities.
@@ -116,7 +124,9 @@ function getTransporter(): nodemailer.Transporter | null {
   const config = getSmtpConfig();
   if (!config) return null;
 
-  transporter = nodemailer.createTransport({
+  // Khai báo kiểu SMTPPool.Options (chứa pool, maxConnections, rateLimit) để tsc resolve đúng overload
+  // `createTransport(SMTPPool | SMTPPool.Options)` là overload chính xác cho transport dùng connection pool.
+  const smtpOptions: SMTPPool.Options = {
     host: config.host,
     port: config.port,
     secure: config.secure,
@@ -126,9 +136,11 @@ function getTransporter(): nodemailer.Transporter | null {
     },
     pool: true,
     maxConnections: 5,
-    rateLimit: 10, // Gmail limit: 100 email/ngày cho app password thường, 2000 cho Google Workspace
-    timeout: EMAIL_TIMEOUT_MS
-  });
+    rateLimit: 10,
+    connectionTimeout: EMAIL_TIMEOUT_MS
+  };
+
+  transporter = nodemailer.createTransport(smtpOptions);
 
   return transporter;
 }
@@ -160,7 +172,7 @@ function loadTemplate(templateName: string): HandlebarsTemplateDelegate<Record<s
   const cached = templateCache.get(templateName);
   if (cached) return cached;
 
-  const templatePath = path.resolve(__dirname, '../../templates/email', `${templateName}.hbs`);
+  const templatePath = path.resolve(EMAIL_TEMPLATES_DIR, `${templateName}.hbs`);
   if (!fs.existsSync(templatePath)) {
     throw new Error(`Email template không tồn tại: ${templateName}.hbs`);
   }
@@ -219,16 +231,31 @@ async function sendEmailOnce(options: {
   const startTime = Date.now();
 
   try {
-    const result = await tp.sendMail({
-      from: config!.from,
-      to: options.to,
-      subject: options.subject,
-      html: options.html,
-      text: options.html.replace(/<[^>]+>/g, ''), // Plain text fallback
-      headers: {
-        'X-Mailer': 'DCP-Notification-System'
-      }
+    // Wrap sendMail với Promise.race để áp dụng timeout TOÀN BỘ operation (không chỉ establish connection).
+    // SMTP options.connectionTimeout chỉ giới hạn thời gian thiết lập TCP/TLS, không giới hạn tổng
+    // thời gian DATA + response → server treo giữa chừng vẫn có thể block vô thời hạn.
+    // Pattern này giống push/sms service: lưu timeoutHandle để clear khi operation resolve trước deadline.
+    // Distinguish "Email send timeout" khỏi connection timeout (Nodemailer message khác) để caller dễ debug.
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutHandle = setTimeout(() => reject(new Error('Email send timeout')), EMAIL_SEND_TIMEOUT_MS);
     });
+
+    let result: nodemailer.SentMessageInfo;
+    try {
+      result = await Promise.race([tp.sendMail({
+        from: config!.from,
+        to: options.to,
+        subject: options.subject,
+        html: options.html,
+        text: options.html.replace(/<[^>]+>/g, ''), // Plain text fallback
+        headers: {
+          'X-Mailer': 'DCP-Notification-System'
+        }
+      }), timeoutPromise]);
+    } finally {
+      if (timeoutHandle !== null) clearTimeout(timeoutHandle);
+    }
 
     const latencyMs = Date.now() - startTime;
     logger.info('Email đã được gửi thành công.', {

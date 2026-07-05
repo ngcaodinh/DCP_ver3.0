@@ -1,4 +1,30 @@
 /**
+ * Số ký tự giữ lại ở đầu on-chain address khi redact.
+ * Pattern redact: `${prefix}...${suffix}` — ví dụ '0xabcdef1234...5678'.
+ * Pattern cũ (chỉ 6 ký tự đầu) dễ collision với vanity address do nhiều ví
+ * có cùng prefix hex. Pattern mới giữ 10 ký tự đầu + 4 ký tự cuối (~56 bits entropy)
+ * → giảm collision risk trong khi vẫn giữ đủ thông tin để debug trùng address trong logs.
+ */
+const ADDRESS_PREFIX_LENGTH = 10;
+/** Số ký tự giữ lại ở cuối on-chain address khi redact. */
+const ADDRESS_SUFFIX_LENGTH = 4;
+
+/**
+ * Hàm redact 1 on-chain address theo pattern `${prefix}...${suffix}`.
+ * Mục đích: giảm collision risk khi debug — chỉ giữ 10 ký tự đầu + 4 ký tự cuối.
+ * Nếu address quá ngắn để áp dụng pattern đầy đủ, fallback về '[ADDRESS_REDACTED]'.
+ */
+function redactAddressField(address: string): string {
+  const minLength = ADDRESS_PREFIX_LENGTH + ADDRESS_SUFFIX_LENGTH;
+  if (address.length < minLength) {
+    return '[ADDRESS_REDACTED]';
+  }
+  const prefix = address.substring(0, ADDRESS_PREFIX_LENGTH);
+  const suffix = address.slice(-ADDRESS_SUFFIX_LENGTH);
+  return `${prefix}...${suffix}`;
+}
+
+/**
  * Hàm redact sensitive data khỏi metadata object trước khi log.
  * Ngăn chặn việc log các thông tin nhạy cảm như tokens, passwords, PII.
  *
@@ -32,9 +58,16 @@ function redactSensitiveData(metadata?: Record<string, unknown>): Record<string,
     redacted.ipAddress = '[IP_REDACTED]';
   }
 
-  // Redact wallet address - có thể link với on-chain activity
+  // Redact wallet address - có thể link với on-chain activity.
+  // Pattern 10+4 giảm collision giữa vanity address (nhiều địa chỉ cùng prefix),
+  // vẫn đủ ngắn để debug trùng address trong logs.
   if (redacted.walletAddress && typeof redacted.walletAddress === 'string') {
-    redacted.walletAddress = `${redacted.walletAddress.substring(0, 6)}...[REDACTED]`;
+    redacted.walletAddress = redactAddressField(redacted.walletAddress);
+  }
+
+  // Redact donor address - cùng pattern với walletAddress (on-chain identity của G1 Trust Score).
+  if (redacted.donorAddress && typeof redacted.donorAddress === 'string') {
+    redacted.donorAddress = redactAddressField(redacted.donorAddress);
   }
 
   // Redact session ID - có thể dùng để track user sessions
@@ -43,13 +76,15 @@ function redactSensitiveData(metadata?: Record<string, unknown>): Record<string,
   }
 
   // Redact smart account address - có thể link với on-chain activity
+  // Dùng cùng pattern 10+4 như walletAddress/donorAddress để tránh collision.
   if (redacted.smartAccountAddress && typeof redacted.smartAccountAddress === 'string') {
-    redacted.smartAccountAddress = `${redacted.smartAccountAddress.substring(0, 6)}...[REDACTED]`;
+    redacted.smartAccountAddress = redactAddressField(redacted.smartAccountAddress);
   }
 
   // Redact guest wallet address - có thể link với on-chain activity
+  // Dùng cùng pattern 10+4 như walletAddress/donorAddress để tránh collision.
   if (redacted.guestWalletAddress && typeof redacted.guestWalletAddress === 'string') {
-    redacted.guestWalletAddress = `${redacted.guestWalletAddress.substring(0, 6)}...[REDACTED]`;
+    redacted.guestWalletAddress = redactAddressField(redacted.guestWalletAddress);
   }
 
   return redacted;
@@ -247,6 +282,36 @@ type LogMetadata = {
   tokenIdRaw?: string;
   dlqAt?: string;
   minIntervalMs?: number;
+  // G1 — Trust Score
+  trustScore?: number;
+  confirmedDonationCount?: number;
+  totalDonors?: number;
+  failureCount?: number;
+  // Email service fields
+  hasHost?: boolean;
+  hasPort?: boolean;
+  hasUser?: boolean;
+  hasPassword?: boolean;
+  hasFrom?: boolean;
+  to?: string;
+  templateName?: string;
+  messageId?: string;
+  subject?: string;
+  latencyMs?: number;
+  // Push service fields
+  deviceToken?: string;
+  fcmProjectId?: string;
+  // SMS service fields
+  messageSid?: string;
+  authToken?: string;
+  accountSid?: string;
+  // Dispatcher fields
+  donationAmount?: number;
+  thresholdMet?: boolean;
+  succeededChannels?: string | string[];
+  providerMessageId?: string;
+  pushFailed?: boolean;
+  smsFailed?: boolean;
   // Data Mapper (D2) — PayOS + blockchain sync
   utxId?: string;
   latestBlock?: number;

@@ -48,11 +48,12 @@ function initializeFirebase(): App | null {
     const privateKey = process.env.FCM_PRIVATE_KEY!
       .replace(/\\n/g, '\n');
 
+    // cert() nhận ServiceAccount { projectId, clientEmail, privateKey } (camelCase).
+    // Đã guard ở hasFcmCredentials() nên non-null assertion an toàn ở đây.
     const serviceAccount = {
-      type: 'service_account',
-      project_id: process.env.FCM_PROJECT_ID,
-      private_key: privateKey,
-      client_email: process.env.FCM_CLIENT_EMAIL
+      projectId: process.env.FCM_PROJECT_ID!,
+      privateKey,
+      clientEmail: process.env.FCM_CLIENT_EMAIL!
     };
 
     // Check if already initialized
@@ -67,7 +68,7 @@ function initializeFirebase(): App | null {
 
     messagingClient = getMessaging(firebaseApp);
     logger.info('Firebase Admin SDK đã được khởi tạo thành công.', {
-      projectId: process.env.FCM_PROJECT_ID
+      fcmProjectId: process.env.FCM_PROJECT_ID
     });
 
     return firebaseApp;
@@ -157,18 +158,26 @@ export async function sendPushNotification(options: {
       }
     };
 
-    const result = await Promise.race([
-      messaging.send(message),
-      new Promise<'timeout'>((_, reject) =>
-        setTimeout(() => reject(new Error('FCM timeout')), PUSH_TIMEOUT_MS)
-      )
-    ]) as { messageId: string };
+    // FCM messaging.send() trả về string (message name), không phải object.
+    // Cast qua unknown trước để tránh TypeScript 'no overlap' error.
+    // Lưu timeout handle để clear khi operation resolve trước deadline — tránh timer tồn tại đến hết TTL.
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutHandle = setTimeout(() => reject(new Error('FCM timeout')), PUSH_TIMEOUT_MS);
+    });
+    let rawResult: string;
+    try {
+      rawResult = await Promise.race([messaging.send(message), timeoutPromise]);
+    } finally {
+      if (timeoutHandle !== null) clearTimeout(timeoutHandle);
+    }
+    const result = { messageId: rawResult };
 
     const latencyMs = Date.now() - startTime;
 
     logger.info('Push notification đã được gửi thành công qua FCM.', {
-      messageId: result.messageId,
-      deviceToken: options.deviceToken.substring(0, 20) + '...',
+      providerMessageId: result.messageId,
+      toAddress: options.deviceToken.substring(0, 20) + '...',
       latencyMs
     });
 
@@ -183,7 +192,7 @@ export async function sendPushNotification(options: {
     const errorMessage = error instanceof Error ? error.message : String(error);
 
     logger.error('Push notification thất bại qua FCM.', {
-      deviceToken: options.deviceToken.substring(0, 20) + '...',
+      toAddress: options.deviceToken.substring(0, 20) + '...',
       errorMessage,
       latencyMs
     });
