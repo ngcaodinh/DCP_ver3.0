@@ -59,3 +59,43 @@ export type DispatchContext = {
   /** Số tiền donation (cho threshold check LARGE_DONATION) */
   donationAmountVnd?: number;
 };
+
+/**
+ * Runtime namespace object cho DeliveryResult.
+ *
+ * Test dùng pattern:
+ *   const { DeliveryResult } = await import('../types/delivery.types')
+ *   const s: typeof DeliveryResult.types = { success: true, channel: 'EMAIL', ... }
+ *
+ * Property `types` là placeholder có kiểu DeliveryResult để TypeScript
+ * cho phép dùng `typeof DeliveryResult.types` làm type annotation trong test.
+ */
+export const DeliveryResult = {
+  /** Placeholder kiểu — dùng `typeof DeliveryResult.types` làm type annotation trong test */
+  types: null as unknown as DeliveryResult,
+  /** Kiểm tra result có phải DeliverySuccess không */
+  isSuccess: (r: DeliveryResult): r is DeliverySuccess => r.success === true,
+  /** Kiểm tra result có phải DeliveryFailure không */
+  isFailure: (r: DeliveryResult): r is DeliveryFailure => r.success === false,
+} as const;
+
+/**
+ * Runtime namespace object cho DispatchContext.
+ *
+ * Test dùng pattern:
+ *   const { DispatchContext } = await import('../types/delivery.types')
+ *   const ctx: typeof DispatchContext.contextType = { userId: '...', ... }
+ *
+ * Property `contextType` là placeholder có kiểu DispatchContext để TypeScript
+ * cho phép dùng `typeof DispatchContext.contextType` làm type annotation trong test.
+ */
+export const DispatchContext = {
+  /** Placeholder kiểu — dùng `typeof DispatchContext.contextType` làm type annotation trong test */
+  contextType: null as unknown as DispatchContext,
+  /** Kiểm tra context có đủ thông tin cho EMAIL channel không */
+  hasEmail: (ctx: DispatchContext): boolean => !!ctx.userEmail,
+  /** Kiểm tra context có đủ thông tin cho PUSH channel không */
+  hasPush: (ctx: DispatchContext): boolean => !!ctx.fcmDeviceToken,
+  /** Kiểm tra context có đủ thông tin cho SMS channel không */
+  hasSms: (ctx: DispatchContext): boolean => !!ctx.phoneNumber,
+} as const;

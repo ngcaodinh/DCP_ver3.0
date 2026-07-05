@@ -89,19 +89,25 @@ describe('NotificationQueue - DLQ Config', () => {
 });
 
 describe('NotificationQueue - moveNotificationToDLQ', () => {
-  let moveNotificationToDLQ: (job: any) => Promise<void>;
-  let mockAdd: any;
-  let mockRemove: any;
+  // Mock job type — chỉ cần các field thực sự dùng trong implementation
+  type MockJob = { id: string; data: Record<string, unknown>; remove: ReturnType<typeof vi.fn> };
+  type MoveToDlqFn = (job: MockJob) => Promise<void>;
+  let moveNotificationToDLQ: MoveToDlqFn;
+  let mockAdd: ReturnType<typeof vi.fn>;
+  let mockRemove: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
     vi.clearAllMocks();
     // Lấy mock functions từ Bull mock
-    const BullMock = await import('bull');
+    const BullMock = (await import('bull')) as unknown as {
+      __mockAdd: ReturnType<typeof vi.fn>;
+      __mockRemove: ReturnType<typeof vi.fn>;
+    };
     mockAdd = BullMock.__mockAdd;
     mockRemove = BullMock.__mockRemove;
 
     const module = await import('../notificationQueue');
-    moveNotificationToDLQ = module.moveNotificationToDLQ;
+    moveNotificationToDLQ = module.moveNotificationToDLQ as unknown as MoveToDlqFn;
   });
 
   it('nên add job vào DLQ queue', async () => {
@@ -168,9 +174,7 @@ describe('NotificationQueue - moveNotificationToDLQ', () => {
 
 describe('NotificationQueue - JobData Type', () => {
   it('nên export đúng NotificationJobData type', async () => {
-    const { NotificationJobData } = await import('../notificationQueue');
-
-    const validJobData: NotificationJobData = {
+    const validJobData: import('../notificationQueue').NotificationJobData = {
       notificationId: 'NOTI-123',
       userId: 'user-456',
       notificationType: 'DONATION_RECEIVED',

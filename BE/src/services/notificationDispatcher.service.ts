@@ -54,7 +54,7 @@ export function isLargeDonationThresholdMet(metadata?: Record<string, unknown>):
   }
 
   const met = donationAmount >= threshold;
-  logger.info('LARGE_DONATION threshold check.', { donationAmount, threshold, thresholdMet: met });
+  logger.info('LARGE_DONATION threshold check.', { donationAmount, thresholdMet: met });
 
   return met;
 }
@@ -214,6 +214,7 @@ async function dispatchSmsChannel(
   title: string,
   content: string,
   notificationType: NotificationType,
+  metadata: Record<string, unknown> | undefined,
   dispatchContext: DispatchContext
 ): Promise<DeliveryResult> {
   if (!dispatchContext.phoneNumber) {
@@ -315,7 +316,7 @@ export async function dispatchNotification(
         result = await dispatchPushChannel(notificationId, title, content, notificationType, metadata, dispatchContext);
         break;
       case 'SMS':
-        result = await dispatchSmsChannel(notificationId, title, content, notificationType, dispatchContext);
+        result = await dispatchSmsChannel(notificationId, title, content, notificationType, metadata, dispatchContext);
         break;
       case 'IN_APP':
         // IN_APP: success ngay (DB record đã được tạo bởi notificationService)
@@ -329,16 +330,15 @@ export async function dispatchNotification(
       logger.info(`Channel ${channel} dispatch thành công.`, {
         notificationId,
         userId: dispatchContext.userId,
-        channel,
+        channels: channel,
         providerMessageId: result.providerMessageId
       });
     } else {
       logger.warn(`Channel ${channel} dispatch thất bại.`, {
         notificationId,
         userId: dispatchContext.userId,
-        channel,
-        errorMessage: result.errorMessage,
-        retryable: result.retryable
+        channels: channel,
+        errorMessage: result.errorMessage
       });
     }
 

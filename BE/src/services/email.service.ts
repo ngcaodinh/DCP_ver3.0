@@ -9,8 +9,6 @@ import path from 'path';
 import Handlebars from 'handlebars';
 import { getLogger } from '../config/logger';
 import {
-  EMAIL_MAX_RETRY_ATTEMPTS,
-  EMAIL_RETRY_INTERVAL_MS,
   EMAIL_TIMEOUT_MS,
   NOTIFICATION_EMAIL_TEMPLATE_MAP,
   getResolvedUnsubscribeBaseUrl

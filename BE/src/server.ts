@@ -19,6 +19,7 @@ import { startSbtMintRecoveryScheduler } from './workers/sbtMintRecoverySchedule
 import { initializeSbtEventBridge } from './services/sbtEventBridge.service';
 import { startDataMapperWorker } from './workers/data-mapper.worker';
 import { startNotificationWorker, stopNotificationWorker } from './workers/notification.worker';
+import { startTrustScoreScheduler, stopTrustScoreScheduler } from './workers/trustScoreScheduler';
 
 const logger = getLogger();
 
@@ -59,6 +60,8 @@ function startBackgroundWorkers(): void {
   startDataMapperWorker();
   // Notification Worker (E1): consume notification queue, channel routing + throttle + DLQ
   startNotificationWorker();
+  // Trust Score Scheduler (G1): tính lại trust score cho toàn bộ donor mỗi 24 giờ
+  startTrustScoreScheduler();
 }
 
 /**
@@ -92,6 +95,8 @@ async function startServer(): Promise<void> {
     logger.info(`Nhận signal ${signal}, đang shutdown...`);
     try {
       shutdownSocketServer();
+      // Trust Score Scheduler (G1): clear timeout để job không fire sau khi shutdown
+      stopTrustScoreScheduler();
       stopManualReviewEscalationWorker();
       stopOverrideExpiryWorker();
       await stopOracleWorker();
