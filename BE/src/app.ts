@@ -20,6 +20,7 @@ import { createPayosWebhookRoutes } from './routes/webhooks/payos.webhook';
 import { createTransparencyRoutes } from './routes/transparencyRoutes';
 import { createVerificationRoutes } from './routes/verification.routes';
 import { createFeedbackRoutes } from './routes/feedback.routes';
+import { createPublicFeedbackRoutes } from './routes/public-feedback.routes';
 import { validateGuestJwtConfig } from './config/guestJsonWebToken';
 import { applySeoAndCacheHeaders } from './middleware/seoCacheMiddleware';
 import { API_GUEST_PREFIX } from './config/apiPrefixes';
@@ -117,6 +118,7 @@ function registerRoutes(): void {
   application.use('/api/transparency', createTransparencyRoutes());
   application.use('/api/transparency', createVerificationRoutes());
   application.use('/api/feedback', createFeedbackRoutes());
+  application.use('/api/feedback', createPublicFeedbackRoutes());
   application.use(API_GUEST_PREFIX, createGuestRoutes());
 }
 

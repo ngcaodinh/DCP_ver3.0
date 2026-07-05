@@ -81,3 +81,12 @@ export function createRateLimitMiddleware(maxRequests: number, timeWindowInMs: n
   };
 }
 
+/**
+ * Hàm reset toàn bộ rate limit store. Mục đích: chỉ dùng trong test để tránh pollution giữa các test case
+ * khi rate limit store là module-level singleton. KHÔNG sử dụng trong production code.
+ * Tên hàm bắt đầu bằng `__` để đánh dấu đây là internal helper, không nên gọi từ business logic.
+ */
+export function __resetRateLimitStore(): void {
+  rateLimitStore.clear();
+}
+
