@@ -363,7 +363,7 @@ describe('publicFeedback.service - unit tests', () => {
 
     // B9: Cache key đúng format
     it('B9: cache key có format đúng "feedback:stats:{projectId}"', async () => {
-      mockAggregate.mockResolvedValue([{
+      mockAggregate.mockResolvedValueOnce([{
         totalCount: 1,
         avgRating: 5,
         rating1: 0, rating2: 0, rating3: 0, rating4: 0, rating5: 1
@@ -371,10 +371,23 @@ describe('publicFeedback.service - unit tests', () => {
 
       await getPublicFeedbackStats('my-special-project');
 
-      mockAggregate.mockResolvedValue([]);
+      // Verify exact cache key được set với prefix `feedback:stats:` và projectId
+      expect(mockCacheStore.has('feedback:stats:my-special-project')).toBe(true);
+      // Verify entry chứa đúng stats object
+      const cachedEntry = mockCacheStore.get('feedback:stats:my-special-project');
+      expect(cachedEntry?.value).toMatchObject({
+        avgRating: 5,
+        totalCount: 1
+      });
+
+      // Verify different projectId tạo cache key khác → fresh DB query
+      mockAggregate.mockResolvedValueOnce([]);
 
       const resultDifferent = await getPublicFeedbackStats('different-project');
 
+      expect(mockCacheStore.has('feedback:stats:different-project')).toBe(true);
+      expect(mockCacheStore.has('feedback:stats:my-special-project')).toBe(true);
+      expect(mockAggregate).toHaveBeenCalledTimes(2);
       expect(resultDifferent.avgRating).toBeNull();
     });
 

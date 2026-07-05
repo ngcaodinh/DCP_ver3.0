@@ -5,7 +5,7 @@
  */
 import express from 'express';
 import request from 'supertest';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, beforeEach } from 'vitest';
 
 // Mock logger
 vi.mock('../../config/logger', () => ({
@@ -31,6 +31,7 @@ vi.mock('../../services/publicFeedback.service', () => ({
 
 // Import SAU khi mock để đảm bảo mock được áp dụng
 import { createPublicFeedbackRoutes } from '../../routes/public-feedback.routes';
+import { __resetRateLimitStore } from '../../middleware/rateLimitMiddleware';
 
 function createTestApplication() {
   const testApplication = express();
@@ -40,6 +41,12 @@ function createTestApplication() {
 }
 
 describe('publicFeedbackRoutes - rate limit (integration)', () => {
+  // Reset rate limit store trước mỗi test để tránh pollution giữa các test case
+  // do rateLimitStore là module-level singleton trong rateLimitMiddleware.ts
+  beforeEach(() => {
+    __resetRateLimitStore();
+  });
+
   it('trả về 429 khi vượt quá 30 requests/phút từ cùng IP', async () => {
     const testApplication = createTestApplication();
 
@@ -62,12 +69,15 @@ describe('publicFeedbackRoutes - rate limit (integration)', () => {
     // Bucket "public-feedback" được share giữa GET /public/:projectId và GET /stats/:projectId
     // (cùng bucket name trong route config). Đây là design choice — bucket name
     // định nghĩa group rate limit, không phải từng endpoint.
-    // Verify: nếu dùng hết 30 request trên public, stats endpoint cũng bị block.
+    // Verify: consume budget 30 requests trên /public, rồi /stats endpoint cũng bị block.
+    // Bucket bắt đầu từ 0 (đã reset qua beforeEach), nên test này thực sự verify bucket-sharing,
+    // không phải "bucket đã đầy từ test trước vẫn trả 429".
     for (let requestIndex = 0; requestIndex < 30; requestIndex++) {
       await request(testApplication).get('/api/feedback/public/proj1');
     }
 
     const statsBlockedResponse = await request(testApplication).get('/api/feedback/stats/proj1');
     expect(statsBlockedResponse.status).toBe(429);
+    expect(statsBlockedResponse.body.errorCode).toBe('RATE_LIMIT_EXCEEDED');
   });
 });

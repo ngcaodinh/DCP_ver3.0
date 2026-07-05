@@ -247,7 +247,10 @@ describe('publicFeedbackRoutes - logic tests', () => {
       expect(response.body.data.avgRating).toBe(5);
     });
 
-    it('cache kết quả stats - gọi 2 lần đều trả về cùng kết quả', async () => {
+    // Service bị mock toàn bộ, nên test này chỉ verify controller consistency (repeated calls
+    // trả về cùng kết quả từ mock), KHÔNG phải cache hit. Cache behavior thực sự được verify
+    // trong publicFeedback.service.test.ts (Group B).
+    it('controller trả về kết quả nhất quán cho repeated calls (service đã mock)', async () => {
       (getPublicFeedbackStats as ReturnType<typeof vi.fn>).mockResolvedValue({
         avgRating: 5,
         totalCount: 1,
