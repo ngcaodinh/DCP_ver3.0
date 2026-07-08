@@ -47,9 +47,17 @@ export async function upsertDonationByTransactionHash(payload: DonationRecord): 
   return updatedDonation!.toObject() as DonationRecord;
 }
 
-/** Hàm lấy danh sách donation theo project. Mục đích: phục vụ API lịch sử quyên góp minh bạch theo UC3.1. */
+/**
+ * Hàm lấy danh sách donation theo project.
+ * Mục đích: phục vụ API lịch sử quyên góp minh bạch theo UC3.1.
+ * Chỉ trả về donations đã được xác nhận trên chain (donationStatus: 'INDEXED').
+ */
 export async function findDonationsByProjectId(projectId: string, limitCount: number): Promise<DonationRecord[]> {
-  return DonationMongoModel.find({ projectId }).sort({ timestamp: -1 }).limit(limitCount).lean<DonationRecord[]>().exec();
+  return DonationMongoModel.find({ projectId, donationStatus: 'INDEXED' })
+    .sort({ timestamp: -1 })
+    .limit(limitCount)
+    .lean<DonationRecord[]>()
+    .exec();
 }
 
 /** Hàm lấy danh sách donation toàn cục. Mục đích: cung cấp dữ liệu gốc cho trang danh sách nhà hảo tâm công khai. */

@@ -262,6 +262,26 @@ type LogMetadata = {
   fromBlock?: number;
   toBlock?: number;
   batchContentHash?: string;
+  // G2 — QF Ranking
+  roundId?: string;
+  cacheKey?: string;
+  windowDays?: number;
+  hasTimeWindow?: boolean;
+  // General
+  yearMonth?: string;
+  totalDonors?: number;
+  totalDonationRecords?: number;
+  skippedDonors?: number;
+  // Pagination
+  page?: number;
+  limit?: number;
+  // Cache
+  cacheHit?: boolean;
+  // Time
+  startAt?: string;
+  endAt?: string;
+  // Error
+  errorMessage?: string;
 };
 
 
