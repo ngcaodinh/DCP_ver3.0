@@ -3,7 +3,7 @@
  * 7 test cases: cache hit, formula correctness, fallback trust, pagination, roundId syntaxes.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { computeTrustAdjustedRankings } from '../../services/qf-ranking.service';
+import { computeTrustAdjustedRankings, MAX_SAFE_DONATION_AMOUNT } from '../../services/qf-ranking.service';
 import { parseRoundIdToTimeWindow, normalizeRoundIdForCacheKey } from '../../utils/roundId.utils';
 import { TRUST_SCORE_FALLBACK } from '../../types/trust-score.types';
 
@@ -87,7 +87,8 @@ describe('Cache hit returns cached result', () => {
         projectTrustAdjustedScore: 800,
         originalQfScore: 1000,
         totalDonors: 1,
-        totalDonationRecords: 1
+        totalDonationRecords: 1,
+        skippedDonors: 0
       },
       trustFactors: {
         averageTrustScore: 0.8,
@@ -118,6 +119,112 @@ describe('Cache hit returns cached result', () => {
     expect(result.metadata.cacheHit).toBe(true);
     expect(result.metadata.projectId).toBe('proj-1');
     expect(mockFindDonationsByProjectId).not.toHaveBeenCalled();
+  });
+});
+
+// ============================================================
+// TEST 1b: Stale cache chua Infinity/NaN (serialize thanh null) bi tu choi
+// ============================================================
+describe('Stale cache chua gia tri khong huu han bi tu choi va recompute', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    inMemoryStore.clear();
+  });
+
+  afterEach(() => {
+    inMemoryStore.clear();
+  });
+
+  it('bo qua cache neu scores chua null (tu Infinity bi JSON.stringify) va recompute', async () => {
+    // Response cũ từ deployment trước fix overflow: projectTrustAdjustedScore là Infinity,
+    // sau JSON.stringify sẽ trở thành null trong JSON, JSON.parse không throw.
+    const staleCachedResponseWithNull = {
+      rankings: [],
+      scores: {
+        projectTrustAdjustedScore: null, // giả lập Infinity bị serialize thành null
+        originalQfScore: 1000,
+        totalDonors: 1,
+        totalDonationRecords: 1,
+        skippedDonors: 0
+      },
+      trustFactors: { averageTrustScore: 0.8, donorsWithTrustScore: 1, donorsWithFallback: 0 },
+      metadata: {
+        projectId: 'proj-stale',
+        roundId: 'default',
+        totalItems: 1,
+        totalPages: 1,
+        currentPage: 1,
+        pageSize: 20,
+        cachedAt: new Date().toISOString(),
+        cacheHit: false
+      }
+    };
+
+    mockRedisGet.mockResolvedValueOnce(JSON.stringify(staleCachedResponseWithNull));
+    // roundId='all' -> service dùng findDonationsByProjectId (không có time window).
+    // Lưu ý: không mock mockGetTrustScoresByDonorAddresses vì donations=[] → fetchTrustScores
+    // return sớm mà không gọi repository — nếu queue thêm mockResolvedValueOnce ở đây, giá trị
+    // sẽ bị "leak" sang lần gọi thực sự đầu tiên của test kế tiếp và làm sai kết quả.
+    mockFindDonationsByProjectId.mockResolvedValueOnce([]);
+
+    const result = await getTrustAdjustedQfRankings({
+      projectId: 'proj-stale',
+      roundId: 'all',
+      page: 1,
+      limit: 20
+    });
+
+    // Cache bị từ chối vì chứa giá trị không hữu hạn → phải recompute, không phải cacheHit
+    expect(result.metadata.cacheHit).toBe(false);
+    expect(mockFindDonationsByProjectId).toHaveBeenCalledTimes(1);
+  });
+
+  it('bo qua cache neu rankings[].trustAdjustedMatch bi null (scores.* hop le)', async () => {
+    // scores.* hợp lệ nhưng entry trong rankings có trustAdjustedMatch = null
+    // (giả lập bug tương lai làm Infinity xuất hiện trong rankings[] thay vì scores.*)
+    const staleWithCorruptedRankings = {
+      rankings: [
+        {
+          donorAddress: '0xabcd...1234',
+          contributionAmount: 500,
+          trustScore: 0.8,
+          trustAdjustedMatch: null, // serialized Infinity → null
+          tier: 'Gold'
+        }
+      ],
+      scores: {
+        projectTrustAdjustedScore: 800,
+        originalQfScore: 1000,
+        totalDonors: 1,
+        totalDonationRecords: 1,
+        skippedDonors: 0
+      },
+      trustFactors: { averageTrustScore: 0.8, donorsWithTrustScore: 1, donorsWithFallback: 0 },
+      metadata: {
+        projectId: 'proj-stale-rankings',
+        roundId: 'all',
+        totalItems: 1,
+        totalPages: 1,
+        currentPage: 1,
+        pageSize: 20,
+        cachedAt: new Date().toISOString(),
+        cacheHit: false
+      }
+    };
+
+    mockRedisGet.mockResolvedValueOnce(JSON.stringify(staleWithCorruptedRankings));
+    mockFindDonationsByProjectId.mockResolvedValueOnce([]);
+
+    const result = await getTrustAdjustedQfRankings({
+      projectId: 'proj-stale-rankings',
+      roundId: 'all',
+      page: 1,
+      limit: 20
+    });
+
+    // Validator phải từ chối cache do rankings[0].trustAdjustedMatch = null → recompute
+    expect(result.metadata.cacheHit).toBe(false);
+    expect(mockFindDonationsByProjectId).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -354,7 +461,6 @@ describe('computeTrustAdjustedRankings', () => {
 
     const expectedDonor1Adjusted = Math.sqrt(100 * 0.5);
     const expectedDonor2Adjusted = Math.sqrt(400 * 0.8);
-    const expectedTotal = (expectedDonor1Adjusted + expectedDonor2Adjusted) ** 2;
 
     expect(result.donorScores.length).toBe(2);
     expect(result.totalTrustAdjustedScore).toBeCloseTo(expectedDonor1Adjusted + expectedDonor2Adjusted, 5);
@@ -374,5 +480,101 @@ describe('computeTrustAdjustedRankings', () => {
     expect(result.donorScores[0].trustScore).toBe(TRUST_SCORE_FALLBACK);
     expect(result.donorsWithFallback).toBe(1);
     expect(result.donorsWithTrustScore).toBe(0);
+  });
+
+  it('bo qua donation vuot nguong MAX_SAFE_DONATION_AMOUNT de tranh overflow/Infinity', () => {
+    const aggregated = new Map<string, number>([
+      ['0xsafe', 1e12],
+      ['0xoverflow', MAX_SAFE_DONATION_AMOUNT + 1]
+    ]);
+
+    const trustMap = new Map<string, number>([
+      ['0xsafe', 0.9],
+      ['0xoverflow', 0.9]
+    ]);
+
+    const result = computeTrustAdjustedRankings({ aggregatedDonations: aggregated, trustScoreMap: trustMap });
+
+    // Chỉ donor an toàn được tính vào ranking
+    expect(result.donorScores.length).toBe(1);
+    expect(result.donorScores[0].address).toBe('0xsafe');
+    expect(Number.isFinite(result.totalTrustAdjustedScore)).toBe(true);
+    expect(Number.isFinite(result.totalRawScore)).toBe(true);
+    expect(result.skippedDonors).toBe(1);
+  });
+
+  it('khong sinh Infinity khi amount × trustScore vuot Number.MAX_SAFE_INTEGER', () => {
+    const aggregated = new Map<string, number>([
+      ['0xhuge', 1e16] // amount cực lớn, lớn hơn MAX_SAFE_DONATION_AMOUNT
+    ]);
+
+    const trustMap = new Map<string, number>([
+      ['0xhuge', 1.0]
+    ]);
+
+    const result = computeTrustAdjustedRankings({ aggregatedDonations: aggregated, trustScoreMap: trustMap });
+
+    // Donor bị bỏ qua — không sinh NaN/Infinity lan truyền vào tổng
+    expect(result.donorScores.length).toBe(0);
+    expect(Number.isFinite(result.totalTrustAdjustedScore)).toBe(true);
+    expect(Number.isFinite(result.totalRawScore)).toBe(true);
+    expect(result.skippedDonors).toBe(1);
+  });
+
+  it('amount = MAX_SAFE_DONATION_AMOUNT (dung tai bien) van duoc tinh vao ranking', () => {
+    const aggregated = new Map<string, number>([
+      ['0xexact', MAX_SAFE_DONATION_AMOUNT]
+    ]);
+
+    const trustMap = new Map<string, number>([
+      ['0xexact', 0.5]
+    ]);
+
+    const result = computeTrustAdjustedRankings({ aggregatedDonations: aggregated, trustScoreMap: trustMap });
+
+    // So sánh "<=" nên donation đúng bằng ngưỡng vẫn được tính, không bị skip
+    expect(result.donorScores.length).toBe(1);
+    expect(result.skippedDonors).toBe(0);
+    expect(Number.isFinite(result.donorScores[0].trustAdjusted)).toBe(true);
+  });
+
+  it('bo qua donor co trustScore am (khong hop le) vi sinh NaN tu Math.sqrt', () => {
+    const aggregated = new Map<string, number>([
+      ['0xnegativetrust', 100]
+    ]);
+
+    // trustScore âm không hợp lệ theo schema DB, nhưng test phòng thủ ở tầng tính toán
+    const trustMap = new Map<string, number>([
+      ['0xnegativetrust', -0.5]
+    ]);
+
+    const result = computeTrustAdjustedRankings({ aggregatedDonations: aggregated, trustScoreMap: trustMap });
+
+    expect(result.donorScores.length).toBe(0);
+    expect(result.skippedDonors).toBe(1);
+    expect(Number.isFinite(result.totalTrustAdjustedScore)).toBe(true);
+  });
+
+  it('nhieu donor vuot nguong dong thoi van giu tong finite va dem dung skippedDonors', () => {
+    const aggregated = new Map<string, number>([
+      ['0xsafe1', 500],
+      ['0xoverflow1', MAX_SAFE_DONATION_AMOUNT + 1],
+      ['0xoverflow2', 1e18],
+      ['0xsafe2', 1000]
+    ]);
+
+    const trustMap = new Map<string, number>([
+      ['0xsafe1', 0.6],
+      ['0xoverflow1', 0.6],
+      ['0xoverflow2', 0.6],
+      ['0xsafe2', 0.6]
+    ]);
+
+    const result = computeTrustAdjustedRankings({ aggregatedDonations: aggregated, trustScoreMap: trustMap });
+
+    expect(result.donorScores.length).toBe(2);
+    expect(result.skippedDonors).toBe(2);
+    expect(Number.isFinite(result.totalTrustAdjustedScore)).toBe(true);
+    expect(Number.isFinite(result.totalRawScore)).toBe(true);
   });
 });

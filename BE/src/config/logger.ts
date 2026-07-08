@@ -271,6 +271,7 @@ type LogMetadata = {
   yearMonth?: string;
   totalDonors?: number;
   totalDonationRecords?: number;
+  skippedDonors?: number;
   // Pagination
   page?: number;
   limit?: number;

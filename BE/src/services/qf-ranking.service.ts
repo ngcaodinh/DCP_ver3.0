@@ -24,8 +24,12 @@ import { getTrustScoresByDonorAddresses } from '../repositories/donorTrustScoreR
 
 const logger = getLogger();
 
-/** Prefix cho cache key của QF rankings. */
-const QF_RANKING_CACHE_PREFIX = 'qf:rankings:';
+/**
+ * Prefix và version cho cache key của QF rankings.
+ * Tăng version mỗi khi thay đổi cấu trúc response để tránh serve stale data từ deployment cũ.
+ * v1 → v2: thêm field skippedDonors, fix overflow guard.
+ */
+const QF_RANKING_CACHE_PREFIX = 'qf:rankings:v2:';
 
 /**
  * Số lượng donation tối đa được tải về khi không giới hạn theo thời gian (roundId="all").
@@ -74,6 +78,47 @@ function maskDonorAddress(address: string): string {
  */
 function buildQfRankingCacheKey(projectId: string, normalizedRoundId: string): string {
   return `${QF_RANKING_CACHE_PREFIX}${projectId}:${normalizedRoundId}`;
+}
+
+/**
+ * Hàm kiểm tra tính hợp lệ của response đã cache.
+ * Mục đích: chặn việc serve lại data cũ (từ deployment trước fix overflow) có chứa
+ * Infinity/NaN — khi JSON.stringify, Infinity/NaN bị serialize thành null, nên
+ * JSON.parse không throw lỗi mà âm thầm trả về null cho các field số học.
+ * Việc bump QF_RANKING_CACHE_PREFIX version khi đổi cấu trúc response cũng giúp
+ * tránh trường hợp này, hàm này là lớp bảo vệ bổ sung.
+ */
+function isValidCachedRanking(data: QfRankingResponse): boolean {
+  if (data == null || data.scores == null || data.metadata == null) return false;
+
+  const numericFields = [
+    data.scores.projectTrustAdjustedScore,
+    data.scores.originalQfScore,
+    data.scores.totalDonors,
+    data.scores.totalDonationRecords,
+    data.scores.skippedDonors
+  ];
+
+  if (!Array.isArray(data.rankings)) return false;
+
+  // Kiểm tra từng entry trong rankings để chặn Infinity/null len vào từng field số học
+  for (const entry of data.rankings) {
+    if (
+      entry == null ||
+      typeof entry.contributionAmount !== 'number' || !Number.isFinite(entry.contributionAmount) ||
+      typeof entry.trustScore !== 'number' || !Number.isFinite(entry.trustScore) ||
+      typeof entry.trustAdjustedMatch !== 'number' || !Number.isFinite(entry.trustAdjustedMatch)
+    ) {
+      return false;
+    }
+  }
+
+  // Kiểm tra trustFactors — averageTrustScore cũng có thể bị null nếu từ deployment cũ
+  if (data.trustFactors == null || typeof data.trustFactors.averageTrustScore !== 'number' || !Number.isFinite(data.trustFactors.averageTrustScore)) {
+    return false;
+  }
+
+  return numericFields.every(value => typeof value === 'number' && Number.isFinite(value));
 }
 
 /**
@@ -186,6 +231,8 @@ interface ComputeRankingsIntermediate {
   totalRawScore: number;
   donorsWithTrustScore: number;
   donorsWithFallback: number;
+  /** Số unique addresses bị bỏ qua vì amount > MAX_SAFE_DONATION_AMOUNT hoặc kết quả không hữu hạn. */
+  skippedDonors: number;
 }
 
 /**
@@ -197,18 +244,33 @@ interface ComputeRankingsIntermediate {
  * - projectTrustAdjustedScore = (Σ trustAdjusted)²
  * - rawScore = √amount
  * - originalQfScore = (Σ rawScore)²
+ *
+ * Giới hạn số an toàn: donation có amount vượt 1 triệu tỷ VND (1e15) sẽ bị bỏ qua.
+ * Ngưỡng này vừa cách xa mọi giá trị donation thực tế, vừa đảm bảo amount × trustScore
+ * không vượt Number.MAX_SAFE_INTEGER (~9×10¹⁵), tránh mất độ chính xác hoặc tràn số
+ * khi bình phương tổng điểm (Σ trustAdjusted)².
  */
+export const MAX_SAFE_DONATION_AMOUNT = 1e15;
+
 export function computeTrustAdjustedRankings(input: ComputeRankingsInput): ComputeRankingsIntermediate {
   let totalTrustAdjustedScore = 0;
   let totalRawScore = 0;
   let donorsWithTrustScore = 0;
   let donorsWithFallback = 0;
+  let skippedDonors = 0;
 
   const donorScores: ComputeRankingsIntermediate['donorScores'] = [];
 
   for (const [address, amount] of input.aggregatedDonations) {
-    // Bỏ qua donations có giá trị không hợp lệ để tránh NaN lan truyền vào công thức
+    // Bỏ qua donations có giá trị không hợp lệ (≤0) để tránh NaN lan truyền vào công thức.
     if (amount <= 0) continue;
+
+    // Bỏ qua donations vượt ngưỡng an toàn để chặn Infinity khi amount × trustScore
+    // vượt Number.MAX_SAFE_INTEGER. Donor này bị đếm vào skippedDonors để FE biết.
+    if (amount > MAX_SAFE_DONATION_AMOUNT) {
+      skippedDonors++;
+      continue;
+    }
 
     const trustScore = input.trustScoreMap.get(address) ?? TRUST_SCORE_FALLBACK;
 
@@ -220,6 +282,12 @@ export function computeTrustAdjustedRankings(input: ComputeRankingsInput): Compu
 
     const trustAdjusted = Math.sqrt(amount * trustScore);
     const rawScore = Math.sqrt(amount);
+
+    // Phòng thêm: nếu kết quả vẫn không hữu hạn (ví dụ trustScore bất thường), bỏ qua và đếm.
+    if (!Number.isFinite(trustAdjusted) || !Number.isFinite(rawScore)) {
+      skippedDonors++;
+      continue;
+    }
 
     totalTrustAdjustedScore += trustAdjusted;
     totalRawScore += rawScore;
@@ -238,12 +306,14 @@ export function computeTrustAdjustedRankings(input: ComputeRankingsInput): Compu
     totalTrustAdjustedScore,
     totalRawScore,
     donorsWithTrustScore,
-    donorsWithFallback
+    donorsWithFallback,
+    skippedDonors
   };
 }
 
 /**
  * Hàm finalize rankings — sort, paginate, build response.
+ * skippedDonors được lấy từ intermediate để điền vào scores.skippedDonors.
  */
 function finalizeRankings(
   intermediate: ComputeRankingsIntermediate,
@@ -283,7 +353,8 @@ function finalizeRankings(
       projectTrustAdjustedScore: Math.round(projectTrustAdjustedScore * 1000) / 1000,
       originalQfScore: Math.round(originalQfScore * 1000) / 1000,
       totalDonors: intermediate.donorScores.length,
-      totalDonationRecords
+      totalDonationRecords,
+      skippedDonors: intermediate.skippedDonors
     },
     trustFactors: {
       averageTrustScore: Math.round(averageTrustScore * 1000) / 1000,
@@ -334,9 +405,12 @@ export async function getTrustAdjustedQfRankings(
   if (cached) {
     try {
       const cachedData = JSON.parse(cached) as QfRankingResponse;
-      cachedData.metadata.currentPage = page;
-      cachedData.metadata.cacheHit = true;
-      return cachedData;
+      if (isValidCachedRanking(cachedData)) {
+        cachedData.metadata.currentPage = page;
+        cachedData.metadata.cacheHit = true;
+        return cachedData;
+      }
+      logger.warn('Cached QF ranking chứa giá trị không hữu hạn hoặc thiếu field, recomputing', { cacheKey });
     } catch {
       logger.warn('Failed to parse cached QF ranking, recomputing', { cacheKey });
     }
@@ -365,6 +439,7 @@ export async function getTrustAdjustedQfRankings(
     projectId,
     totalDonors: intermediate.donorScores.length,
     totalDonationRecords: donations.length,
+    skippedDonors: intermediate.skippedDonors,
     cacheHit: false
   });
 

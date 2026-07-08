@@ -40,10 +40,20 @@ export interface QfScores {
   projectTrustAdjustedScore: number;
   /** Điểm QF gốc không nhân trust: (Σ √dᵢ)². */
   originalQfScore: number;
-  /** Tổng số donor unique đã contribute. */
+  /** Tổng số donor unique được tính vào ranking (không kể bị skip). */
   totalDonors: number;
-  /** Tổng số donation records đã indexed. */
+  /**
+   * Tổng số donation records đã fetch từ DB (raw — bao gồm cả records bị skip).
+   * Xem thêm: skippedDonors.
+   */
   totalDonationRecords: number;
+  /**
+   * Số donor unique (đã aggregate theo address) bị bỏ qua khỏi công thức QF vì tổng
+   * amount vượt MAX_SAFE_DONATION_AMOUNT, hoặc kết quả tính toán không hữu hạn (guard
+   * chống overflow số học). Thường = 0 trong điều kiện vận hành bình thường.
+   * Lưu ý: đây là đơn vị donor (per address), KHÔNG phải số raw donation records.
+   */
+  skippedDonors: number;
 }
 
 /**
