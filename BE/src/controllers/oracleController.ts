@@ -1,5 +1,6 @@
 import { Response } from 'express';
 import { randomUUID } from 'crypto';
+import { z } from 'zod';
 import { getLogger } from '../config/logger';
 import { sendSuccessResponse, sendErrorResponse, sendErrorFromUnknown } from '../utils/apiResponse';
 import type { AuthenticatedRequest } from '../middleware/authenticationMiddleware';
@@ -19,6 +20,22 @@ import { findPendingOverrideRequests, countPendingOverrideRequests, findOverride
 import { findProjectById } from '../repositories/projectRepository';
 
 const logger = getLogger();
+
+/**
+ * Schema validate body cho POST /api/oracle/override-requests/:overrideRequestId/vote.
+ * Mục đích: thay thế validation thủ công bằng Zod để đảm bảo type-safety và bảo mật đầu vào.
+ * - vote: enum APPROVE hoặc REJECT
+ * - reason: string, trim, tối thiểu 10 ký tự, tối đa 1000 ký tự
+ */
+const voteOverrideBodySchema = z.object({
+  vote: z.enum(['APPROVE', 'REJECT'], {
+    errorMap: () => ({ message: 'vote phải là APPROVE hoặc REJECT.' })
+  }),
+  reason: z.string({ required_error: 'Thiếu lý do vote (reason).' })
+    .trim()
+    .min(10, 'Lý do vote phải tối thiểu 10 ký tự.')
+    .max(1000, 'Lý do vote tối đa 1000 ký tự.')
+});
 
 /**
  * POST /api/oracle/verify-image
@@ -343,20 +360,15 @@ export async function handleVoteOverrideRequest(
     return;
   }
 
-  const { vote, reason } = request.body as { vote?: string; reason?: string };
-
-  if (vote !== 'APPROVE' && vote !== 'REJECT') {
-    sendErrorResponse(response, 400, 'vote phải là APPROVE hoặc REJECT.', 'VALIDATION_ERROR');
+  // Validate body bằng Zod schema thay vì manual ad-hoc checks
+  const parseResult = voteOverrideBodySchema.safeParse(request.body);
+  if (!parseResult.success) {
+    // Zod trả về lỗi đầu tiên cho UX tốt nhất
+    const firstIssue = parseResult.error.issues[0];
+    sendErrorResponse(response, 400, firstIssue.message, 'VALIDATION_ERROR');
     return;
   }
-  if (!reason?.trim()) {
-    sendErrorResponse(response, 400, 'Thiếu lý do vote (reason).', 'VALIDATION_ERROR');
-    return;
-  }
-  if (reason.trim().length < 10) {
-    sendErrorResponse(response, 400, 'Lý do vote phải tối thiểu 10 ký tự.', 'VALIDATION_ERROR');
-    return;
-  }
+  const { vote, reason } = parseResult.data;
 
   const { userId, role } = request.authenticatedUser;
 
