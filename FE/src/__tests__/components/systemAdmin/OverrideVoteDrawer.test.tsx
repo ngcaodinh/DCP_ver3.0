@@ -27,6 +27,26 @@ vi.mock('@/app/components/oracle/GeofenceMapLazy', () => ({
   GeofenceMapLazy: () => <div data-testid="geofence-map-mock" />,
 }));
 
+// Mock TanStack Query — OverrideVoteDrawer bây giờ dùng useOverrideRequests/useSubmitOverrideVote
+// Dùng module-level objects được update trong từng test case
+const overrideRequestsMock = {
+  data: [] as unknown[],
+  isLoading: false,
+  error: null,
+  refetch: vi.fn().mockResolvedValue({ data: [], error: null }),
+};
+
+const submitVoteMock = {
+  mutateAsync: vi.fn().mockResolvedValue({ outcome: 'VOTE_RECORDED' as const, pendingVoters: 2, totalVoters: 3 }),
+};
+
+// Dùng mockImplementation để mỗi lần hook được gọi nó trả về object mới nhất
+// (React Query useQuery nhận object reference mới → trigger re-render)
+vi.mock('@/app/hooks/useOverrideRequests', () => ({
+  useOverrideRequests: vi.fn(() => ({ ...overrideRequestsMock })),
+  useSubmitOverrideVote: vi.fn(() => ({ ...submitVoteMock })),
+}));
+
 import { fetchApi } from '@/app/utils/apiClient';
 import { readAuthSession } from '@/app/utils/authSession';
 import OverrideVoteDrawer from '@/app/components/systemAdmin/tailwind/OverrideVoteDrawer';
@@ -139,11 +159,11 @@ const mockItemNoGps = {
 // =============================================================================
 
 function mockApiResponse(items: typeof mockItemPending[]) {
-  vi.mocked(fetchApi).mockResolvedValue({
-    success: true,
-    message: 'OK',
-    data: { items, total: items.length }
-  } as never);
+  // I1: TanStack Query mock thay vì fetchApi trực tiếp
+  overrideRequestsMock.data = items;
+  overrideRequestsMock.isLoading = false;
+  overrideRequestsMock.error = null;
+  overrideRequestsMock.refetch = vi.fn().mockResolvedValue({ data: items, error: null });
 }
 
 function mockAuthSession(userId = CURRENT_USER_ID) {
@@ -402,5 +422,70 @@ describe('OverrideVoteDrawer', () => {
 
     // Không còn nút vote
     expect(findButton('Dong y Ghi de')).toBeNull();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 9: Consistency warning banner khi validateVoteConsistency fail
+  // ---------------------------------------------------------------------------
+  it('hiển thị warning banner khi số phiếu vượt quá số ủy viên trong snapshot', async () => {
+    // Mock API trả dữ liệu không nhất quán: 4 vote nhưng chỉ có 3 commissioner
+    const inconsistentItem = {
+      ...mockItemPending,
+      commissionerSnapshot: [
+        { userId: 'admin-001', role: 'admin' },
+        { userId: 'admin-002', role: 'admin' },
+        { userId: 'reg-001', role: 'regulatory' },
+      ],
+      // 4 votes nhưng chỉ có 3 commissioner → vi phạm invariant
+      votes: [
+        { commissionerId: 'admin-001', commissionerRole: 'admin', vote: 'APPROVE' as const, reason: 'ok', votedAt: '2026-06-12T10:05:00.000Z' },
+        { commissionerId: 'admin-002', commissionerRole: 'admin', vote: 'APPROVE' as const, reason: 'ok', votedAt: '2026-06-12T10:06:00.000Z' },
+        { commissionerId: 'reg-001', commissionerRole: 'regulatory', vote: 'APPROVE' as const, reason: 'ok', votedAt: '2026-06-12T10:07:00.000Z' },
+        { commissionerId: 'extra-voter', commissionerRole: 'admin', vote: 'REJECT' as const, reason: 'not in snapshot', votedAt: '2026-06-12T10:08:00.000Z' },
+      ],
+    };
+    mockApiResponse([inconsistentItem]);
+
+    await act(async () => {
+      render(<OverrideVoteDrawer {...defaultProps} />);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('proj-abc')).toBeInTheDocument();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('proj-abc'));
+    });
+
+    // Warning banner phải hiển thị
+    assertText('Du lieu bieu quyet khong nhat quan');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 10: Retry button trong warning banner gọi loadItems
+  // ---------------------------------------------------------------------------
+  it('nút "Tải lại dữ liệu" trong warning banner trigger refetch', async () => {
+    const { rerender } = await act(async () => {
+      const result = render(<OverrideVoteDrawer {...defaultProps} />);
+      return result;
+    });
+
+    // Mock initial data
+    mockApiResponse([mockItemPending]);
+
+    await waitFor(() => {
+      expect(screen.getByText('proj-abc')).toBeInTheDocument();
+    });
+
+    // Click vào item để trigger consistency check
+    await act(async () => {
+      fireEvent.click(screen.getByText('proj-abc'));
+    });
+
+    // Verify banner không hiển thị với data hợp lệ
+    await waitFor(() => {
+      expect(screen.queryByText(/khong nhat quan/i)).not.toBeInTheDocument();
+    });
   });
 });

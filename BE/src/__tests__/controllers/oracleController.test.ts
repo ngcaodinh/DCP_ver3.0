@@ -223,3 +223,102 @@ describe('handleGetOverrideRequestById', () => {
     expect(sendErrorResponse).toHaveBeenCalledWith(res, 400, expect.any(String), 'VALIDATION_ERROR');
   });
 });
+
+// ─── Tests: handleVoteOverrideRequest (Zod validation) ─────────────────────────
+
+import { handleVoteOverrideRequest } from '../../controllers/oracleController';
+import { submitOverrideVote } from '../../services/overrideVotingService';
+
+describe('handleVoteOverrideRequest — Zod validation (B1)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function buildVoteRequest(overrides: {
+    params?: Record<string, string>;
+    body?: Record<string, unknown>;
+    authenticatedUser?: { userId: string; role: string } | null;
+  } = {}): AuthenticatedRequest {
+    return {
+      params: { overrideRequestId: 'req-001', ...overrides.params },
+      body: overrides.body ?? {},
+      authenticatedUser: overrides.authenticatedUser !== undefined
+        ? overrides.authenticatedUser
+        : { userId: 'admin-1', role: 'admin' },
+      query: {}
+    } as unknown as AuthenticatedRequest;
+  }
+
+  it('[T5] 401 khi chưa đăng nhập', async () => {
+    const req = buildVoteRequest({ authenticatedUser: null });
+    const res = buildMockResponse();
+
+    await handleVoteOverrideRequest(req, res);
+
+    expect(sendErrorResponse).toHaveBeenCalledWith(res, 401, expect.any(String), 'UNAUTHENTICATED');
+  });
+
+  it('[T5] 400 khi vote không phải APPROVE hoặc REJECT (Zod enum)', async () => {
+    const req = buildVoteRequest({ body: { vote: 'INVALID', reason: 'Lý do đủ dài để pass validation' } });
+    const res = buildMockResponse();
+
+    await handleVoteOverrideRequest(req, res);
+
+    expect(sendErrorResponse).toHaveBeenCalledWith(res, 400, expect.any(String), 'VALIDATION_ERROR');
+  });
+
+  it('[T5] 400 khi thiếu reason', async () => {
+    const req = buildVoteRequest({ body: { vote: 'APPROVE' } });
+    const res = buildMockResponse();
+
+    await handleVoteOverrideRequest(req, res);
+
+    expect(sendErrorResponse).toHaveBeenCalledWith(res, 400, expect.any(String), 'VALIDATION_ERROR');
+  });
+
+  it('[T5] 400 khi reason dưới 10 ký tự', async () => {
+    const req = buildVoteRequest({ body: { vote: 'APPROVE', reason: 'ngắn' } });
+    const res = buildMockResponse();
+
+    await handleVoteOverrideRequest(req, res);
+
+    expect(sendErrorResponse).toHaveBeenCalledWith(res, 400, expect.stringContaining('10'), 'VALIDATION_ERROR');
+  });
+
+  it('[T5] 400 khi body rỗng hoàn toàn', async () => {
+    const req = buildVoteRequest({ body: {} });
+    const res = buildMockResponse();
+
+    await handleVoteOverrideRequest(req, res);
+
+    expect(sendErrorResponse).toHaveBeenCalledWith(res, 400, expect.any(String), 'VALIDATION_ERROR');
+  });
+
+  it('[T5] 403 khi user không phải admin hoặc regulatory', async () => {
+    const req = buildVoteRequest({
+      authenticatedUser: { userId: 'user-1', role: 'donor' },
+      body: { vote: 'APPROVE', reason: 'Lý do hợp lệ đủ dài để pass Zod' }
+    });
+    const res = buildMockResponse();
+
+    await handleVoteOverrideRequest(req, res);
+
+    expect(sendErrorResponse).toHaveBeenCalledWith(res, 403, expect.any(String), 'FORBIDDEN');
+  });
+
+  it('[T5] 200 khi body hợp lệ và vote được ghi nhận thành công', async () => {
+    vi.mocked(submitOverrideVote).mockResolvedValue({
+      outcome: 'VOTE_RECORDED',
+      pendingVoters: 2,
+      totalVoters: 3
+    } as never);
+    const req = buildVoteRequest({
+      body: { vote: 'APPROVE', reason: 'Lý do đủ dài để pass Zod validation' }
+    });
+    const res = buildMockResponse();
+
+    await handleVoteOverrideRequest(req, res);
+
+    expect(sendSuccessResponse).toHaveBeenCalledWith(res, 200, expect.any(String), expect.objectContaining({ outcome: 'VOTE_RECORDED' }));
+  });
+});
