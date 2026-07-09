@@ -1,6 +1,6 @@
 ﻿'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { clearAuthSession, readAuthSession } from '../../utils/authSession';
 import { buildApiUrl, fetchApi } from '@/app/utils/apiClient';
@@ -248,6 +248,8 @@ export default function RegulatoryBodiesPageClientTailwind() {
   const [isOverrideDrawerOpen, setIsOverrideDrawerOpen] = useState(false);
   const [overrideDrawerInitialId, setOverrideDrawerInitialId] = useState<string | null>(null);
   const [pendingOverridesCount, setPendingOverridesCount] = useState(0);
+  // I4: Track processed overrideRequestId để tránh duplicate toast/drawer open từ socket reconnect
+  const processedOverrideIdsRef = useRef<Set<string>>(new Set());
   const [currentUserId, setCurrentUserId] = useState('');
 
   const metricItemList = useMemo(
@@ -299,19 +301,41 @@ export default function RegulatoryBodiesPageClientTailwind() {
   }
 
   /** Override socket — regulatory commissioner nhận event ghi đè GPS realtime (B4). */
+  // I6: Hàm sync số lượng pending overrides từ API để đồng bộ badge (declare trước để dùng được trong handleOverrideEvent)
+  const syncPendingOverridesCount = useCallback(async () => {
+    const session = readAuthSession();
+    if (!session?.accessToken) return;
+    try {
+      const res = await fetchApi<{ total: number }>(
+        buildApiUrl('/api/oracle/pending-overrides?limit=0&skip=0'),
+        { headers: { Authorization: `Bearer ${session.accessToken}` } }
+      );
+      setPendingOverridesCount(res.data.total ?? 0);
+    } catch {
+      // Silently fail — badge sẽ được sync đúng khi drawer mở
+    }
+  }, []);
+
   const handleOverrideEvent = useCallback((event: OverrideSocketEvent) => {
     if (event.type === 'override:new') {
       // '__poll__' là signal từ polling fallback khi socket ngắt — không mở drawer, chỉ để hook biết refresh
       if (event.overrideRequestId === '__poll__') return;
+      // I4: Skip nếu đã xử lý request này rồi (tránh duplicate từ socket reconnect)
+      if (processedOverrideIdsRef.current.has(event.overrideRequestId)) return;
+      processedOverrideIdsRef.current.add(event.overrideRequestId);
+      if (processedOverrideIdsRef.current.size > 100) {
+        processedOverrideIdsRef.current = new Set(
+          Array.from(processedOverrideIdsRef.current).slice(-50)
+        );
+      }
       setOverrideDrawerInitialId(event.overrideRequestId);
       setIsOverrideDrawerOpen(true);
       pushToast('Yêu cầu ghi đè GPS mới', `Dự án ${event.projectId} cần biểu quyết.`, 'info');
     } else if (event.type === 'override:resolved') {
-      // Decrement optimistic — loadItems() đồng bộ lại khi drawer refresh tiếp theo
-      setPendingOverridesCount((prev) => Math.max(0, prev - 1));
+      // I6: Sync count từ API thay vì optimistic decrement để tránh race condition
+      syncPendingOverridesCount();
     }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-  // Deps rỗng an toàn: pushToast và setters chỉ dùng setToastItemList (stable); onEventRef pattern trong hook cập nhật callback mới nhất
+  }, [syncPendingOverridesCount]);
 
   useOverrideSocket({ onEvent: handleOverrideEvent });
 

@@ -7,7 +7,7 @@
 //           và các NonDashboard panels với đầy đủ auth, toast, drawer/modal coordination
 // =============================================================================
 
-import { useState, useCallback, useEffect, useMemo } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Sidebar from './tailwind/Sidebar';
 import Topbar from './tailwind/Topbar';
@@ -93,6 +93,8 @@ export default function AdminPageClientTailwind() {
   const [isOverrideDrawerOpen, setIsOverrideDrawerOpen] = useState(false);
   const [overrideDrawerInitialId, setOverrideDrawerInitialId] = useState<string | null>(null);
   const [pendingOverridesCount, setPendingOverridesCount] = useState(0);
+  // I4: Track processed overrideRequestId để tránh duplicate toast/drawer open từ socket reconnect
+  const processedOverrideIdsRef = useRef<Set<string>>(new Set());
 
   // Dashboard real API state
   const [dashboardMetrics, setDashboardMetrics] = useState<MetricCardData[]>([]);
@@ -181,8 +183,9 @@ export default function AdminPageClientTailwind() {
     return `${safeCurrentSignatures}/${safeRequiredSignatures}`;
   };
 
-  /** Hàm tạo metric ký duyệt từ danh sách yêu cầu thật để đồng bộ admin với regulatory-bodies. */
-  const buildDisbursementMetricList = (requestItemList: DisbursementSummaryItem[]): MetricCardData[] => {
+  /** Hàm tạo metric ký duyệt từ danh sách yêu cầu thật để đồng bộ admin với regulatory-bodies.
+   * Bọc useCallback với deps rỗng để giữ tham chiếu ổn định, cho phép loadDashboardData liệt kê trong dependency array. */
+  const buildDisbursementMetricList = useCallback((requestItemList: DisbursementSummaryItem[]): MetricCardData[] => {
     const pendingRequestCount = requestItemList.length;
     const emergencyRequestCount = requestItemList.filter((item) => item.requestMode === 'EMERGENCY').length;
     const almostApprovedRequestCount = requestItemList.filter((item) => item.currentSignatures + 1 >= item.requiredSignatures).length;
@@ -194,7 +197,7 @@ export default function AdminPageClientTailwind() {
       { colorVariant: 'green', valueText: String(almostApprovedRequestCount), labelText: 'Sắp đủ chữ ký', trendText: 'Theo ngưỡng chữ ký động', trendClassName: 'trend-up' },
       { colorVariant: 'teal', valueText: String(urgentDeadlineRequestCount), labelText: 'Hạn dưới 1 giờ', trendText: urgentDeadlineRequestCount > 0 ? 'Cần xử lý gấp' : 'Không có quá hạn gần', trendClassName: urgentDeadlineRequestCount > 0 ? 'trend-dn' : 'trend-up' },
     ];
-  };
+  }, []);
 
   /** Hàm tạo thống kê tiến độ chữ ký từ dữ liệu backend để card trạng thái không còn dùng số liệu cứng. */
   const buildSigningStatusSummary = (requestItemList: DisbursementSummaryItem[]): SigningStatusSummary => {
@@ -290,7 +293,7 @@ export default function AdminPageClientTailwind() {
     } finally {
       setDashboardLoading(false);
     }
-  }, []);
+  }, [buildDisbursementMetricList]);
 
   // Tải dashboard data khi auth đã xác thực thành công.
   useEffect(() => {
@@ -318,13 +321,35 @@ export default function AdminPageClientTailwind() {
   // OVERRIDE SOCKET (B4) — lắng nghe override:new, gọi sau khi addToast đã được định nghĩa
   // =============================================================================
 
+  // I6: Hàm sync số lượng pending overrides từ API để đồng bộ badge
+  const syncPendingOverridesCount = useCallback(async () => {
+    const session = readAuthSession();
+    if (!session?.accessToken) return;
+    try {
+      const res = await fetchApi<{ total: number }>(
+        buildApiUrl('/api/oracle/pending-overrides?limit=0&skip=0'),
+        { headers: { Authorization: `Bearer ${session.accessToken}` } }
+      );
+      setPendingOverridesCount(res.data.total ?? 0);
+    } catch {
+      // Silently fail — badge sẽ được sync đúng khi drawer mở
+    }
+  }, []);
+
   useOverrideSocket({
     onEvent: useCallback((event) => {
       if (event.type === 'override:new') {
         // '__poll__' là polling signal từ fallback interval — không mở drawer
         if (event.overrideRequestId === '__poll__') return;
-        // Không increment thủ công — count sẽ được đồng bộ từ API khi drawer mở và gọi loadItems()
-        // Tránh double-count khi socket reconnect phát lại event
+        // I4: Skip nếu đã xử lý request này rồi (tránh duplicate từ socket reconnect)
+        if (processedOverrideIdsRef.current.has(event.overrideRequestId)) return;
+        processedOverrideIdsRef.current.add(event.overrideRequestId);
+        // Tránh Set phình to vô hạn — giới hạn 100 items
+        if (processedOverrideIdsRef.current.size > 100) {
+          processedOverrideIdsRef.current = new Set(
+            Array.from(processedOverrideIdsRef.current).slice(-50)
+          );
+        }
         setOverrideDrawerInitialId(event.overrideRequestId);
         setIsOverrideDrawerOpen(true);
         addToast({
@@ -333,10 +358,10 @@ export default function AdminPageClientTailwind() {
           tone: 'info'
         });
       } else if (event.type === 'override:resolved') {
-        // Decrement optimistic — loadItems() sẽ đồng bộ lại khi drawer refresh tiếp theo
-        setPendingOverridesCount((prev) => Math.max(0, prev - 1));
+        // I6: Sync count từ API thay vì optimistic decrement để tránh race condition
+        syncPendingOverridesCount();
       }
-    }, [addToast])
+    }, [addToast, syncPendingOverridesCount])
   });
 
   // =============================================================================
