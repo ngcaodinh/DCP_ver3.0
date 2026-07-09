@@ -7,13 +7,14 @@
 // để tránh prop-drilling qua nhiều file.
 // =============================================================================
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { buildApiUrl, fetchApi } from '@/app/utils/apiClient';
 import { readAuthSession } from '@/app/utils/authSession';
 import { formatVietnameseDateTime } from './helpers';
 import type { ToastItem } from './types';
 import { GeofenceMapLazy } from '@/app/components/oracle/GeofenceMapLazy';
 import type { GeofenceMarker } from '@/app/components/oracle/GeofenceMap';
+import { useOverrideRequests, useSubmitOverrideVote } from '@/app/hooks/useOverrideRequests';
 
 // =============================================================================
 // TYPES
@@ -104,6 +105,69 @@ function buildMarkersFromItem(item: PendingOverrideItem): GeofenceMarker[] {
     // TODO: truyền thumbnailUrl: `${process.env.NEXT_PUBLIC_IPFS_GATEWAY_URL}/${item.evidenceCid}`
     // sau khi NEXT_PUBLIC_IPFS_GATEWAY_URL được thêm vào .env.example và FE env
   }];
+}
+
+/**
+ * Kiểm tra tính nhất quán nội bộ của payload override request từ BE.
+ * Mục đích: phát hiện dữ liệu bất thường khi BE bị compromise hoặc có bug
+ * (không có on-chain oracle để cross-check trong codebase này — xem Blockchain/ folder).
+ * Trả về false + log lỗi nếu phát hiện bất kỳ invariant nào bị vi phạm.
+ */
+function validateVoteConsistency(item: PendingOverrideItem): boolean {
+  const { overrideRequestId, commissionerSnapshot, votes, status } = item;
+
+  // Không vote quá số lượng commissioner trong snapshot
+  if (votes.length > commissionerSnapshot.length) {
+    console.error('[OverrideVoteDrawer] Số phiếu vượt quá số ủy viên trong snapshot', {
+      overrideRequestId,
+      votesLength: votes.length,
+      snapshotLength: commissionerSnapshot.length
+    });
+    return false;
+  }
+
+  // Không có commissionerId trùng lặp trong danh sách phiếu
+  const uniqueVoterIds = new Set(votes.map((v) => v.commissionerId));
+  if (uniqueVoterIds.size !== votes.length) {
+    console.error('[OverrideVoteDrawer] Duplicate commissionerId trong danh sách phiếu biểu quyết', {
+      overrideRequestId,
+      votesLength: votes.length,
+      uniqueVoterIdsSize: uniqueVoterIds.size
+    });
+    return false;
+  }
+
+  // Nếu status là APPROVED → tất cả ủy viên phải vote APPROVE, không có REJECT
+  if (status === 'APPROVED') {
+    if (votes.length < commissionerSnapshot.length) {
+      console.error('[OverrideVoteDrawer] Request APPROVED nhưng chưa đủ phiếu', {
+        overrideRequestId,
+        votesLength: votes.length,
+        snapshotLength: commissionerSnapshot.length
+      });
+      return false;
+    }
+    const hasReject = votes.some((v) => v.vote === 'REJECT');
+    if (hasReject) {
+      console.error('[OverrideVoteDrawer] Request APPROVED nhưng có phiếu REJECT', {
+        overrideRequestId
+      });
+      return false;
+    }
+  }
+
+  // Nếu status là REJECTED → phải có ít nhất 1 phiếu REJECT
+  if (status === 'REJECTED') {
+    const hasReject = votes.some((v) => v.vote === 'REJECT');
+    if (!hasReject) {
+      console.error('[OverrideVoteDrawer] Request REJECTED nhưng không có phiếu REJECT', {
+        overrideRequestId
+      });
+      return false;
+    }
+  }
+
+  return true;
 }
 
 // =============================================================================
@@ -351,17 +415,41 @@ type DetailViewProps = {
   isFullyApproved: boolean;
   isRejected: boolean;
   isResolved: boolean;
+  consistencyWarning: string | null;
   onVote: (vote: 'APPROVE' | 'REJECT') => void;
+  onRetry: () => void;
 };
 
 function DetailView({
   item, currentUserId, myVote, approveCount, voteCount,
-  totalVoters, remainingVotes, isFullyApproved, isRejected, isResolved, onVote
+  totalVoters, remainingVotes, isFullyApproved, isRejected, isResolved,
+  consistencyWarning, onVote, onRetry
 }: DetailViewProps) {
   const isInSnapshot = item.commissionerSnapshot.some((c) => c.userId === currentUserId);
 
   return (
     <div className="divide-y divide-slate-100">
+      {/* B2: Warning banner khi dữ liệu biểu quyết không nhất quán */}
+      {consistencyWarning && (
+        <div className="p-4 bg-amber-50 border-b border-amber-200">
+          <div className="flex items-start gap-3">
+            <svg className="h-5 w-5 shrink-0 text-amber-600 mt-0.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
+            <div className="flex-1">
+              <p className="text-sm font-medium text-amber-800">{consistencyWarning}</p>
+              <button
+                type="button"
+                onClick={onRetry}
+                className="mt-2 text-xs font-semibold text-amber-700 underline hover:text-amber-900"
+              >
+                Tải lại dữ liệu
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Status banners */}
       {(isFullyApproved || isRejected || (!isResolved && approveCount > 0)) && (
         <div className="p-4">
@@ -619,66 +707,89 @@ export default function OverrideVoteDrawer({
   onItemsCountChange
 }: OverrideVoteDrawerProps) {
   const [view, setView] = useState<'list' | 'detail'>('list');
-  const [items, setItems] = useState<PendingOverrideItem[]>([]);
   const [selectedItem, setSelectedItem] = useState<PendingOverrideItem | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
-  const [errorText, setErrorText] = useState('');
   const [voteDialogVote, setVoteDialogVote] = useState<'APPROVE' | 'REJECT' | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   // Flag để biết đã load xong lần đầu chưa — tránh auto-select khi items còn []
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
+  // B2: Cảnh báo khi dữ liệu biểu quyết từ BE không nhất quán nội bộ
+  const [consistencyWarning, setConsistencyWarning] = useState<string | null>(null);
 
-  // Scroll lock khi drawer mở
+  // I1: Thay thế manual useState/useCallback bằng TanStack Query hooks
+  const { data: items = [], isLoading, error, refetch } = useOverrideRequests();
+  const submitVoteMutation = useSubmitOverrideVote();
+
+  // Sync hasLoadedOnce khi loading hoàn tất (không có error)
+  // Fix: thay vì kiểm tra items.length > 0 || error, kiểm tra !isLoading
+  // để handle trường hợp API trả về empty array mà không có error
   useEffect(() => {
-    document.body.style.overflow = isOpen ? 'hidden' : '';
+    if (!isLoading) {
+      setHasLoadedOnce(true);
+    }
+  }, [isLoading]);
+
+  // Cập nhật số lượng badge cho AdminPageClient
+  useEffect(() => {
+    if (items.length > 0 || !isLoading) {
+      onItemsCountChange?.(items.length);
+    }
+  }, [items.length, isLoading, onItemsCountChange]);
+
+  // B2: Tính errorText từ TanStack Query error để truyền cho ListView
+  const errorText = error
+    ? 'Không thể tải danh sách yêu cầu ghi đè. Vui lòng thử lại.'
+    : '';
+
+  // I1: Cache pre-open focus target để restore đúng element khi đóng drawer
+  const preOpenFocusRef = useRef<HTMLElement | null>(null);
+
+  // I3: Scroll lock khi drawer mở + lưu/restore focus để focus trap hoạt động
+  useEffect(() => {
+    if (isOpen) {
+      // Lưu element đang được focus TRƯỚC KHI drawer mở
+      preOpenFocusRef.current = document.activeElement as HTMLElement | null;
+      document.body.style.overflow = 'hidden';
+      // Focus vào panel khi mở
+      document.querySelector<HTMLElement>('[role="dialog"]')?.focus();
+    } else {
+      // Restore focus về element trước khi mở drawer
+      if (preOpenFocusRef.current && typeof preOpenFocusRef.current.focus === 'function') {
+        preOpenFocusRef.current.focus();
+      }
+      document.body.style.overflow = '';
+    }
     return () => { document.body.style.overflow = ''; };
   }, [isOpen]);
 
+  // I1: Wrapper refetch để đồng bộ với behavior cũ của loadItems (bao gồm consistency check)
   const loadItems = useCallback(async () => {
-    const session = readAuthSession();
-    if (!session?.accessToken) return;
+    const result = await refetch();
+    if (result.error) return;
+    const loaded = result.data ?? [];
 
-    setIsLoading(true);
-    setErrorText('');
-
-    try {
-      const res = await fetchApi<{ items: PendingOverrideItem[]; total: number }>(
-        buildApiUrl('/api/oracle/pending-overrides?limit=20&skip=0'),
-        { headers: { Authorization: `Bearer ${session.accessToken}` } }
-      );
-      const loaded = res.data.items ?? [];
-      setItems(loaded);
-      setHasLoadedOnce(true);
-      // Dùng total từ API thay vì loaded.length — đúng khi có pagination (loaded tối đa 20)
-      onItemsCountChange?.(res.data.total ?? loaded.length);
-
-      // Đồng bộ selectedItem — reload vote list mới nhất nếu đang xem detail
-      setSelectedItem((prev) => {
-        if (!prev) return null;
-        const refreshed = loaded.find((i) => i.overrideRequestId === prev.overrideRequestId);
-        if (!refreshed) {
-          // Request đã resolve/expire khỏi PENDING list → về list view
-          setView('list');
-          return null;
-        }
-        return refreshed;
-      });
-    } catch {
-      setErrorText('Không thể tải danh sách yêu cầu ghi đè. Vui lòng thử lại.');
-    } finally {
-      setIsLoading(false);
-    }
-  }, [onItemsCountChange]);
+    // Đồng bộ selectedItem — reload vote list mới nhất nếu đang xem detail
+    setSelectedItem((prev) => {
+      if (!prev) return null;
+      const refreshed = loaded.find((i) => i.overrideRequestId === prev.overrideRequestId);
+      if (!refreshed) {
+        setView('list');
+        return null;
+      }
+      // B2: Kiểm tra tính nhất quán dữ liệu từ BE
+      setConsistencyWarning(validateVoteConsistency(refreshed) ? null : 'Dữ liệu biểu quyết không nhất quán, vui lòng tải lại.');
+      return refreshed;
+    });
+  }, [refetch]);
 
   // Load khi mở, reset khi đóng
   useEffect(() => {
     if (isOpen) {
-      loadItems();
+      // Trigger TanStack Query fetch khi drawer mở
+      refetch();
     } else {
       setView('list');
       setSelectedItem(null);
       setVoteDialogVote(null);
-      setErrorText('');
       setHasLoadedOnce(false);
     }
   }, [isOpen]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -691,6 +802,8 @@ export default function OverrideVoteDrawer({
     if (target) {
       setSelectedItem(target);
       setView('detail');
+      // B2: Validate khi auto-select từ socket
+      setConsistencyWarning(validateVoteConsistency(target) ? null : 'Dữ liệu biểu quyết không nhất quán, vui lòng tải lại.');
     }
   }, [isOpen, initialRequestId, items, hasLoadedOnce, isLoading]);
 
@@ -698,6 +811,8 @@ export default function OverrideVoteDrawer({
     setSelectedItem(item);
     setView('detail');
     setVoteDialogVote(null);
+    // B2: Validate khi click vào item từ list
+    setConsistencyWarning(validateVoteConsistency(item) ? null : 'Dữ liệu biểu quyết không nhất quán, vui lòng tải lại.');
   }, []);
 
   const handleBackToList = useCallback(() => {
@@ -708,34 +823,26 @@ export default function OverrideVoteDrawer({
 
   const handleSubmitVote = useCallback(async (reason: string) => {
     if (!selectedItem || !voteDialogVote) return;
-    const session = readAuthSession();
-    if (!session?.accessToken) {
-      onToast({ titleText: 'Phiên đăng nhập hết hạn', bodyText: 'Vui lòng đăng nhập lại.', tone: 'error' });
-      return;
-    }
 
     setIsSubmitting(true);
     try {
-      const res = await fetchApi<VoteApiResponseData>(
-        buildApiUrl(`/api/oracle/override-requests/${selectedItem.overrideRequestId}/vote`),
-        {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${session.accessToken}` },
-          body: JSON.stringify({ vote: voteDialogVote, reason })
-        }
-      );
+      const res = await submitVoteMutation.mutateAsync({
+        overrideRequestId: selectedItem.overrideRequestId,
+        vote: voteDialogVote,
+        reason
+      });
 
       setVoteDialogVote(null);
 
-      const { outcome } = res.data;
+      const { outcome } = res;
       if (outcome === 'VOTE_RECORDED') {
         onToast({
           titleText: 'Đã ghi nhận phiếu biểu quyết',
-          bodyText: `Còn ${res.data.pendingVoters ?? 0} ủy viên cần biểu quyết.`,
+          bodyText: `Còn ${res.pendingVoters ?? 0} ủy viên cần biểu quyết.`,
           tone: 'success'
         });
       } else if (outcome === 'RESOLVED_APPROVED') {
-        const extra = res.data.disbursementAutoApproved ? ' Yêu cầu giải ngân đã được tự động duyệt.' : '';
+        const extra = res.disbursementAutoApproved ? ' Yêu cầu giải ngân đã được tự động duyệt.' : '';
         onToast({
           titleText: 'Yêu cầu ghi đè đã được DUYỆT',
           bodyText: `Toàn bộ ủy viên đã đồng ý.${extra}`,
@@ -748,8 +855,6 @@ export default function OverrideVoteDrawer({
           tone: 'warning'
         });
       }
-
-      await loadItems();
     } catch (err) {
       const apiErr = err as { errorCode?: string; message?: string; statusCode?: number };
       setVoteDialogVote(null);
@@ -771,26 +876,26 @@ export default function OverrideVoteDrawer({
           tone: 'error'
         });
       }
-
-      await loadItems();
     } finally {
       setIsSubmitting(false);
     }
-  }, [selectedItem, voteDialogVote, onToast, loadItems]);
+  }, [selectedItem, voteDialogVote, onToast, submitVoteMutation]);
+
+  // Tính toán trạng thái vote cho detail view (N1: dùng useMemo tránh recalc mỗi render)
+  // Phải đặt TRƯỚC early return if (!isOpen) để tuân thủ Rules of Hooks
+  const voteState = useMemo(() => {
+    const myVote = selectedItem?.votes.find((v) => v.commissionerId === currentUserId)?.vote ?? null;
+    const totalVoters = selectedItem?.commissionerSnapshot.length ?? 0;
+    const approveCount = selectedItem?.votes.filter((v) => v.vote === 'APPROVE').length ?? 0;
+    const voteCount = selectedItem?.votes.length ?? 0;
+    const remainingVotes = totalVoters - voteCount;
+    const isFullyApproved = selectedItem?.status === 'APPROVED';
+    const isRejected = selectedItem?.status === 'REJECTED';
+    const isResolved = selectedItem?.status !== 'PENDING';
+    return { myVote, totalVoters, approveCount, voteCount, remainingVotes, isFullyApproved, isRejected, isResolved };
+  }, [selectedItem, currentUserId]);
 
   if (!isOpen) return null;
-
-  // Tính toán trạng thái vote cho detail view
-  const myVote = selectedItem?.votes.find((v) => v.commissionerId === currentUserId)?.vote ?? null;
-  const totalVoters = selectedItem?.commissionerSnapshot.length ?? 0;
-  const approveCount = selectedItem?.votes.filter((v) => v.vote === 'APPROVE').length ?? 0;
-  const voteCount = selectedItem?.votes.length ?? 0;
-  // Số ủy viên CHƯA VOTE (không phải số approve còn thiếu) — dùng cho banner "Cần 1 phiếu nữa"
-  const remainingVotes = totalVoters - voteCount;
-  const isFullyApproved = selectedItem?.status === 'APPROVED';
-  // Chỉ dùng status từ API — tránh false positive khi còn 1 REJECT vote nhưng request vẫn PENDING
-  const isRejected = selectedItem?.status === 'REJECTED';
-  const isResolved = selectedItem?.status !== 'PENDING';
 
   return (
     <>
@@ -802,11 +907,36 @@ export default function OverrideVoteDrawer({
       />
 
       {/* Panel — trượt từ phải, giống RequestDrawer */}
+      {/* I3: Focus trap — Tab/Shift+Tab cycle trong drawer */}
       <div
         role="dialog"
         aria-modal="true"
         aria-label="Biểu quyết ghi đè GPS"
         className="fixed right-0 top-0 z-50 flex h-full w-full max-w-[600px] flex-col bg-white shadow-2xl"
+        onKeyDown={(e) => {
+          if (e.key !== 'Tab') return;
+          const panel = e.currentTarget as HTMLElement;
+          const focusableSelectors = [
+            'a[href]', 'button:not([disabled])', 'input:not([disabled])',
+            'select:not([disabled])', 'textarea:not([disabled])',
+            '[tabindex]:not([tabindex="-1"])'
+          ].join(', ');
+          const focusable = Array.from(panel.querySelectorAll<HTMLElement>(focusableSelectors));
+          if (focusable.length === 0) return;
+          const first = focusable[0];
+          const last = focusable[focusable.length - 1];
+          if (e.shiftKey) {
+            if (document.activeElement === first) {
+              e.preventDefault();
+              last.focus();
+            }
+          } else {
+            if (document.activeElement === last) {
+              e.preventDefault();
+              first.focus();
+            }
+          }
+        }}
       >
         {/* Header */}
         <div className="flex shrink-0 items-center justify-between border-b border-slate-100 px-5 py-4">
@@ -878,15 +1008,17 @@ export default function OverrideVoteDrawer({
             <DetailView
               item={selectedItem}
               currentUserId={currentUserId}
-              myVote={myVote}
-              approveCount={approveCount}
-              voteCount={voteCount}
-              totalVoters={totalVoters}
-              remainingVotes={remainingVotes}
-              isFullyApproved={isFullyApproved}
-              isRejected={isRejected}
-              isResolved={isResolved}
+              myVote={voteState.myVote}
+              approveCount={voteState.approveCount}
+              voteCount={voteState.voteCount}
+              totalVoters={voteState.totalVoters}
+              remainingVotes={voteState.remainingVotes}
+              isFullyApproved={voteState.isFullyApproved}
+              isRejected={voteState.isRejected}
+              isResolved={voteState.isResolved}
+              consistencyWarning={consistencyWarning}
               onVote={(v) => setVoteDialogVote(v)}
+              onRetry={loadItems}
             />
           ) : null}
         </div>
