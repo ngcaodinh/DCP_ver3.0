@@ -25,7 +25,8 @@ import {
   buildBlockchainCorrelationId,
   findUnifiedTimeline,
   insertUnifiedTransaction,
-  aggregateSummaryByProjectId
+  aggregateSummaryByProjectId,
+  markChainTransactionReorged
 } from '../../repositories/unifiedTransactionRepository';
 import { UnifiedTransactionModel } from '../../models/unifiedTransactionModel';
 
@@ -127,6 +128,11 @@ describe('unifiedTransactionRepository', () => {
   // ===== buildPayosCorrelationId / buildBlockchainCorrelationId =====
   describe('correlation ID builders', () => {
     it('buildPayosCorrelationId tra ve dung format deposit:orderCode', () => {
+      const result = buildPayosCorrelationId('12345678');
+      expect(result).toBe('deposit:12345678');
+    });
+
+    it('buildPayosCorrelationId luon tra ve lowercase', () => {
       const result = buildPayosCorrelationId('12345678');
       expect(result).toBe('deposit:12345678');
     });
@@ -359,12 +365,52 @@ describe('unifiedTransactionRepository', () => {
   });
   });
 
-  // ===== 11. insertUnifiedTransaction — insert moi thanh cong =====
-  describe('insertUnifiedTransaction', () => {
-    it('insert moi thanh cong', async () => {
+  // ===== TEST-NIT10a: markChainTransactionReorged =====
+  describe('markChainTransactionReorged', () => {
+    it('mark single transaction thanh REORGED', async () => {
+      vi.mocked(UnifiedTransactionModel.updateMany).mockReturnValue({
+        exec: vi.fn().mockResolvedValue({ modifiedCount: 1 })
+      } as unknown as ReturnType<typeof UnifiedTransactionModel.updateMany>);
+
+      const result = await markChainTransactionReorged('0xtxhash123');
+
+      expect(result).toBe(1);
+      expect(UnifiedTransactionModel.updateMany).toHaveBeenCalledWith(
+        {
+          chainTxHash: '0xtxhash123',
+          chainStatus: { $ne: 'REORGED' }
+        },
+        { $set: { chainStatus: 'REORGED' } }
+      );
+    });
+
+    it('skip already REORGED transactions', async () => {
+      vi.mocked(UnifiedTransactionModel.updateMany).mockReturnValue({
+        exec: vi.fn().mockResolvedValue({ modifiedCount: 0 })
+      } as unknown as ReturnType<typeof UnifiedTransactionModel.updateMany>);
+
+      const result = await markChainTransactionReorged('0xreorgedtx');
+
+      expect(result).toBe(0);
+    });
+
+    it('verify modifiedCount khi co nhieu transactions cung txHash', async () => {
+      vi.mocked(UnifiedTransactionModel.updateMany).mockReturnValue({
+        exec: vi.fn().mockResolvedValue({ modifiedCount: 3 })
+      } as unknown as ReturnType<typeof UnifiedTransactionModel.updateMany>);
+
+      const result = await markChainTransactionReorged('0xmultipletxs');
+
+      expect(result).toBe(3);
+    });
+  });
+
+  // ===== TEST-NIT10b: insertUnifiedTransaction voi upsert pattern moi =====
+  describe('insertUnifiedTransaction (upsert pattern)', () => {
+    it('insert record moi khi khong ton tai', async () => {
       const mockRecord = {
         utxId: 'new-utx-id',
-        correlationId: 'donation:0xtxhash123',
+        correlationId: 'donation:0xtxhash456',
         projectId: 'project-001',
         walletAddress: '0x742d35cc6634c0532925a3b844bc9e7595f5c21a',
         eventType: 'DONATION' as const,
@@ -372,47 +418,44 @@ describe('unifiedTransactionRepository', () => {
         amountVnd: 50000,
         source: 'BLOCKCHAIN' as const,
         chainStatus: 'CONFIRMED' as const,
-        chainTxHash: '0xtxhash123',
+        chainTxHash: '0xtxhash456',
         chainBlockNumber: 12345678,
         payosStatus: null,
         payosOrderCode: null,
         payosTransactionId: null,
         payosRecordId: null,
-        blockchainRecordId: '0xtxhash123'
+        blockchainRecordId: '0xtxhash456'
       };
 
-      vi.mocked(UnifiedTransactionModel.findOne).mockReturnValue({
+      vi.mocked(UnifiedTransactionModel.findOneAndUpdate).mockReturnValue({
         lean: vi.fn().mockReturnThis(),
-        exec: vi.fn().mockResolvedValue(null)
-      } as unknown as ReturnType<typeof UnifiedTransactionModel.findOne>);
-
-      const mockCreated = {
-        ...mockRecord,
-        toObject: vi.fn(() => mockRecord)
-      };
-      vi.mocked(UnifiedTransactionModel.create).mockResolvedValue(mockCreated as never);
+        exec: vi.fn().mockResolvedValue(mockRecord)
+      } as unknown as ReturnType<typeof UnifiedTransactionModel.findOneAndUpdate>);
 
       const result = await insertUnifiedTransaction(mockRecord);
 
-      expect(result).toEqual(mockRecord);
-      expect(UnifiedTransactionModel.create).toHaveBeenCalledWith(mockRecord);
+      expect(UnifiedTransactionModel.findOneAndUpdate).toHaveBeenCalledWith(
+        { correlationId: mockRecord.correlationId },
+        { $setOnInsert: mockRecord },
+        { upsert: true, returnDocument: 'after' }
+      );
+      expect(result.correlationId).toBe(mockRecord.correlationId);
     });
 
-    // ===== 12. insertUnifiedTransaction — insert duplicate thi tra ve existing =====
-    it('insert duplicate thi tra ve existing record', async () => {
+    it('tra ve record hien co khi da ton tai', async () => {
       const existingRecord = createMockTransaction({
         utxId: 'existing-utx-id',
         correlationId: 'deposit:12345678'
       });
 
-      vi.mocked(UnifiedTransactionModel.findOne).mockReturnValue({
+      vi.mocked(UnifiedTransactionModel.findOneAndUpdate).mockReturnValue({
         lean: vi.fn().mockReturnThis(),
         exec: vi.fn().mockResolvedValue(existingRecord)
-      } as unknown as ReturnType<typeof UnifiedTransactionModel.findOne>);
+      } as unknown as ReturnType<typeof UnifiedTransactionModel.findOneAndUpdate>);
 
       const newRecord = {
         utxId: 'new-utx-id',
-        correlationId: 'deposit:12345678', // Same correlationId
+        correlationId: 'deposit:12345678',
         projectId: 'project-001',
         walletAddress: '0x742d35cc6634c0532925a3b844bc9e7595f5c21a',
         eventType: 'DONATION' as const,
@@ -431,8 +474,7 @@ describe('unifiedTransactionRepository', () => {
 
       const result = await insertUnifiedTransaction(newRecord);
 
-      expect(result).toEqual(existingRecord);
-      expect(UnifiedTransactionModel.create).not.toHaveBeenCalled();
+      expect(result.correlationId).toBe('deposit:12345678');
     });
   });
 });

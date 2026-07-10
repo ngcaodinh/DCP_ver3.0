@@ -1,14 +1,14 @@
 /**
- * Controller xu ly cac endpoint xac minh giao dich va tong hop du an.
- * Muc dich: phuc vu Transparency Dashboard (Lane D) - D3.
+ * Controller xử lý các endpoint xác minh giao dịch và tổng hợp dự án.
+ * Mục đích: phục vụ Transparency Dashboard (Lane D) - D3.
  *
  * Endpoints:
- * - GET /api/transparency/verify/:correlationId — xac minh giao dich cu the
- * - GET /api/transparency/summary/:projectId — tong hop dong tien du an
+ * - GET /api/transparency/verify/:correlationId — xác minh giao dịch cụ thể
+ * - GET /api/transparency/summary/:projectId — tổng hợp dòng tiền dự án
  *
- * LUU Y BAO MAT:
- * - Endpoint la PUBLIC vi du lieu transaction va dia chi vi khong phai PII nhay cam
- * - Rate limiting 100 req/min da duoc ap dung tai route level
+ * LƯU Ý BẢO MẬT:
+ * - Endpoint là PUBLIC vì dữ liệu transaction và địa chỉ ví không phải PII nhạy cảm
+ * - Rate limiting 100 req/min đã được áp dụng tại route level
  */
 import { Request, Response } from 'express';
 import { z } from 'zod';
@@ -18,8 +18,8 @@ import { verifyTransaction, getProjectSummary } from '../services/verification.s
 const logger = getLogger();
 
 /**
- * Schema Zod cho params cua verify endpoint.
- * correlationId la string bat buoc — kiem tra format hop le.
+ * Schema Zod cho params của verify endpoint.
+ * correlationId là string bắt buộc — kiểm tra format hợp lệ.
  */
 const verifyParamsSchema = z.object({
   correlationId: z.string().min(1, 'correlationId is required')
@@ -28,8 +28,8 @@ const verifyParamsSchema = z.object({
 type VerifyParamsInput = z.infer<typeof verifyParamsSchema>;
 
 /**
- * Schema Zod cho params cua summary endpoint.
- * projectId la string bat buoc.
+ * Schema Zod cho params của summary endpoint.
+ * projectId là string bắt buộc.
  */
 const summaryParamsSchema = z.object({
   projectId: z.string().min(1, 'projectId is required')
@@ -38,13 +38,13 @@ const summaryParamsSchema = z.object({
 type SummaryParamsInput = z.infer<typeof summaryParamsSchema>;
 
 /**
- * Xu ly GET /api/transparency/verify/:correlationId.
+ * Xử lý GET /api/transparency/verify/:correlationId.
  *
- * Xac minh giao dich theo correlationId, tra ve:
- * - Thong tin nguon tien (PayOS) neu co
- * - Trang thai on-chain neu co
- * - Tong giai ngan lien quan
- * - Ty le raised vs disbursed
+ * Xác minh giao dịch theo correlationId, trả về:
+ * - Thông tin nguồn tiền (PayOS) nếu có
+ * - Trạng thái on-chain nếu có
+ * - Tổng giải ngân liên quan
+ * - Tỷ lệ raised vs disbursed
  *
  * @param request Express Request
  * @param response Express Response
@@ -53,7 +53,7 @@ export async function handleVerifyTransaction(
   request: Request,
   response: Response
 ): Promise<void> {
-  // Validate params voi Zod schema
+  // Validate params với Zod schema
   const parseResult = verifyParamsSchema.safeParse(request.params);
 
   if (!parseResult.success) {
@@ -95,16 +95,16 @@ export async function handleVerifyTransaction(
 }
 
 /**
- * Xu ly GET /api/transparency/summary/:projectId.
+ * Xử lý GET /api/transparency/summary/:projectId.
  *
- * Tong hop dong tien cua du an, tra ve:
- * - totalRaised: tong tien quyen gop
- * - totalDisbursed: tong tien giai ngan
- * - remaining: con lai
- * - donorCount: so donor
- * - transactionCount: so giao dich
+ * Tổng hợp dòng tiền của dự án, trả về:
+ * - totalRaised: tổng tiền quyên góp
+ * - totalDisbursed: tổng tiền giải ngân
+ * - remaining: còn lại
+ * - donorCount: số donor
+ * - transactionCount: số giao dịch
  *
- * Tra ve zero values neu du an khong co transaction.
+ * Trả về zero values nếu dự án không có transaction.
  *
  * @param request Express Request
  * @param response Express Response
@@ -113,7 +113,7 @@ export async function handleGetProjectSummary(
   request: Request,
   response: Response
 ): Promise<void> {
-  // Validate params voi Zod schema
+  // Validate params với Zod schema
   const parseResult = summaryParamsSchema.safeParse(request.params);
 
   if (!parseResult.success) {

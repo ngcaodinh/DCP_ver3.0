@@ -131,6 +131,22 @@ export async function createOracleOverrideRequest(
   return doc.toObject();
 }
 
+/**
+ * Tìm một commissioner entry trong snapshot của override request theo userId.
+ * Trả về { userId, role } nếu tìm thấy, null nếu không.
+ * [B4-fix #2] Hỗ trợ validate role khớp với snapshot, ngăn IDOR.
+ */
+export async function findCommissionerInSnapshot(
+  overrideRequestId: string,
+  userId: string
+): Promise<{ userId: string; role: string } | null> {
+  const doc = await OracleOverrideRequestMongoModel.findOne(
+    { overrideRequestId, 'commissionerSnapshot.userId': userId },
+    { 'commissionerSnapshot.$': 1 }
+  ).lean<{ commissionerSnapshot: Array<{ userId: string; role: string }> }>().exec();
+  return doc?.commissionerSnapshot?.[0] ?? null;
+}
+
 /** Lấy override request theo ID. */
 export async function findOverrideRequestById(
   overrideRequestId: string

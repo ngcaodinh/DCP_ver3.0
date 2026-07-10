@@ -21,27 +21,12 @@ export type ApiSuccessResponse<T> = {
 
 const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL;
 
-/** Hàm xây dựng URL API đầy đủ. Mục đích: đồng bộ base URL cho toàn bộ request từ frontend. */
+/**
+ * Hàm xây dựng URL API đầy đủ. Mục đích: đồng bộ base URL cho toàn bộ request từ frontend.
+ * Throw lỗi rõ ràng khi thiếu cấu hình môi trường để dev/prod biết ngay.
+ */
 export function buildApiUrl(pathname: string): string {
   if (!apiBaseUrl) {
-    // #region agent debug log
-    fetch("http://127.0.0.1:7710/ingest/fa15d132-717d-4b5a-8ef1-2fdf5f966e4c", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Debug-Session-Id": "870f73",
-      },
-      body: JSON.stringify({
-        sessionId: "870f73",
-        location: "apiClient.ts:buildApiUrl",
-        message: "H4: NEXT_PUBLIC_API_BASE_URL missing",
-        data: { apiBaseUrl },
-        timestamp: Date.now(),
-        runId: "debug-run",
-        hypothesisId: "H4",
-      }),
-    }).catch(() => {});
-    // #endregion
     throw new Error(
       "Thiếu cấu hình NEXT_PUBLIC_API_BASE_URL trong môi trường.",
     );

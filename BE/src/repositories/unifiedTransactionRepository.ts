@@ -4,10 +4,11 @@ import {
   UnifiedTransaction,
   UnifiedEventType,
   UnifiedChainStatus,
-  UnifiedPayosStatus
+  UnifiedPayosStatus,
+  isValidChainTxHash
 } from '../models/unifiedTransactionModel';
 
-/** Cac tham so truy van timeline voi cursor-based pagination. */
+/** Các tham số truy vấn timeline với cursor-based pagination. */
 export type UnifiedTimelineQueryParams = {
   projectId?: string;
   walletAddress?: string;
@@ -15,58 +16,97 @@ export type UnifiedTimelineQueryParams = {
   endDate?: Date;
 };
 
-/** Ket qua paginated cho unified timeline. */
+/** Kết quả paginated cho unified timeline. */
 export type UnifiedTimelineResult = {
   items: UnifiedTransaction[];
   nextCursor: string | null;
   totalCount: number;
 };
 
-/** Tao correlation ID tu order code PayOS. */
-export function buildPayosCorrelationId(orderCode: string): string {
-  return `deposit:${orderCode}`;
+/**
+ * HMAC key sử dụng cho cursor signing.
+ * Lấy từ env để có thể rotate mà không cần sửa code.
+ * Trong production, key này được lưu trong secret manager (Vault/KMS).
+ */
+function getCursorHmacKey(): string {
+  return String(process.env.UNIFIED_CURSOR_HMAC_KEY || '').trim()
+    || String(process.env.JWT_SECRET || '').trim()
+    || 'dcp-cursor-hmac-default-rotate-me';
 }
 
-/** Tao correlation ID tu transaction hash blockchain. */
+/**
+ * Tạo HMAC signature cho cursor.
+ * Mục đích: defense-in-depth, ngăn attacker craft cursor tùy ý (F11).
+ * @param input Chuỗi cần ký
+ * @returns Hex digest 64 chars
+ */
+export function signCursorPayload(input: string): string {
+  return crypto.createHmac('sha256', getCursorHmacKey()).update(input).digest('hex');
+}
+
+/** Tạo correlation ID từ order code PayOS. */
+export function buildPayosCorrelationId(orderCode: string): string {
+  return `deposit:${orderCode.toLowerCase()}`;
+}
+
+/** Tạo correlation ID từ transaction hash blockchain. */
 export function buildBlockchainCorrelationId(txHash: string): string {
   return `donation:${txHash.toLowerCase()}`;
 }
 
 /**
- * Ma hoa cursor tu timestamp va document ID.
- * Format: base64(timestampISO + "\x00" + utxId)
- * Su dung null char (\x00) lam separator vi khong xuat hien trong UUID hoac timestamp ISO.
- * Opake, stable, concurrent-write-safe.
+ * Mã hóa cursor từ timestamp và document ID.
+ * Format: base64(JSON {ts, id}) + "." + HMAC-SHA256(JSON)
+ * HMAC signature đảm bảo client không thể craft cursor tùy ý để truy cập
+ * trang khác (F11 fix - defense-in-depth). Verify signature trước khi giải mã.
+ * Nếu HMAC không hợp lệ, decodeCursor trả về null để service fallback về trang đầu.
  */
 export function encodeCursor(timestamp: Date, documentId: string): string {
-  return Buffer.from(`${timestamp.toISOString()}\x00${documentId}`).toString('base64');
+  const payload = JSON.stringify({
+    ts: timestamp.toISOString(),
+    id: documentId
+  });
+  const encodedPayload = Buffer.from(payload).toString('base64url');
+  const signature = signCursorPayload(encodedPayload);
+  return `${encodedPayload}.${signature}`;
 }
 
 /**
- * Giai ma cursor thanh timestamp va document ID.
- * Doc separator la null char (\x00) de tranh loi khi _id chua dau gach duoi.
+ * Giải mã cursor và verify HMAC signature.
+ * Trả về null nếu cursor không hợp lệ hoặc signature không khớp.
  */
 export function decodeCursor(
   cursor: string
 ): { timestamp: Date; documentId: string } | null {
   try {
-    const decoded = Buffer.from(cursor, 'base64').toString('utf-8');
-    const separatorIndex = decoded.indexOf('\x00');
+    const separatorIndex = cursor.lastIndexOf('.');
     if (separatorIndex === -1) return null;
-    const timestampStr = decoded.slice(0, separatorIndex);
-    const documentId = decoded.slice(separatorIndex + 1);
-    const timestamp = new Date(timestampStr);
-    if (isNaN(timestamp.getTime()) || !documentId) return null;
-    return { timestamp, documentId };
+    const encodedPayload = cursor.slice(0, separatorIndex);
+    const providedSignature = cursor.slice(separatorIndex + 1);
+    if (!encodedPayload || !providedSignature) return null;
+
+    const expectedSignature = signCursorPayload(encodedPayload);
+    // So sánh constant-time để tránh timing attack
+    const providedBuffer = Buffer.from(providedSignature, 'utf-8');
+    const expectedBuffer = Buffer.from(expectedSignature, 'utf-8');
+    if (providedBuffer.length !== expectedBuffer.length) return null;
+    if (!crypto.timingSafeEqual(providedBuffer, expectedBuffer)) return null;
+
+    const decoded = Buffer.from(encodedPayload, 'base64url').toString('utf-8');
+    const parsed = JSON.parse(decoded) as { ts?: string; id?: string };
+    if (!parsed.ts || !parsed.id) return null;
+    const timestamp = new Date(parsed.ts);
+    if (isNaN(timestamp.getTime())) return null;
+    return { timestamp, documentId: parsed.id };
   } catch {
     return null;
   }
 }
 
 /**
- * Lay danh sach unified transactions voi cursor-based pagination.
- * Sap xep theo eventTimestamp ASC, utxId ASC de hien thi timeline tang dan.
- * Cursor logic: $gt thay vi $lt vi sort ASC nghia la thoi gian tang dan.
+ * Lấy danh sách unified transactions với cursor-based pagination.
+ * Sắp xếp theo eventTimestamp ASC, utxId ASC để hiển thị timeline tăng dần.
+ * Cursor logic: $gt thay vì $lt vì sort ASC nghĩa là thời gian tăng dần.
  */
 export async function findUnifiedTimeline(
   params: UnifiedTimelineQueryParams,
@@ -79,7 +119,10 @@ export async function findUnifiedTimeline(
   const filterQuery: Record<string, unknown> = {};
 
   if (params.projectId) filterQuery.projectId = params.projectId;
-  if (params.walletAddress) filterQuery.walletAddress = params.walletAddress.toLowerCase();
+  // F1 fix: caller (service layer) chịu trách nhiệm chuẩn hóa walletAddress về lowercase.
+  // Repository không tự lowercase để giữ boundary rõ ràng, tránh cache key và filter
+  // bị lệch nhau nếu service sửa đổi logic canonicalization.
+  if (params.walletAddress) filterQuery.walletAddress = params.walletAddress;
 
   if (params.startDate || params.endDate) {
     filterQuery.eventTimestamp = {};
@@ -117,14 +160,14 @@ export async function findUnifiedTimeline(
   return { items, nextCursor, totalCount: items.length };
 }
 
-/** Dem tong unified transactions theo filter. */
+/** Đếm tổng unified transactions theo filter. */
 export async function countUnifiedTimeline(
   params: UnifiedTimelineQueryParams
 ): Promise<number> {
   const filterQuery: Record<string, unknown> = {};
 
   if (params.projectId) filterQuery.projectId = params.projectId;
-  if (params.walletAddress) filterQuery.walletAddress = params.walletAddress.toLowerCase();
+  if (params.walletAddress) filterQuery.walletAddress = params.walletAddress;
 
   if (params.startDate || params.endDate) {
     filterQuery.eventTimestamp = {};
@@ -140,27 +183,28 @@ export async function countUnifiedTimeline(
 }
 
 /**
- * Chen moi unified transaction record.
- * Idempotent: kiem tra ton tai truoc khi insert.
+ * Chèn mới unified transaction record (idempotent).
+ * Nếu correlationId đã tồn tại, trả về record hiện có.
+ * Sử dụng findOneAndUpdate với upsert để tránh race condition TOCTOU
+ * (Time-Of-Check-Time-Of-Use) khi nhiều workers chạy đồng thời.
  */
 export async function insertUnifiedTransaction(
   record: Omit<UnifiedTransaction, 'createdAt' | 'updatedAt'>
 ): Promise<UnifiedTransaction> {
-  const existing = await UnifiedTransactionModel.findOne({
-    correlationId: record.correlationId
-  }).lean<UnifiedTransaction>().exec();
+  const updatedRecord = await UnifiedTransactionModel.findOneAndUpdate(
+    { correlationId: record.correlationId },
+    { $setOnInsert: record },
+    { upsert: true, returnDocument: 'after' }
+  )
+    .lean<UnifiedTransaction>()
+    .exec();
 
-  if (existing) {
-    return existing as UnifiedTransaction;
-  }
-
-  const createdRecord = await UnifiedTransactionModel.create(record);
-  return createdRecord.toObject() as UnifiedTransaction;
+  return (updatedRecord as UnifiedTransaction) || record as UnifiedTransaction;
 }
 
 /**
- * Cap nhat unified transaction theo correlationId.
- * Idempotent: an toan khi worker chay lai sau crash.
+ * Cập nhật unified transaction theo correlationId.
+ * Idempotent: an toàn khi worker chạy lại sau crash.
  */
 export async function upsertUnifiedTransactionByCorrelationId(
   correlationId: string,
@@ -177,7 +221,10 @@ export async function upsertUnifiedTransactionByCorrelationId(
   return (updatedRecord as UnifiedTransaction) || null;
 }
 
-/** Tao unified transaction record moi cho blockchain event. */
+/**
+ * Tạo unified transaction record mới cho blockchain event.
+ * Validate txHash format trước khi insert để đảm bảo tính toàn vẹn.
+ */
 export async function createUnifiedTransactionFromBlockchain(
   correlationId: string,
   data: {
@@ -191,6 +238,10 @@ export async function createUnifiedTransactionFromBlockchain(
     eventTimestamp: Date;
   }
 ): Promise<UnifiedTransaction> {
+  if (!isValidChainTxHash(data.chainTxHash)) {
+    throw new Error('Invalid chainTxHash format: must be a valid Ethereum transaction hash');
+  }
+
   const record: Omit<UnifiedTransaction, 'createdAt' | 'updatedAt'> = {
     utxId: crypto.randomUUID(),
     correlationId,
@@ -213,11 +264,25 @@ export async function createUnifiedTransactionFromBlockchain(
   return insertUnifiedTransaction(record);
 }
 
-/** Tao unified transaction record moi cho PayOS deposit. */
+/**
+ * Tạo unified transaction record mới cho PayOS deposit.
+ *
+ * F4 fix: PayOS deposit KHÔNG gắn liền với project cụ thể — deposit thuộc về
+ * user wallet, donation mới thuộc về project. Để tránh việc deposit "biến mất"
+ * khỏi aggregateSummaryByProjectId (vì projectId rỗng không match), chúng ta:
+ *   1. Chấp nhận `projectId` optional (mặc định '' cho deposit không gắn project)
+ *   2. Schema relax required: true → validator ràng buộc chỉ chấp nhận string
+ *      (cho phép empty string để tương thích ngược với data cũ)
+ *   3. aggregateSummaryByProjectId chỉ đếm những record có projectId khác rỗng
+ *
+ * Boundary: service/repository insert deposit với projectId='' → aggregate
+ * theo projectId thật sẽ không tính deposit (cố ý). Nếu sau muốn tính deposit
+ * theo project (sau correlation), cần query theo walletAddress+amount thay vì projectId.
+ */
 export async function createUnifiedTransactionFromPayos(
   correlationId: string,
   data: {
-    projectId: string;
+    projectId?: string;
     walletAddress: string;
     eventType: UnifiedEventType;
     amountVnd: number;
@@ -231,7 +296,7 @@ export async function createUnifiedTransactionFromPayos(
   const record: Omit<UnifiedTransaction, 'createdAt' | 'updatedAt'> = {
     utxId: crypto.randomUUID(),
     correlationId,
-    projectId: data.projectId,
+    projectId: data.projectId ?? '',
     walletAddress: data.walletAddress,
     eventType: data.eventType,
     amountVnd: data.amountVnd,
@@ -250,17 +315,21 @@ export async function createUnifiedTransactionFromPayos(
   return insertUnifiedTransaction(record);
 }
 
-/** Tim unified transaction theo correlationId. */
+/** Tìm unified transaction theo correlationId. */
 export async function findUnifiedTransactionByCorrelationId(
   correlationId: string
 ): Promise<UnifiedTransaction | null> {
-  const result = await UnifiedTransactionModel.findOne({ correlationId })
+  // F16 fix: chuẩn hóa lowercase để caller truyền mixed-case vẫn tìm thấy
+  // (các build*CorrelationId đã tự lowercase ở đầu, nhưng caller có thể
+  // truyền trực tiếp từ log/legacy path)
+  const normalizedCorrelationId = String(correlationId || '').toLowerCase();
+  const result = await UnifiedTransactionModel.findOne({ correlationId: normalizedCorrelationId })
     .lean<UnifiedTransaction>()
     .exec();
   return (result as UnifiedTransaction) || null;
 }
 
-/** Cap nhat trang thai chain khi phat hien blockchain fork/reorg. */
+/** Cập nhật trạng thái chain khi phát hiện blockchain fork/reorg. */
 export async function markChainTransactionReorged(
   chainTxHash: string
 ): Promise<number> {
@@ -272,15 +341,31 @@ export async function markChainTransactionReorged(
   return result.modifiedCount;
 }
 
-/** Lay tong so duong tien theo projectId. */
+/**
+ * Lấy tổng số dòng tiền theo projectId.
+ *
+ * F6 fix: sử dụng hint khớp với compound index { projectId: 1, eventTimestamp: 1, utxId: 1 }
+ * (sau khi thêm index theo F3). Hint chỉ gọi index prefix { projectId: 1 } có thể
+ * khiến Mongo phải sort in-memory nếu không có eventTimestamp trong index được chọn.
+ * Thêm hint đầy đủ để Mongo planner chắc chắn đi theo IXSCAN và sort theo index.
+ *
+ * LƯU Ý: aggregate không thực hiện sort theo eventTimestamp (chỉ $group),
+ * nên chỉ cần hint { projectId: 1 } là đủ cho $match. Tuy nhiên, sử dụng
+ * compound hint { projectId: 1, eventTimestamp: 1, utxId: 1 } giữ tính nhất quán
+ * với F3 và cho phép Mongo dùng sort theo index nếu sau này thêm $sort vào pipeline.
+ */
 export async function aggregateSummaryByProjectId(
   projectId: string
 ): Promise<{ totalRaisedVnd: number; totalTransactions: number }> {
+  // F4 fix: chỉ tính các record có projectId thật (không phải deposit chưa correlate)
+  // Deposit có projectId='' sẽ không được tính vào tổng tiền của dự án.
+  // Sau khi correlation với blockchain donation, record deposit được cập nhật
+  // thành source='MIXED' nhưng projectId vẫn giữ rỗng (chỉ blockchain donation mới có projectId).
   const aggregateResult = await UnifiedTransactionModel.aggregate<{
     totalRaisedVnd: number;
     totalTransactions: number;
   }>([
-    { $match: { projectId } },
+    { $match: { projectId: { $eq: projectId, $ne: '' } } },
     {
       $group: {
         _id: null,
@@ -289,7 +374,7 @@ export async function aggregateSummaryByProjectId(
       }
     }
   ])
-    .hint({ projectId: 1, eventTimestamp: 1 })
+    .hint({ projectId: 1, eventTimestamp: 1, utxId: 1 })
     .exec();
 
   if (!aggregateResult.length) {

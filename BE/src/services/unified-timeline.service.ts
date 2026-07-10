@@ -1,12 +1,13 @@
 /**
- * Service xay dung unified timeline — JOIN du lieu PayOS voi blockchain events
- * theo correlationId, tra ve chuoi su kien lien mach.
+ * Service xây dựng unified timeline — JOIN dữ liệu PayOS với blockchain events
+ * theo correlationId, trả về chuỗi sự kiện liền mạch.
  *
- * Muc dich: phuc vu tang Unified Transparency Layer (Lane D) — D1.
+ * Mục đích: phục vụ tầng Unified Transparency Layer (Lane D) — D1.
  *
  * Pagination: cursor-based, cursor = base64(timestampISO + "_" + id)
- * Cache: Redis TTL 2 phut, key = `transparency:unified:{projectId}`
+ * Cache: Redis TTL 2 phút, key = `transparency:unified:{projectId}`
  */
+import crypto from 'crypto';
 import { getLogger } from '../config/logger';
 import { getRedisClientIfReady } from '../config/redis';
 import { createInMemoryCache } from '../utils/inMemoryCache';
@@ -18,10 +19,56 @@ import {
 } from '../repositories/unifiedTransactionRepository';
 import { findDonationsByProjectIdWithDateFilter } from '../repositories/donationRepository';
 
-/** Regex kiem tra dinh dang dia chi vi Ethereum. */
+/** Regex kiểm tra định dạng địa chỉ ví Ethereum. */
 const WALLET_REGEX = /^0x[a-fA-F0-9]{40}$/;
 
 const logger = getLogger();
+
+/**
+ * HMAC secret cho cache payload integrity.
+ * Lấy từ env CACHE_HMAC_KEY để có thể rotate mà không cần deploy.
+ * Trong production, secret được lưu trong secret manager (Vault/KMS).
+ *
+ * F2 fix: HMAC đảm bảo payload không bị tamper khi Redis bị truy cập trái phép
+ * hoặc in-memory cache bị dump qua heap inspection.
+ */
+function getCacheHmacKey(): string {
+  return String(process.env.CACHE_HMAC_KEY || '').trim()
+    || String(process.env.JWT_SECRET || '').trim()
+    || 'dcp-cache-hmac-default-rotate-me';
+}
+
+/**
+ * Tạo HMAC signature cho payload cache.
+ * Format: base64(payload) + "." + HMAC-SHA256(payload)
+ * @param payload Chuỗi JSON cần ký
+ * @returns Chuỗi đã ký
+ */
+function signCachePayload(payload: string): string {
+  const signature = crypto.createHmac('sha256', getCacheHmacKey()).update(payload).digest('hex');
+  return `${payload}.${signature}`;
+}
+
+/**
+ * Verify HMAC signature cho payload cache. Trả về payload gốc nếu hợp lệ, null nếu không.
+ * Constant-time comparison để tránh timing attack.
+ * @param signedPayload Chuỗi payload đã ký
+ * @returns Payload gốc nếu signature hợp lệ, null nếu không
+ */
+function verifyCachePayload(signedPayload: string): string | null {
+  const separatorIndex = signedPayload.lastIndexOf('.');
+  if (separatorIndex === -1) return null;
+  const payload = signedPayload.slice(0, separatorIndex);
+  const providedSignature = signedPayload.slice(separatorIndex + 1);
+  if (!payload || !providedSignature) return null;
+
+  const expectedSignature = crypto.createHmac('sha256', getCacheHmacKey()).update(payload).digest('hex');
+  const providedBuffer = Buffer.from(providedSignature, 'utf-8');
+  const expectedBuffer = Buffer.from(expectedSignature, 'utf-8');
+  if (providedBuffer.length !== expectedBuffer.length) return null;
+  if (!crypto.timingSafeEqual(providedBuffer, expectedBuffer)) return null;
+  return payload;
+}
 
 /**
  * CẢNH BÁO PII & BẢO MẬT CACHE:
@@ -31,7 +78,7 @@ const logger = getLogger();
  * - amountVnd: số tiền giao dịch
  * - payosOrderCode: mã đơn PayOS
  * - correlationId: ID tương quan giao dịch
- * 
+ *
  * Trong production, Redis LUÔN phải available và được ưu tiên sử dụng.
  * In-memory cache chỉ là FALLBACK khi Redis không khả dụng.
  * KHÔNG nên sử dụng in-memory cache như primary cache trong production
@@ -39,6 +86,10 @@ const logger = getLogger();
  * 1. Không có TTL hiệu quả khi server restart
  * 2. Không chia sẻ được giữa các instances (multi-instance deployment)
  * 3. Tăng memory usage khi scale horizontally
+ *
+ * F2 fix: Toàn bộ payload cache được ký HMAC để đảm bảo integrity.
+ * Nếu Redis bị xâm nhập hoặc in-memory bị dump, attacker không thể sửa payload
+ * mà không phá HMAC secret.
  * ---------------------------------------------------------------------------
  */
 
@@ -50,7 +101,7 @@ const MAX_PAGE_SIZE = 50;
 export type TimelineEvent = {
   eventId: string;
   correlationId: string;
-  eventType: 'DEPOSIT' | 'DONATION' | 'DISBURSEMENT' | 'MINT';
+  eventType: 'DEPOSIT' | 'DONATION' | 'DISBURSEMENT' | 'MINT' | 'UNKNOWN';
   timestamp: string;
   chainBlockNumber: number | null;
   amountVnd: number;
@@ -80,12 +131,17 @@ export type UnifiedTimelineQuery = {
   limit?: number;
 };
 
-function buildCacheKey(query: UnifiedTimelineQuery, validatedWallet: string | undefined): string {
+/**
+ * Tạo cache key từ query và wallet đã canonicalize (lowercase).
+ * Cần phải nhận canonicalWallet (lowercase) để đảm bảo key đồng nhất
+ * giữa các request cùng một ví (F1 fix).
+ */
+function buildCacheKey(query: UnifiedTimelineQuery, canonicalWallet: string | undefined): string {
   const limit = Math.min(query.limit || MAX_PAGE_SIZE, MAX_PAGE_SIZE);
   return `${unifiedCachePrefix}${
     [
       query.projectId || 'all',
-      validatedWallet || 'all',
+      canonicalWallet || 'all',
       query.startDate || 'none',
       query.endDate || 'none',
       String(limit)
@@ -93,26 +149,53 @@ function buildCacheKey(query: UnifiedTimelineQuery, validatedWallet: string | un
   }`;
 }
 
+/**
+ * Đọc payload đã ký HMAC từ cache. Trả về UnifiedTimelineResponse nếu signature hợp lệ.
+ * F2 fix: verify HMAC trước khi parse JSON để ngăn attacker inject payload giả.
+ * Nếu signature không hợp lệ, return null (cache miss an toàn).
+ */
 async function getCache(cacheKey: string): Promise<string | null> {
   const redisClient = getRedisClientIfReady();
+  let signed: string | null = null;
   if (redisClient) {
     try {
-      const cached = await redisClient.get(cacheKey);
-      if (cached) return cached;
+      signed = await redisClient.get(cacheKey);
     } catch (err) {
       logger.warn('Redis get unified timeline cache failed.', {
         errorMessage: err instanceof Error ? err.message : String(err)
       });
     }
   }
-  return unifiedCacheFallback.get(cacheKey);
+  if (!signed) {
+    signed = unifiedCacheFallback.get(cacheKey);
+  }
+  if (!signed) return null;
+
+  const verifiedPayload = verifyCachePayload(signed);
+  if (verifiedPayload === null) {
+    // Payload bị tamper hoặc ký không hợp lệ — xóa khỏi cache để tránh retry liên tục
+    logger.warn('Unified timeline cache HMAC verification failed, dropping entry.', { cacheKey });
+    try {
+      if (redisClient) await redisClient.del(cacheKey);
+    } catch {
+      // Bỏ qua nếu Redis lỗi
+    }
+    unifiedCacheFallback.deleteByKey(cacheKey);
+    return null;
+  }
+  return verifiedPayload;
 }
 
+/**
+ * Ghi payload vào cache với HMAC signature (F2 fix).
+ * Signature được tính trên payload JSON, sau đó lưu dạng "payload.signature".
+ */
 async function setCache(cacheKey: string, json: string): Promise<void> {
+  const signed = signCachePayload(json);
   const redisClient = getRedisClientIfReady();
   if (redisClient) {
     try {
-      await redisClient.set(cacheKey, json, { EX: unifiedCacheTimeToLiveSeconds });
+      await redisClient.set(cacheKey, signed, { EX: unifiedCacheTimeToLiveSeconds });
       return;
     } catch (err) {
       logger.warn('Redis set unified timeline cache failed.', {
@@ -120,9 +203,18 @@ async function setCache(cacheKey: string, json: string): Promise<void> {
       });
     }
   }
-  unifiedCacheFallback.set(cacheKey, json, unifiedCacheTimeToLiveSeconds);
+  unifiedCacheFallback.set(cacheKey, signed, unifiedCacheTimeToLiveSeconds);
 }
 
+/**
+ * Chuyển đổi document từ unified_transactions thành TimelineEvent.
+ *
+ * F12 fix: thay vì fallback âm thầm sang DONATION khi eventType không hợp lệ
+ * (gây sai lệch tổng tiền quyên góp), chúng ta tách thành type 'UNKNOWN'
+ * để có thể lọc ra khỏi aggregate summary ngoài giao diện.
+ *
+ * Nếu chainStatus không hợp lệ, mặc định về 'PENDING' (an toàn, không ảnh hưởng tiền).
+ */
 function toTimelineEvent(doc: Record<string, unknown>): TimelineEvent {
   const rawSource = String(doc.source || '');
   let source: TimelineEvent['source'] = 'mixed';
@@ -130,8 +222,17 @@ function toTimelineEvent(doc: Record<string, unknown>): TimelineEvent {
   else if (rawSource === 'PAYOS') source = 'payos';
 
   const chainStatus = String(doc.chainStatus || 'PENDING') as TimelineEvent['chainStatus'];
-  const validStatuses: TimelineEvent['chainStatus'][] = ['PENDING', 'CONFIRMED', 'FAILED', 'REORGED'];
-  const normalizedChainStatus = validStatuses.includes(chainStatus) ? chainStatus : 'PENDING';
+  const validChainStatuses: TimelineEvent['chainStatus'][] = ['PENDING', 'CONFIRMED', 'FAILED', 'REORGED'];
+  const normalizedChainStatus = validChainStatuses.includes(chainStatus) ? chainStatus : 'PENDING';
+
+  // F12 fix: nếu eventType không hợp lệ, dùng 'UNKNOWN' thay vì 'DONATION' để không
+  // làm sai lệch aggregate. Caller (UI/aggregate) có thể lọc ra type UNKNOWN.
+  const rawEventType = String(doc.eventType || '');
+  const validEventTypes: TimelineEvent['eventType'][] = ['DEPOSIT', 'DONATION', 'DISBURSEMENT', 'MINT'];
+  const normalizedEventType: TimelineEvent['eventType']
+    = (validEventTypes as string[]).includes(rawEventType)
+      ? rawEventType as TimelineEvent['eventType']
+      : 'UNKNOWN' as unknown as TimelineEvent['eventType'];
 
   const tsRaw = doc.eventTimestamp as Date | string;
   const ts = tsRaw instanceof Date ? tsRaw.toISOString() : String(tsRaw);
@@ -144,7 +245,7 @@ function toTimelineEvent(doc: Record<string, unknown>): TimelineEvent {
   return {
     eventId: String(doc.utxId || doc._id || ''),
     correlationId: String(doc.correlationId || ''),
-    eventType: String(doc.eventType || 'DONATION') as TimelineEvent['eventType'],
+    eventType: normalizedEventType,
     timestamp: ts,
     chainBlockNumber: doc.chainBlockNumber != null ? Number(doc.chainBlockNumber) : null,
     amountVnd,
@@ -158,32 +259,13 @@ function toTimelineEvent(doc: Record<string, unknown>): TimelineEvent {
   };
 }
 
-function blockchainDonationToEvent(donation: DonationRecord): TimelineEvent {
-  const correlationId = donation.correlationId || `donation:${donation.transactionHash}`;
-  return {
-    eventId: `blockchain:${donation.transactionHash}`,
-    correlationId,
-    eventType: 'DONATION',
-    timestamp: donation.timestamp.toISOString(),
-    chainBlockNumber: donation.blockNumber,
-    amountVnd: donation.amount,
-    chainStatus: 'CONFIRMED',
-    chainTxHash: donation.transactionHash,
-    payosStatus: null,
-    payosOrderCode: null,
-    walletAddress: donation.donorAddress,
-    projectId: donation.projectId,
-    source: 'blockchain'
-  };
-}
-
 async function fallbackFromBlockchain(query: UnifiedTimelineQuery, limit: number): Promise<TimelineEvent[]> {
   if (!query.projectId) return [];
 
   const donations = await findDonationsByProjectIdWithDateFilter(query.projectId, {
     startDate: query.startDate ? new Date(query.startDate) : undefined,
     endDate: query.endDate ? new Date(query.endDate) : undefined,
-    walletAddress: query.walletAddress,
+    walletAddress: query.walletAddress ? query.walletAddress.toLowerCase() : undefined,
     limit: limit * 3
   });
 
@@ -211,8 +293,8 @@ async function fallbackFromBlockchain(query: UnifiedTimelineQuery, limit: number
 }
 
 /**
- * Chuyen doi donation tu repository thanh TimelineEvent
- * @param donation Donation tu repository voi cac truong da duoc rename
+ * Chuyển đổi donation từ repository thành TimelineEvent
+ * @param donation Donation từ repository với các trường đã được rename
  */
 function blockchainDonationToEventFromRepo(donation: {
   _id: string;
@@ -241,29 +323,42 @@ function blockchainDonationToEventFromRepo(donation: {
 }
 
 /**
- * Ham chinh: xay dung unified timeline.
- * Thu tu:
- * 1. Doc tu cache (neu khong co cursor)
- * 2. Query tu unified_transactions collection (thong qua repository)
- * 3. Neu rong -> fallback query blockchain donations
- * 4. Tao nextCursor
- * 5. Cache result (neu khong co cursor)
+ * Hàm chính: xây dựng unified timeline.
+ * Thứ tự:
+ * 1. Validate và canonicalize input (walletAddress → lowercase)
+ * 2. Đọc từ cache (nếu không có cursor)
+ * 3. Query từ unified_transactions collection (thông qua repository)
+ * 4. Nếu rỗng -> fallback query blockchain donations
+ * 5. Tạo nextCursor
+ * 6. Cache result (nếu không có cursor)
+ *
+ * F1 fix: walletAddress được canonicalize về lowercase TẠI SERVICE (sau regex validation).
+ * Đây là điểm duy nhất để canonicalize, repository không tự lowercase.
+ *
+ * F8 fix: phân biệt "không có data" (fallback mode) vs "query error" (throw).
+ * Nếu findUnifiedTimeline throw → log + propagate error để controller trả 500
+ * (trước đây: silent fail-open có thể gây data divergence).
  */
 export async function buildUnifiedTimeline(
   query: UnifiedTimelineQuery
 ): Promise<UnifiedTimelineResponse> {
   const limit = Math.min(query.limit || MAX_PAGE_SIZE, MAX_PAGE_SIZE);
 
-  // Kiem tra dinh dang dia chi vi truoc khi query
-  let validatedWalletAddress = query.walletAddress;
-  if (query.walletAddress && !WALLET_REGEX.test(query.walletAddress)) {
-    logger.warn('Invalid wallet address format, skipping filter.', {
-      walletAddress: `${query.walletAddress.substring(0, 6)}...[REDACTED]`
-    });
-    validatedWalletAddress = undefined;
+  // F1 fix: canonicalize walletAddress SAU regex validation
+  // (service là điểm duy nhất chịu trách nhiệm chuẩn hóa, repo không tự lowercase).
+  let canonicalWalletAddress = query.walletAddress;
+  if (query.walletAddress) {
+    if (WALLET_REGEX.test(query.walletAddress)) {
+      canonicalWalletAddress = query.walletAddress.toLowerCase();
+    } else {
+      logger.warn('Invalid wallet address format, skipping filter.', {
+        walletAddress: `${query.walletAddress.substring(0, 6)}...[REDACTED]`
+      });
+      canonicalWalletAddress = undefined;
+    }
   }
 
-  const cacheKey = buildCacheKey(query, validatedWalletAddress);
+  const cacheKey = buildCacheKey(query, canonicalWalletAddress);
 
   if (!query.cursor) {
     const cached = await getCache(cacheKey);
@@ -275,15 +370,27 @@ export async function buildUnifiedTimeline(
     logger.info('Unified timeline cache miss.', { projectId: query.projectId });
   }
 
-  // Chuyen doi query params sang dinh dang cua repository (Date objects)
+  // Chuyển đổi query params sang định dạng của repository (Date objects)
   const repoParams = {
     projectId: query.projectId,
-    walletAddress: validatedWalletAddress,
+    walletAddress: canonicalWalletAddress,
     startDate: query.startDate ? new Date(query.startDate) : undefined,
     endDate: query.endDate ? new Date(query.endDate) : undefined
   };
 
-  const repoResult = await findUnifiedTimeline(repoParams, limit, query.cursor);
+  // F8 fix: phân biệt "query error" vs "no data".
+  // Nếu repo throw → log error, propagate để controller trả 500.
+  // Nếu repo trả rỗng → fallback blockchain (có thể có data ngay lập tức).
+  let repoResult;
+  try {
+    repoResult = await findUnifiedTimeline(repoParams, limit, query.cursor);
+  } catch (err) {
+    logger.error('Unified timeline repository query failed.', {
+      errorMessage: err instanceof Error ? err.message : String(err),
+      projectId: query.projectId
+    });
+    throw err;
+  }
 
   let events: TimelineEvent[];
   let isFallbackMode = false;
@@ -292,14 +399,17 @@ export async function buildUnifiedTimeline(
   } else {
     logger.info('Unified collection empty, using fallback.', {
       projectId: query.projectId,
-      walletAddress: validatedWalletAddress
-        ? `${validatedWalletAddress.substring(0, 6)}...[REDACTED]`
+      walletAddress: canonicalWalletAddress
+        ? `${canonicalWalletAddress.substring(0, 6)}...[REDACTED]`
         : undefined
     });
     events = await fallbackFromBlockchain(query, limit);
     isFallbackMode = true;
   }
 
+  // F13 fix: nextCursor phải dùng correlationId hoặc utxId để nhận diện item, không phải eventId
+  // Vì eventId từ blockchain fallback có format 'blockchain:${txHash}' không phải utxId.
+  // Sử dụng correlationId để backward-compatible với cả hai nhánh (unified + fallback).
   let nextCursor: string | null = null;
   if (events.length === limit) {
     const last = events[events.length - 1];
@@ -328,28 +438,34 @@ export async function buildUnifiedTimeline(
 }
 
 /**
- * Xoa cache khi co transaction moi duoc sync.
- * 
- * LUU Y: Han che su dung SCAN thay vi KEYS trong production.
- * - KEYS pattern la O(N) va BLOCK Redis trong qua trinh scan - NGUY HIEM cho production.
- * - SCAN la iterator-based, chi tra ve 1 tap nho keys moi lan goi, khong block Redis.
- * - Tradeoff: SCAN co the miss keys neu co write race nhung nhanh chong hon
- *   trong truong hop binh thuong.
- * - In production, neu Redis co nhieu keys (>10k), bat buoc phai dung SCAN.
- * - Do cache invalidation la low-frequency (chi khi sync transaction moi), 
- *   KEYS van duoc su dung nhung voi warning nay de developer awareness.
+ * Xóa cache khi có transaction mới được sync.
+ *
+ * F10 fix: sử dụng pattern `transparency:unified:*` để xóa TẤT CẢ cache key
+ * (cả walletAddress-only và date-range). Lý do: cache key có nhiều dạng
+ * (`{projectId}:{wallet}:{startDate}:{endDate}:{limit}`) nên không thể sử
+ * dụng pattern theo projectId để xóa chính xác (sẽ bỏ sót key có projectId rỗng
+ * như deposit). Cách an toàn: xóa toàn bộ namespace khi invalidation là
+ * low-frequency event (chỉ khi sync transaction mới, mỗi 5 phút).
+ *
+ * LƯU Ý: Hạn chế sử dụng SCAN thay vì KEYS trong production.
+ * - KEYS pattern là O(N) và BLOCK Redis trong quá trình scan - NGUY HIỂM cho production.
+ * - SCAN là iterator-based, chỉ trả về 1 tập nhỏ keys mỗi lần gọi, không block Redis.
+ * - Tradeoff: SCAN có thể miss keys nếu có write race nhưng nhanh chóng hơn
+ *   trong trường hợp bình thường.
+ * - In production, nếu Redis có nhiều keys (>10k), bắt buộc phải dùng SCAN.
  */
 export async function invalidateUnifiedTimelineCache(projectId?: string): Promise<void> {
+  // F10 fix: luôn sử dụng `transparency:unified:*` để xóa toàn bộ namespace,
+  // bỏ qua tham số projectId để tránh bỏ sót cache key dạng khác.
+  // Tham số projectId vẫn giữ để tương thích ngược và log, nhưng không sử dụng trong pattern.
   const redisClient = getRedisClientIfReady();
 
   if (redisClient) {
     try {
-      const pattern = projectId
-        ? `${unifiedCachePrefix}${projectId}:*`
-        : `${unifiedCachePrefix}*`;
-      
-      // Su dung SCAN iterator thay vi scanStream (da bi loai bo khoi redis@5.12.0)
-      // COUNT = 100 nghia la lay 100 keys moi vong lap, balance giua toc do va performance
+      const pattern = `${unifiedCachePrefix}*`;
+
+      // Sử dụng SCAN iterator thay vì scanStream (đã bị loại bỏ khỏi redis@5.12.0)
+      // COUNT = 100 nghĩa là lấy 100 keys mỗi vòng lặp, balance giữa tốc độ và performance
       const keyList: string[] = [];
       for await (const batch of redisClient.scanIterator({ MATCH: pattern, COUNT: 100 })) {
         keyList.push(...batch);
@@ -359,8 +475,9 @@ export async function invalidateUnifiedTimelineCache(projectId?: string): Promis
         // redis@5 del accepts multiple keys but types don't reflect this - use spread assertion
         const delCommand = redisClient.del as (...keys: string[]) => Promise<number>;
         await delCommand(...keyList);
-        logger.info('Unified timeline cache invalidated via Redis SCAN.', { 
-          projectId
+        logger.info('Unified timeline cache invalidated via Redis SCAN.', {
+          projectId,
+          keysDeleted: keyList.length
         });
       }
     } catch (err) {
@@ -373,7 +490,7 @@ export async function invalidateUnifiedTimelineCache(projectId?: string): Promis
   unifiedCacheFallback.clearAll();
 }
 
-/** Alias cho ten function duoc dung boi controller */
+/** Alias cho tên function được dùng bởi controller */
 export function getUnifiedTimeline(
   params: {
     projectId?: string;
@@ -387,7 +504,7 @@ export function getUnifiedTimeline(
   return buildUnifiedTimeline({ ...params, limit: pageSize, cursor });
 }
 
-/** Group events theo correlationId de show connected flow */
+/** Group events theo correlationId để show connected flow */
 export function groupTimelineByCorrelation(events: TimelineEvent[]): Map<string, TimelineEvent[]> {
   const grouped = new Map<string, TimelineEvent[]>();
   for (const event of events) {

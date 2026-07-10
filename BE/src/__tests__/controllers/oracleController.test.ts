@@ -19,7 +19,8 @@ vi.mock('../../config/logger', () => ({
 vi.mock('../../models/oracleOverrideRequestModel', () => ({
   findOverrideRequestById: vi.fn(),
   findPendingOverrideRequests: vi.fn(),
-  countPendingOverrideRequests: vi.fn()
+  countPendingOverrideRequests: vi.fn(),
+  findCommissionerInSnapshot: vi.fn()
 }));
 
 vi.mock('../../models/projectGeofenceModel', () => ({
@@ -55,9 +56,10 @@ vi.mock('../../utils/apiResponse', () => ({
   sendErrorFromUnknown: vi.fn()
 }));
 
-import { handleGetOverrideRequestById } from '../../controllers/oracleController';
-import { findOverrideRequestById } from '../../models/oracleOverrideRequestModel';
+import { handleGetOverrideRequestById, handleGetPendingOverrides } from '../../controllers/oracleController';
+import { findOverrideRequestById, findPendingOverrideRequests, findCommissionerInSnapshot } from '../../models/oracleOverrideRequestModel';
 import { sendSuccessResponse, sendErrorResponse } from '../../utils/apiResponse';
+import { findProjectById } from '../../repositories/projectRepository';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -100,6 +102,8 @@ function buildOverrideRequest(overrides: Record<string, unknown> = {}) {
 describe('handleGetOverrideRequestById', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // [B4-fix #6] findProjectById mặc định trả null → controller fallback sang projectId
+    vi.mocked(findProjectById).mockResolvedValue(null as never);
   });
 
   it('[T4] 401 khi chưa đăng nhập', async () => {
@@ -285,6 +289,22 @@ describe('handleVoteOverrideRequest — Zod validation (B1)', () => {
     expect(sendErrorResponse).toHaveBeenCalledWith(res, 400, expect.stringContaining('10'), 'VALIDATION_ERROR');
   });
 
+  // [B4-fix T-reason-control] Reject control characters in reason
+  it('[T5] 400 khi reason chứa control characters (e.g. \\u0000, \\u0007, \\u001B)', async () => {
+    const req = buildVoteRequest({ body: { vote: 'APPROVE', reason: 'Lý do có\u0000ký tự control' } });
+    const res = buildMockResponse();
+
+    await handleVoteOverrideRequest(req, res);
+
+    expect(sendErrorResponse).toHaveBeenCalledWith(
+      res,
+      400,
+      expect.stringContaining('điều khiển'),
+      'VALIDATION_ERROR'
+    );
+    expect(submitOverrideVote).not.toHaveBeenCalled();
+  });
+
   it('[T5] 400 khi body rỗng hoàn toàn', async () => {
     const req = buildVoteRequest({ body: {} });
     const res = buildMockResponse();
@@ -307,6 +327,11 @@ describe('handleVoteOverrideRequest — Zod validation (B1)', () => {
   });
 
   it('[T5] 200 khi body hợp lệ và vote được ghi nhận thành công', async () => {
+    // [B4-fix #2] IDOR: caller phải có trong snapshot VÀ role phải khớp
+    vi.mocked(findCommissionerInSnapshot).mockResolvedValue({
+      userId: 'admin-1',
+      role: 'admin'
+    });
     vi.mocked(submitOverrideVote).mockResolvedValue({
       outcome: 'VOTE_RECORDED',
       pendingVoters: 2,
@@ -320,5 +345,225 @@ describe('handleVoteOverrideRequest — Zod validation (B1)', () => {
     await handleVoteOverrideRequest(req, res);
 
     expect(sendSuccessResponse).toHaveBeenCalledWith(res, 200, expect.any(String), expect.objectContaining({ outcome: 'VOTE_RECORDED' }));
+  });
+
+  it('[T5] [B4-fix #2] 403 ROLE_MISMATCH khi role của caller khác snapshot', async () => {
+    // IDOR: admin bị demote xuống 'donor' nhưng cố vote bằng JWT hiện tại (vẫn có role cũ từ snapshot)
+    vi.mocked(findCommissionerInSnapshot).mockResolvedValue({
+      userId: 'admin-1',
+      role: 'admin'  // snapshot lưu role 'admin'
+    });
+    // Nhưng JWT hiện tại lại có role 'regulatory'
+    const req = buildVoteRequest({
+      authenticatedUser: { userId: 'admin-1', role: 'regulatory' },
+      body: { vote: 'APPROVE', reason: 'Lý do đủ dài để pass Zod validation' }
+    });
+    const res = buildMockResponse();
+
+    await handleVoteOverrideRequest(req, res);
+
+    expect(sendErrorResponse).toHaveBeenCalledWith(
+      res, 403, expect.any(String), 'ROLE_MISMATCH'
+    );
+    // submitOverrideVote KHÔNG được gọi — chặn sớm
+    expect(submitOverrideVote).not.toHaveBeenCalled();
+  });
+
+  it('[T5] [B4-fix #2] 403 FORBIDDEN khi user không có trong snapshot', async () => {
+    vi.mocked(findCommissionerInSnapshot).mockResolvedValue(null);
+    const req = buildVoteRequest({
+      body: { vote: 'APPROVE', reason: 'Lý do đủ dài để pass Zod validation' }
+    });
+    const res = buildMockResponse();
+
+    await handleVoteOverrideRequest(req, res);
+
+    expect(sendErrorResponse).toHaveBeenCalledWith(
+      res, 403, expect.any(String), 'FORBIDDEN'
+    );
+    expect(submitOverrideVote).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Tests: handleGetOverrideRequestById — data exposure (B4-fix #3) ─────────
+
+describe('handleGetOverrideRequestById — data exposure (B4-fix #3)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // [B4-fix #6] Mặc định project không tìm thấy để test fallback
+    vi.mocked(findProjectById).mockResolvedValue(null as never);
+  });
+
+  it('[T4-fix] commissionerSnapshot KHÔNG lộ userId của người khác', async () => {
+    vi.mocked(findOverrideRequestById).mockResolvedValue(
+      buildOverrideRequest() as never
+    );
+    // Caller là admin-1
+    const req = buildMockRequest({ authenticatedUser: { userId: 'admin-1', role: 'admin' } });
+    const res = buildMockResponse();
+
+    await handleGetOverrideRequestById(req, res);
+
+    const callArgs = vi.mocked(sendSuccessResponse).mock.calls[0];
+    const responseData = callArgs?.[3] as {
+      commissionerSnapshot: Array<{ userId?: string; role: string; isCurrentUser: boolean }>;
+      currentCommissionerRole: string | null;
+    };
+
+    // userId KHÔNG ĐƯỢC xuất hiện ở bất kỳ entry nào
+    for (const entry of responseData.commissionerSnapshot) {
+      expect(entry.userId).toBeUndefined();
+      expect(entry.role).toBeTruthy();
+      expect(typeof entry.isCurrentUser).toBe('boolean');
+    }
+    // currentCommissionerRole trả về role của caller
+    expect(responseData.currentCommissionerRole).toBe('admin');
+  });
+
+  it('[T4-fix] isCurrentUser đánh dấu đúng entry thuộc về caller', async () => {
+    vi.mocked(findOverrideRequestById).mockResolvedValue(
+      buildOverrideRequest() as never
+    );
+    // Caller là regulatory-1
+    const req = buildMockRequest({ authenticatedUser: { userId: 'regulatory-1', role: 'regulatory' } });
+    const res = buildMockResponse();
+
+    await handleGetOverrideRequestById(req, res);
+
+    const callArgs = vi.mocked(sendSuccessResponse).mock.calls[0];
+    const responseData = callArgs?.[3] as {
+      commissionerSnapshot: Array<{ role: string; isCurrentUser: boolean }>;
+    };
+
+    // Chỉ đúng 1 entry có isCurrentUser = true — entry của regulatory-1
+    const currentEntries = responseData.commissionerSnapshot.filter(e => e.isCurrentUser);
+    expect(currentEntries).toHaveLength(1);
+    expect(currentEntries[0]?.role).toBe('regulatory');
+  });
+
+  // [B4-fix #6] projectName enrichment từ projectModel — drawer phải hiển thị tên dự án
+  it('[T4-fix-pname] trả projectName từ projectModel và projectDisplayName fallback khi tìm thấy', async () => {
+    vi.mocked(findOverrideRequestById).mockResolvedValue(
+      buildOverrideRequest() as never
+    );
+    vi.mocked(findProjectById).mockResolvedValue({
+      projectId: 'proj-001',
+      name: 'Xây dựng trường học ABC',
+      organizationId: 'org-001',
+      description: '',
+      goalAmount: 0,
+      deadline: new Date(),
+      status: 'ACTIVE',
+      evidenceCids: [],
+      evidenceFiles: [],
+      submittedAt: null,
+      reviewedAt: null,
+      reviewedBy: null,
+      rejectionReason: null,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    } as never);
+    const req = buildMockRequest();
+    const res = buildMockResponse();
+
+    await handleGetOverrideRequestById(req, res);
+
+    const callArgs = vi.mocked(sendSuccessResponse).mock.calls[0];
+    const responseData = callArgs?.[3] as { projectName: string | null; projectDisplayName: string };
+    expect(responseData.projectName).toBe('Xây dựng trường học ABC');
+    expect(responseData.projectDisplayName).toBe('Xây dựng trường học ABC');
+  });
+
+  it('[T4-fix-pname-fallback] projectDisplayName fallback về projectId khi lookup thất bại', async () => {
+    vi.mocked(findOverrideRequestById).mockResolvedValue(
+      buildOverrideRequest() as never
+    );
+    vi.mocked(findProjectById).mockResolvedValue(null);
+    const req = buildMockRequest();
+    const res = buildMockResponse();
+
+    await handleGetOverrideRequestById(req, res);
+
+    const callArgs = vi.mocked(sendSuccessResponse).mock.calls[0];
+    const responseData = callArgs?.[3] as { projectName: string | null; projectDisplayName: string };
+    expect(responseData.projectName).toBeNull();
+    // Fallback rõ ràng về projectId khi project không tồn tại
+    expect(responseData.projectDisplayName).toBe('proj-001');
+  });
+
+  // [B4-fix-T-multiadmin] Multi-admin: khi snapshot có nhiều admin, isCurrentUser phải đúng theo userId của caller
+  // và chỉ một entry được đánh dấu — tránh regression đánh dấu theo role.
+  it('[T4-fix] multi-admin: chỉ admin-1 là isCurrentUser khi caller là admin-1', async () => {
+    vi.mocked(findOverrideRequestById).mockResolvedValue(
+      buildOverrideRequest() as never
+    );
+    const req = buildMockRequest({ authenticatedUser: { userId: 'admin-1', role: 'admin' } });
+    const res = buildMockResponse();
+
+    await handleGetOverrideRequestById(req, res);
+
+    const callArgs = vi.mocked(sendSuccessResponse).mock.calls[0];
+    const responseData = callArgs?.[3] as {
+      commissionerSnapshot: Array<{ role: string; isCurrentUser: boolean }>;
+    };
+
+    const currentEntries = responseData.commissionerSnapshot.filter(e => e.isCurrentUser);
+    expect(currentEntries).toHaveLength(1);
+    expect(currentEntries[0]?.role).toBe('admin');
+    // admin-2 trong snapshot không bị đánh dấu dù cùng role
+    const admin2Entries = responseData.commissionerSnapshot.filter(e => e.role === 'admin' && !e.isCurrentUser);
+    expect(admin2Entries.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// ─── Tests: handleGetPendingOverrides — data exposure (B4-fix #3) ────────────
+
+describe('handleGetPendingOverrides — data exposure (B4-fix #3)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // [B4-fix #6] Mặc định project không tìm thấy → fallback projectDisplayName = projectId
+    vi.mocked(findProjectById).mockResolvedValue(null as never);
+  });
+
+  function buildListRequest(): AuthenticatedRequest {
+    return {
+      params: {},
+      query: {},
+      authenticatedUser: { userId: 'admin-1', role: 'admin' }
+    } as unknown as AuthenticatedRequest;
+  }
+
+  it('[T4-fix-list] items KHÔNG lộ userId trong commissionerSnapshot', async () => {
+    vi.mocked(findPendingOverrideRequests).mockResolvedValue([
+      buildOverrideRequest() as never
+    ]);
+    vi.mocked((await import('../../models/oracleOverrideRequestModel')).countPendingOverrideRequests)
+      .mockResolvedValue(1);
+
+    const req = buildListRequest();
+    const res = buildMockResponse();
+
+    await handleGetPendingOverrides(req, res);
+
+    const callArgs = vi.mocked(sendSuccessResponse).mock.calls[0];
+    const responseData = callArgs?.[3] as {
+      items: Array<{
+        commissionerSnapshot: Array<{ userId?: string; role: string; isCurrentUser: boolean }>;
+        currentCommissionerRole: string | null;
+        projectDisplayName: string;
+        projectName: string | null;
+      }>;
+    };
+
+    expect(responseData.items).toHaveLength(1);
+    for (const item of responseData.items) {
+      for (const entry of item.commissionerSnapshot) {
+        expect(entry.userId).toBeUndefined();
+      }
+      expect(item.currentCommissionerRole).toBe('admin');
+      // Fallback về projectId khi lookup fail
+      expect(item.projectName).toBeNull();
+      expect(item.projectDisplayName).toBe('proj-001');
+    }
   });
 });

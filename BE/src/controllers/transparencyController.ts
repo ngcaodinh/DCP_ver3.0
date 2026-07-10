@@ -1,11 +1,23 @@
 import { Request, Response } from 'express';
 import { z } from 'zod';
-import { getUnifiedTimeline, groupTimelineByCorrelation } from '../services/unified-timeline.service';
+import {
+  getUnifiedTimeline,
+  groupTimelineByCorrelation,
+  type TimelineEvent
+} from '../services/unified-timeline.service';
 
 /**
- * Schema Zod cho query params cua unified timeline endpoint.
- * Endpoint nay la public vi du lieu transaction va dia chi vi
- * khong duoc xem la PII nhay cam (chi la thong tin cong khai tren blockchain).
+ * Schema Zod cho query params của unified timeline endpoint.
+ *
+ * F9 — Threat model cho public endpoint:
+ * Endpoint này là PUBLIC vì dữ liệu transaction và địa chỉ ví
+ * KHÔNG được xem là PII nhạy cảm theo threat model hiện tại
+ * (blockchain transactions are public by design).
+ * Tuy nhiên, response vẫn bao gồm metadata nội bộ như payosOrderCode,
+ * payosTransactionId, payosRecordId — có thể bị xem là nhạy cảm theo
+ * một số threat model. Xem redactPayosMetadata để ẩn các trường này.
+ *
+ * TODO(threat-model): confirm with data owner which fields are public.
  */
 const unifiedTimelineQuerySchema = z.object({
   projectId: z.string().optional(),
@@ -13,10 +25,25 @@ const unifiedTimelineQuerySchema = z.object({
   startDate: z.string().datetime().optional(),
   endDate: z.string().datetime().optional(),
   pageSize: z.coerce.number().int().min(1).max(50).optional().default(50),
-  cursor: z.string().optional()
+  cursor: z.string().optional(),
+  redactPayosMetadata: z.coerce.boolean().optional().default(false)
 });
 
 type UnifiedTimelineQueryInput = z.infer<typeof unifiedTimelineQuerySchema>;
+
+/**
+ * Hàm redact metadata nội bộ của PayOS từ TimelineEvent.
+ * Mục đích: cho phép public endpoint trả về event mà không lộ metadata nội bộ
+ * (payosOrderCode, payosTransactionId, payosRecordId) nếu threat model yêu cầu.
+ *
+ * TODO(threat-model): confirm with data owner before exposing full metadata publicly.
+ */
+function redactTimelineEvent(event: TimelineEvent): TimelineEvent {
+  return {
+    ...event,
+    payosOrderCode: null
+  };
+}
 
 function normalizePageSize(value: unknown, defaultValue: number, maxValue: number): number {
   const parsed = Number(value);
@@ -32,33 +59,33 @@ function parseDateParam(value: unknown): string | undefined {
 }
 
 /**
- * Xu ly GET /api/transparency/unified-timeline.
+ * Xử lý GET /api/transparency/unified-timeline.
  *
- * Endpoint nay la public vi du lieu transaction va dia chi vi
- * khong duoc xem la PII nhay cam — chi la thong tin cong khai tren blockchain.
- * Tra ve unified timeline voi cursor-based pagination.
- * Cache: Redis TTL 2 phut.
+ * Endpoint này là public vì dữ liệu transaction và địa chỉ ví
+ * không được xem là PII nhạy cảm — chỉ là thông tin công khai trên blockchain.
+ * Trả về unified timeline với cursor-based pagination.
+ * Cache: Redis TTL 2 phút.
  *
  * Query params:
- * - projectId (optional): filter theo du an
- * - walletAddress (optional): filter theo vi
+ * - projectId (optional): filter theo dự án
+ * - walletAddress (optional): filter theo ví
  * - startDate (optional): ISO date string
  * - endDate (optional): ISO date string
- * - pageSize (optional): so ban ghi moi trang (default 50, max 50)
- * - cursor (optional): cursor cho trang tiep theo
+ * - pageSize (optional): số bản ghi mỗi trang (default 50, max 50)
+ * - cursor (optional): cursor cho trang tiếp theo
  *
  * Response:
- * - timeline: mang event
- * - nextCursor: cursor cho trang tiep theo (null neu het)
- * - cached: true neu tu cache
- * - grouped: events da group theo correlationId
- * - count: so luong event trong response
+ * - timeline: mảng event
+ * - nextCursor: cursor cho trang tiếp theo (null nếu hết)
+ * - cached: true nếu từ cache
+ * - grouped: events đã group theo correlationId
+ * - count: số lượng event trong response
  */
 export async function handleGetUnifiedTimeline(
   request: Request,
   response: Response
 ): Promise<void> {
-  // Validate query params voi Zod schema
+  // Validate query params với Zod schema
   const parseResult = unifiedTimelineQuerySchema.safeParse(request.query);
 
   if (!parseResult.success) {
@@ -79,7 +106,8 @@ export async function handleGetUnifiedTimeline(
     startDate,
     endDate,
     pageSize,
-    cursor
+    cursor,
+    redactPayosMetadata
   } = parseResult.data;
 
   const queryParams = {
@@ -108,12 +136,17 @@ export async function handleGetUnifiedTimeline(
 
     const grouped = groupTimelineByCorrelation(result.timeline);
 
+    // F9 fix: redact metadata nội bộ nếu client yêu cầu
+    const safeTimeline = redactPayosMetadata
+      ? result.timeline.map(redactTimelineEvent)
+      : result.timeline;
+
     response.status(200).json({
-      timeline: result.timeline,
+      timeline: safeTimeline,
       nextCursor: result.nextCursor,
       cached: result.cached,
       grouped: Object.fromEntries(grouped),
-      count: result.timeline.length,
+      count: safeTimeline.length,
       fallbackMode: result.fallbackMode ?? false
     });
   } catch (error) {

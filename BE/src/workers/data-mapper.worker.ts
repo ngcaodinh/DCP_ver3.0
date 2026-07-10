@@ -1,16 +1,16 @@
 /**
- * Worker Data Mapper dong bo du lieu PayOS voi blockchain DonationReceived events
- * vao collection unified_transactions.
+ * Worker Data Mapper đồng bộ dữ liệu PayOS với blockchain DonationReceived events
+ * vào collection unified_transactions.
  *
- * Chuc nang:
- * 1. Poll blockchain DonationReceived events -> tao unified transaction records (source = BLOCKCHAIN)
- * 2. Poll PayOS deposit records (PAYMENT_CONFIRMED, MINT_COMPLETED) -> tao unified records (source = PAYOS)
- * 3. Correlate PayOS deposits voi blockchain donations theo projectId + walletAddress + amount
- * 4. Phat hien blockchain reorg (fork) bang cach check block number cua tx hien tai
- * 5. Invalidate Redis cache khi co unified transaction moi/duoc update
+ * Chức năng:
+ * 1. Poll blockchain DonationReceived events -> tạo unified transaction records (source = BLOCKCHAIN)
+ * 2. Poll PayOS deposit records (PAYMENT_CONFIRMED, MINT_COMPLETED) -> tạo unified records (source = PAYOS)
+ * 3. Correlate PayOS deposits với blockchain donations theo projectId + walletAddress + amount
+ * 4. Phát hiện blockchain reorg (fork) bằng cách check block number của tx hiện tại
+ * 5. Invalidate Redis cache khi có unified transaction mới/được update
  *
- * Concurrency: Dung Redis distributed lock (SETNX) de dam bao chi 1 instance chay tai moi thoi diem.
- * Cron: 5 phut (300000ms) bang recursive setTimeout de dam bao moi lan chay hoan tat truoc khi tinh delay.
+ * Concurrency: Dùng Redis distributed lock (SETNX) để đảm bảo chỉ 1 instance chạy tại mọi thời điểm.
+ * Cron: 5 phút (300000ms) bằng recursive setTimeout để đảm bảo mỗi lần chạy hoàn tất trước khi tính delay.
  */
 import { ethers } from 'ethers';
 import { getLogger } from '../config/logger';
@@ -34,21 +34,23 @@ const logger = getLogger();
 
 const SYNC_INTERVAL_MS = 5 * 60 * 1000;
 const PAYOS_BATCH_SIZE = 200;
-const CORRELATION_TIME_WINDOW_MS = 30 * 60 * 1000;
+// F5 fix: thu hẹp correlation window từ 30 phút xuống 10 phút để giảm nguy cơ
+// ghép nhầm giữa các donation cùng số tiền của cùng wallet (vd: 100k VND nạp nhiều lần).
+const CORRELATION_TIME_WINDOW_MS = 10 * 60 * 1000;
 const LOCK_TTL_MS = 4 * 60 * 1000;
 const MAPPER_LOCK_KEY = 'data_mapper:lock';
 const LAST_SYNCED_BLOCK_KEY = 'data_mapper:last_synced_block';
 
 /**
- * So blocks toi da cho moi lan goi eth_getLogs.
- * Ghi chu: Alchemy/Infura thuong gioi han ~10k blocks, nen chunk 5000 de an toan
- * va de dang retry khi gap timeout.
+ * Số blocks tối đa cho mỗi lần gọi eth_getLogs.
+ * Ghi chú: Alchemy/Infura thường giới hạn ~10k blocks, nên chunk 5000 để an toàn
+ * và dễ dàng retry khi gặp timeout.
  */
 const MAX_BLOCKS_PER_GETLOGS_REQUEST = 5000;
 
 /**
- * So request dong thoi toi da khi upsert donation/unified records.
- * Tranh qua tai MongoDB khi batch lon.
+ * Số request đồng thời tối đa khi upsert donation/unified records.
+ * Tránh quá tải MongoDB khi batch lớn.
  */
 const DB_WRITE_CONCURRENCY = 10;
 
@@ -63,8 +65,8 @@ export function resetModuleState(): void {
 }
 
 /**
- * Semaphore gioi han so tac vu chay dong thoi.
- * Dam bao khong qua tai MongoDB / RPC khi batch lon.
+ * Semaphore giới hạn số tác vụ chạy đồng thời.
+ * Đảm bảo không quá tải MongoDB / RPC khi batch lớn.
  */
 class Semaphore {
   private readonly maxConcurrent: number;
@@ -116,7 +118,7 @@ function getRpcProvider(): ethers.JsonRpcProvider | null {
 export async function acquireDistributedLock(): Promise<boolean> {
   const redisClient = getRedisClientIfReady();
   if (!redisClient) {
-    logger.info('[DataMapper] Redis chua san sang, bo qua lock acquisition.');
+    logger.info('[DataMapper] Redis chưa sẵn sàng, bỏ qua lock acquisition.');
     return true;
   }
 
@@ -128,7 +130,7 @@ export async function acquireDistributedLock(): Promise<boolean> {
     );
     return result === 'OK';
   } catch (err) {
-    logger.warn('Loi khi acquire distributed lock, tu choi chay cycle de tranh duplicate processing.', {
+    logger.warn('Lỗi khi acquire distributed lock, từ chối chạy cycle để tránh duplicate processing.', {
       errorMessage: (err as Error).message
     });
     return false;
@@ -145,7 +147,7 @@ export async function releaseDistributedLock(): Promise<void> {
       await redisClient.del(MAPPER_LOCK_KEY);
     }
   } catch (err) {
-    logger.warn('Loi khi release distributed lock.', {
+    logger.warn('Lỗi khi release distributed lock.', {
       errorMessage: (err as Error).message
     });
   }
@@ -170,15 +172,15 @@ async function saveLastSyncedBlockNumber(blockNumber: number): Promise<void> {
   try {
     await redisClient.set(LAST_SYNCED_BLOCK_KEY, String(blockNumber));
   } catch (err) {
-    logger.warn('Loi khi luu checkpoint block number.', {
+    logger.warn('Lỗi khi lưu checkpoint block number.', {
       errorMessage: (err as Error).message
     });
   }
 }
 
 /**
- * Lay nhung deposit records da xac nhan thanh toan (PAYMENT_CONFIRMED, MINT_COMPLETED)
- * de sync vao unified_transactions.
+ * Lấy những deposit records đã xác nhận thanh toán (PAYMENT_CONFIRMED, MINT_COMPLETED)
+ * để sync vào unified_transactions.
  */
 async function fetchPayosDepositRecords(): Promise<DepositTransaction[]> {
   try {
@@ -191,7 +193,7 @@ async function fetchPayosDepositRecords(): Promise<DepositTransaction[]> {
 
     return records;
   } catch (err) {
-    logger.error('[DataMapper] loi khi fetch PayOS deposit records.', {
+    logger.error('[DataMapper] lỗi khi fetch PayOS deposit records.', {
       errorMessage: (err as Error).message
     });
     return [];
@@ -199,9 +201,9 @@ async function fetchPayosDepositRecords(): Promise<DepositTransaction[]> {
 }
 
 /**
- * Sync mot PayOS deposit record vao unified_transactions.
- * Tao record voi correlationId = "deposit:{orderCode}" va source = PAYOS.
- * Idempotent: su dung upsert dua tren correlationId.
+ * Sync một PayOS deposit record vào unified_transactions.
+ * Tạo record với correlationId = "deposit:{orderCode}" và source = PAYOS.
+ * Idempotent: sử dụng upsert dựa trên correlationId.
  */
 async function syncPayosDepositRecord(deposit: DepositTransaction): Promise<boolean> {
   try {
@@ -232,10 +234,10 @@ async function syncPayosDepositRecord(deposit: DepositTransaction): Promise<bool
 
       await upsertUnifiedTransactionByCorrelationId(correlationId, updatePayload);
     } else {
-      // Ghi chu logic phuc tap: DepositTransaction khong co field projectId.
-      // PayOS deposit chi lien quan den wallet cua user, khong truc tiep den project.
-      // Blockchain donation se fill projectId khi duoc sync tu chain.
-      // Correlation sau do se khong dung projectId (chi walletAddress + amountVnd).
+      // Ghi chú logic phức tạp: DepositTransaction không có field projectId.
+      // PayOS deposit chỉ liên quan đến wallet của user, không trực tiếp đến project.
+      // Blockchain donation sẽ fill projectId khi được sync từ chain.
+      // Correlation sau đó sẽ không dùng projectId (chỉ walletAddress + amountVnd).
       await createUnifiedTransactionFromPayos(correlationId, {
         projectId: '',
         walletAddress,
@@ -251,7 +253,7 @@ async function syncPayosDepositRecord(deposit: DepositTransaction): Promise<bool
 
     return true;
   } catch (err) {
-    logger.error('[DataMapper] loi khi sync PayOS deposit record.', {
+    logger.error('[DataMapper] lỗi khi sync PayOS deposit record.', {
       orderCode: deposit.orderCode,
       errorMessage: (err as Error).message
     });
@@ -262,11 +264,11 @@ async function syncPayosDepositRecord(deposit: DepositTransaction): Promise<bool
 async function syncPayosDeposits(): Promise<number> {
   const deposits = await fetchPayosDepositRecords();
   if (deposits.length === 0) {
-    logger.info('[DataMapper] Khong co PayOS deposit nao can sync.');
+    logger.info('[DataMapper] Không có PayOS deposit nào cần sync.');
     return 0;
   }
 
-  logger.info(`[DataMapper] Bat dau sync ${deposits.length} PayOS deposit records.`);
+  logger.info(`[DataMapper] Bắt đầu sync ${deposits.length} PayOS deposit records.`);
   const writeSemaphore = new Semaphore(DB_WRITE_CONCURRENCY);
 
   const results = await Promise.allSettled(
@@ -274,36 +276,36 @@ async function syncPayosDeposits(): Promise<number> {
   );
 
   const successCount = results.filter(r => r.status === 'fulfilled' && r.value).length;
-  logger.info(`[DataMapper] Da sync ${successCount}/${deposits.length} PayOS deposit records.`);
+  logger.info(`[DataMapper] Đã sync ${successCount}/${deposits.length} PayOS deposit records.`);
   return successCount;
 }
 
 /**
- * Sync DonationReceived events tu blockchain vao unified_transactions.
- * Chi sync tu lastSyncedBlock + 1 tro di.
- * Tao unified record voi source = BLOCKCHAIN, chainStatus = CONFIRMED.
- * Idempotent: kiem tra ton tai theo correlationId = "donation:{txHash}".
+ * Sync DonationReceived events từ blockchain vào unified_transactions.
+ * Chỉ sync từ lastSyncedBlock + 1 trở đi.
+ * Tạo unified record với source = BLOCKCHAIN, chainStatus = CONFIRMED.
+ * Idempotent: kiểm tra tồn tại theo correlationId = "donation:{txHash}".
  *
- * LUU Y: BLOCKCHAIN_RPC_URL va DONATION_RANKING_CONTRACT_ADDRESS la config BAT BUOC.
- * Neu khong co, worker khong the sync blockchain events - can throw error de
- * operator nhan biet cau hinh thieu som, tranh viec worker chay "im lang" ma khong sync.
+ * LƯU Ý: BLOCKCHAIN_RPC_URL và DONATION_RANKING_CONTRACT_ADDRESS là config BẮT BUỘC.
+ * Nếu không có, worker không thể sync blockchain events - cần throw error để
+ * operator nhận biết cấu hình thiếu sớm, tránh việc worker chạy "im lặng" mà không sync.
  */
 async function syncBlockchainDonationEvents(): Promise<{ syncedCount: number; latestBlock: number }> {
   const rpcUrl = String(process.env.BLOCKCHAIN_RPC_URL || '').trim();
   const contractAddress = String(process.env.DONATION_RANKING_CONTRACT_ADDRESS || '').trim();
 
-  // Kiem tra config bat buoc: RPC URL va contract address can duoc cau hinh
-  // Neu thieu, throw error de worker khong chay im lang ma khong sync blockchain
+  // Kiểm tra config bắt buộc: RPC URL và contract address cần được cấu hình
+  // Nếu thiếu, throw error để worker không chạy im lặng mà không sync blockchain
   if (!rpcUrl) {
-    throw new Error('[DataMapper] BLOCKCHAIN_RPC_URL chua duoc cau hinh. Vui long kiem tra environment variables.');
+    throw new Error('[DataMapper] BLOCKCHAIN_RPC_URL chưa được cấu hình. Vui lòng kiểm tra environment variables.');
   }
   if (!contractAddress) {
-    throw new Error('[DataMapper] DONATION_RANKING_CONTRACT_ADDRESS chua duoc cau hinh. Vui long kiem tra environment variables.');
+    throw new Error('[DataMapper] DONATION_RANKING_CONTRACT_ADDRESS chưa được cấu hình. Vui lòng kiểm tra environment variables.');
   }
 
   const provider = getRpcProvider();
   if (!provider) {
-    logger.warn('[DataMapper] Khong the khoi tao RPC provider, bo qua blockchain sync.');
+    logger.warn('[DataMapper] Không thể khởi tạo RPC provider, bỏ qua blockchain sync.');
     return { syncedCount: 0, latestBlock: 0 };
   }
 
@@ -311,27 +313,27 @@ async function syncBlockchainDonationEvents(): Promise<{ syncedCount: number; la
     const eventInterface = new ethers.Interface(DONATION_RECEIVED_ABI);
     const eventTopic = eventInterface.getEvent('DonationReceived')?.topicHash;
     if (!eventTopic) {
-      logger.error('[DataMapper] Khong tim thay topicHash cho DonationReceived event.');
+      logger.error('[DataMapper] Không tìm thấy topicHash cho DonationReceived event.');
       return { syncedCount: 0, latestBlock: 0 };
     }
 
     const lastSyncedBlock = await getLastSyncedBlockNumber();
     const fromBlock = Math.max(lastSyncedBlock + 1, 0);
 
-    // Lay current head block de biet gioi han tren de chunk.
-    // Neu RPC khong tra ve (down), bo qua lan sync nay.
+    // Lấy current head block để biết giới hạn trên để chunk.
+    // Nếu RPC không trả về (down), bỏ qua lần sync này.
     let currentHeadBlock: number;
     try {
       currentHeadBlock = await provider.getBlockNumber();
     } catch (err) {
-      logger.error('[DataMapper] Loi khi get block number, bo qua blockchain sync.', {
+      logger.error('[DataMapper] Lỗi khi get block number, bỏ qua blockchain sync.', {
         errorMessage: (err as Error).message
       });
       return { syncedCount: 0, latestBlock: lastSyncedBlock };
     }
 
-    // Ghi chu logic phuc tap: Alchemy/Infura thuong gioi han pham vi ~10k blocks/lan.
-    // Chia thanh chunks 5000 blocks de an toan, retry duoc khi timeout.
+    // Ghi chú logic phức tạp: Alchemy/Infura thường giới hạn phạm vi ~10k blocks/lần.
+    // Chia thành chunks 5000 blocks để an toàn, retry được khi timeout.
     const eventLogs: ethers.Log[] = [];
     for (let chunkStart = fromBlock; chunkStart <= currentHeadBlock; chunkStart += MAX_BLOCKS_PER_GETLOGS_REQUEST) {
       const chunkEnd = Math.min(chunkStart + MAX_BLOCKS_PER_GETLOGS_REQUEST - 1, currentHeadBlock);
@@ -344,35 +346,35 @@ async function syncBlockchainDonationEvents(): Promise<{ syncedCount: number; la
         });
         eventLogs.push(...chunkLogs);
       } catch (err) {
-        logger.error('[DataMapper] Loi khi getLogs chunk, bo qua chunk nay.', {
+        logger.error('[DataMapper] Lỗi khi getLogs chunk, bỏ qua chunk này.', {
           fromBlock: chunkStart,
           toBlock: chunkEnd,
           errorMessage: (err as Error).message
         });
-        // Tien hanh voi logs da lay duoc, khong fail toan bo
+        // Tiến hành với logs đã lấy được, không fail toàn bộ
       }
     }
 
     if (eventLogs.length === 0) {
-      logger.info('[DataMapper] Khong co DonationReceived event moi can sync.', {
+      logger.info('[DataMapper] Không có DonationReceived event mới cần sync.', {
         fromBlock,
         latestBlock: currentHeadBlock
       });
-      // Cap nhat checkpoint de lan sau khong quet lai cung khoang
+      // Cập nhật checkpoint để lần sau không quét lại cùng khoảng
       await saveLastSyncedBlockNumber(currentHeadBlock);
       return { syncedCount: 0, latestBlock: currentHeadBlock };
     }
 
-    logger.info(`[DataMapper] Tim thay ${eventLogs.length} DonationReceived events (tu block ${fromBlock} den ${currentHeadBlock}).`);
+    logger.info(`[DataMapper] Tìm thấy ${eventLogs.length} DonationReceived events (từ block ${fromBlock} đến ${currentHeadBlock}).`);
 
     const now = new Date();
     let syncedCount = 0;
     const processedBlockNumbers = new Set<number>();
     const semaphore = new Semaphore(DB_WRITE_CONCURRENCY);
 
-    // Ghi chu logic phuc tap: Xu ly parallel voi Semaphore de tang throughput
-    // nhung van gioi han so luong dong thoi tranh qua tai MongoDB.
-    // Cap nhat checkpoint theo tung chunk da xu ly xong (thay vi cuoi batch).
+    // Ghi chú logic phức tạp: Xử lý parallel với Semaphore để tăng throughput
+    // nhưng vẫn giới hạn số lượng đồng thời tránh quá tải MongoDB.
+    // Cập nhật checkpoint theo từng chunk đã xử lý xong (thay vì cuối batch).
     const writeResults = await Promise.allSettled(
       eventLogs.map((eventLog) => semaphore.run(async () => {
         const parsed = eventInterface.parseLog({ topics: eventLog.topics, data: eventLog.data });
@@ -404,7 +406,7 @@ async function syncBlockchainDonationEvents(): Promise<{ syncedCount: number; la
             updatedAt: now
           });
         } catch (err) {
-          logger.error('[DataMapper] loi khi upsert donation record.', {
+          logger.error('[DataMapper] lỗi khi upsert donation record.', {
             transactionHash: txHash,
             errorMessage: (err as Error).message
           });
@@ -425,7 +427,7 @@ async function syncBlockchainDonationEvents(): Promise<{ syncedCount: number; la
             }
           );
         } catch (err) {
-          logger.error('[DataMapper] loi khi tao unified transaction record.', {
+          logger.error('[DataMapper] lỗi khi tạo unified transaction record.', {
             correlationId: buildBlockchainCorrelationId(txHash),
             errorMessage: (err as Error).message
           });
@@ -438,13 +440,13 @@ async function syncBlockchainDonationEvents(): Promise<{ syncedCount: number; la
 
     syncedCount = writeResults.filter((r) => r.status === 'fulfilled').length;
 
-    // Cap nhat checkpoint den head block (khong phai max block trong events,
-    // vi co the co reorg lam mat block).
+    // Cập nhật checkpoint đến head block (không phải max block trong events,
+    // vì có thể có reorg làm mất block).
     await saveLastSyncedBlockNumber(currentHeadBlock);
-    logger.info(`[DataMapper] Da sync ${syncedCount} blockchain events (latest block: ${currentHeadBlock}).`);
+    logger.info(`[DataMapper] Đã sync ${syncedCount} blockchain events (latest block: ${currentHeadBlock}).`);
     return { syncedCount, latestBlock: currentHeadBlock };
   } catch (err) {
-    logger.error('[DataMapper] loi khi sync blockchain events.', {
+    logger.error('[DataMapper] lỗi khi sync blockchain events.', {
       errorMessage: (err as Error).message
     });
     return { syncedCount: 0, latestBlock: 0 };
@@ -452,24 +454,25 @@ async function syncBlockchainDonationEvents(): Promise<{ syncedCount: number; la
 }
 
 /**
- * Correlate PayOS deposit records voi blockchain donation records.
- * Correlation criteria: cung walletAddress, cung amountVnd,
- * va thoi gian trong vong 30 phut.
+ * Correlate PayOS deposit records với blockchain donation records.
  *
- * LUU Y QUAN TRONG: PayOS deposits KHONG co projectId nen khong the
- * dung projectId lam correlation key. Chi su dung walletAddress + amountVnd
- * trong time window de tranh match nham voi donations cua project khac.
- * Khi correlate thanh cong: cap nhat unified record thanh source = MIXED,
- * chainStatus = CONFIRMED, luu chainTxHash.
+ * F5 fix: correlation criteria thu hẹp từ 30 phút → 10 phút và thêm
+ * projectId filter (deposit không có projectId nên không thể match với
+ * donation của bất kỳ project nào nếu deposit được gán project ở sau).
+ *
+ * LƯU Ý: PayOS deposits KHÔNG có projectId nên không thể
+ * dùng projectId làm correlation key (correlation đang xảy ra trước khi biết projectId).
+ * Correlation key chỉ là walletAddress + amountVnd trong time window ngắn.
+ * Nếu nhiều candidate, chọn record gần nhất (F5 mitigation).
  */
 /**
- * Lay nhung blockchain records co walletAddress + amountVnd trong time range.
- * Su dung batch query thay vi N+1 queries de tang performance.
+ * Lấy những blockchain records có walletAddress + amountVnd trong time range.
+ * Sử dụng batch query thay vì N+1 queries để tăng performance.
  *
- * @param walletAddresses Danh sach dia chi wallet can tim
- * @param timeWindowStart Thoi gian bat dau
- * @param timeWindowEnd Thoi gian ket thuc
- * @returns Map voi key la "walletAddress:amountVnd", gia tri la blockchain record
+ * @param walletAddresses Danh sách địa chỉ wallet cần tìm
+ * @param timeWindowStart Thời gian bắt đầu
+ * @param timeWindowEnd Thời gian kết thúc
+ * @returns Map với key là "walletAddress:amountVnd", giá trị là blockchain record
  */
 async function fetchBlockchainRecordsForCorrelation(
   walletAddresses: string[],
@@ -482,7 +485,7 @@ async function fetchBlockchainRecordsForCorrelation(
     return lookupMap;
   }
 
-  // Su dung dynamic import de tranh circular dependency voi repository layer
+  // Sử dụng dynamic import để tránh circular dependency với repository layer
   const { UnifiedTransactionModel } = await import('../models/unifiedTransactionModel');
 
   const blockchainRecords = await UnifiedTransactionModel
@@ -531,7 +534,7 @@ async function correlatePayosWithBlockchain(): Promise<number> {
       return 0;
     }
 
-    logger.info(`[DataMapper] Correlating ${unmatchedPayosRecords.length} PayOS records voi blockchain.`);
+    logger.info(`[DataMapper] Correlating ${unmatchedPayosRecords.length} PayOS records với blockchain.`);
 
     const validRecords = unmatchedPayosRecords.filter(r => {
       const walletAddress = String(r.walletAddress || '').toLowerCase();
@@ -596,17 +599,17 @@ async function correlatePayosWithBlockchain(): Promise<number> {
       if (updateResult.modifiedCount === 0) continue;
 
       correlatedCount++;
-      logger.info('[DataMapper] Correlated PayOS deposit voi blockchain donation.', {
+      logger.info('[DataMapper] Correlated PayOS deposit với blockchain donation.', {
         utxId: payosRecord.utxId,
         correlationId: payosRecord.correlationId,
         chainTxHash: blockchainData.chainTxHash
       });
     }
 
-    logger.info(`[DataMapper] Da correlate ${correlatedCount} records.`);
+    logger.info(`[DataMapper] Đã correlate ${correlatedCount} records.`);
     return correlatedCount;
   } catch (err) {
-    logger.error('[DataMapper] loi khi correlate PayOS voi blockchain.', {
+    logger.error('[DataMapper] lỗi khi correlate PayOS với blockchain.', {
       errorMessage: (err as Error).message
     });
     return 0;
@@ -614,13 +617,13 @@ async function correlatePayosWithBlockchain(): Promise<number> {
 }
 
 /**
- * Kiem tra mot loi co phai la "transaction not found" (da bi revert/bi xoa khoi chain).
- * Phan biet voi RPC error (network, timeout, rate limit) de tranh nham lan reorg.
+ * Kiểm tra một lỗi có phải là "transaction not found" (đã bị revert/bị xóa khỏi chain).
+ * Phân biệt với RPC error (network, timeout, rate limit) để tránh nhầm lẫn reorg.
  *
- * Ethers v6 tra ve error voi:
- * - code: 'CALL_EXCEPTION' (khi receipt null do tx bi revert/drop)
- * - shortMessage: chua 'transaction ... not found' hoac 'could not find'
- * - error.code === 'NOT_FOUND' tu Alchemy/Infura
+ * Ethers v6 trả về error với:
+ * - code: 'CALL_EXCEPTION' (khi receipt null do tx bị revert/drop)
+ * - shortMessage: chứa 'transaction ... not found' hoặc 'could not find'
+ * - error.code === 'NOT_FOUND' từ Alchemy/Infura
  */
 function isTransactionNotFoundError(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false;
@@ -629,7 +632,7 @@ function isTransactionNotFoundError(err: unknown): boolean {
   const errorCode = String(errorObj.code || '');
   const errorMessage = String(errorObj.shortMessage || errorObj.message || '').toLowerCase();
 
-  // Ethers v6 CALL_EXCEPTION khi transaction khong ton tai
+  // Ethers v6 CALL_EXCEPTION khi transaction không tồn tại
   if (errorCode === 'CALL_EXCEPTION') {
     if (errorMessage.includes('not found') || errorMessage.includes('missing')) {
       return true;
@@ -657,13 +660,13 @@ function isTransactionNotFoundError(err: unknown): boolean {
 }
 
 /**
- * Phat hien va danh dau blockchain reorg (fork).
- * Kiem tra nhung unified record co chainTxHash trong khoang block gan day,
- * lay receipt cua transaction hien tai, neu block number khac -> fork.
- * Neu receipt === null hoac "tx not found" -> tx bi revert hoan toan.
+ * Phát hiện và đánh dấu blockchain reorg (fork).
+ * Kiểm tra những unified record có chainTxHash trong khoảng block gần đây,
+ * lấy receipt của transaction hiện tại, nếu block number khác -> fork.
+ * Nếu receipt === null hoặc "tx not found" -> tx bị revert hoàn toàn.
  *
- * LUU Y: Chi mark REORGED khi xac nhan "transaction not found".
- * RPC error (timeout, rate limit) KHONG duoc mark REORGED de tranh mat du lieu.
+ * LƯU Ý: Chỉ mark REORGED khi xác nhận "transaction not found".
+ * RPC error (timeout, rate limit) KHÔNG được mark REORGED để tránh mất dữ liệu.
  */
 async function detectAndMarkReorgs(): Promise<number> {
   const lastSyncedBlock = await getLastSyncedBlockNumber();
@@ -695,7 +698,7 @@ async function detectAndMarkReorgs(): Promise<number> {
 
     if (recordsWithTx.length === 0) return 0;
 
-    logger.info(`[DataMapper] Kiem tra ${recordsWithTx.length} records cho reorg detection.`);
+    logger.info(`[DataMapper] Kiểm tra ${recordsWithTx.length} records cho reorg detection.`);
     const receiptSemaphore = new Semaphore(DB_WRITE_CONCURRENCY);
 
     const reorgResults = await Promise.allSettled(
@@ -728,13 +731,13 @@ async function detectAndMarkReorgs(): Promise<number> {
         try {
           await markChainTransactionReorged(outcome.record.chainTxHash);
           reorgedCount++;
-          logger.warn('[DataMapper] Phat hien reorg: transaction bi revert.', {
+          logger.warn('[DataMapper] Phát hiện reorg: transaction bị revert.', {
             correlationId: outcome.record.correlationId,
             chainTxHash: outcome.record.chainTxHash,
             originalBlock: outcome.record.chainBlockNumber
           });
         } catch (markErr) {
-          logger.error('[DataMapper] Loi khi mark REORGED.', {
+          logger.error('[DataMapper] Lỗi khi mark REORGED.', {
             chainTxHash: outcome.record.chainTxHash,
             errorMessage: (markErr as Error).message
           });
@@ -744,13 +747,13 @@ async function detectAndMarkReorgs(): Promise<number> {
           { utxId: outcome.record.utxId },
           { $set: { chainBlockNumber: outcome.newBlock } }
         ).exec();
-        logger.warn('[DataMapper] Phat hien fork: block number thay doi.', {
+        logger.warn('[DataMapper] Phát hiện fork: block number thay đổi.', {
           correlationId: outcome.record.correlationId,
           oldBlock: outcome.record.chainBlockNumber,
           newBlock: outcome.newBlock
         });
       } else if (outcome.type === 'rpc_error') {
-        logger.warn('[DataMapper] RPC error khi check receipt, bo qua (co the transient).', {
+        logger.warn('[DataMapper] RPC error khi check receipt, bỏ qua (có thể transient).', {
           correlationId: outcome.record.correlationId,
           chainTxHash: outcome.record.chainTxHash,
           errorMessage: (outcome.error as Error).message
@@ -759,11 +762,11 @@ async function detectAndMarkReorgs(): Promise<number> {
     }
 
     if (reorgedCount > 0) {
-      logger.warn(`[DataMapper] Da phat hien ${reorgedCount} records bi reorg.`);
+      logger.warn(`[DataMapper] Đã phát hiện ${reorgedCount} records bị reorg.`);
     }
     return reorgedCount;
   } catch (err) {
-    logger.error('[DataMapper] loi khi kiem tra reorg.', {
+    logger.error('[DataMapper] lỗi khi kiểm tra reorg.', {
       errorMessage: (err as Error).message
     });
     return 0;
@@ -771,12 +774,12 @@ async function detectAndMarkReorgs(): Promise<number> {
 }
 
 /**
- * Ham chinh: chay mot chu ky sync hoan chinh.
- * Thuc hien theo thu tu:
- * 1. Kiem tra reorg (neu co checkpoint cu)
+ * Hàm chính: chạy một chu kỳ sync hoàn chỉnh.
+ * Thực hiện theo thứ tự:
+ * 1. Kiểm tra reorg (nếu có checkpoint cũ)
  * 2. Sync blockchain events
  * 3. Sync PayOS deposits
- * 4. Correlate PayOS voi blockchain
+ * 4. Correlate PayOS với blockchain
  * 5. Invalidate Redis cache
  */
 export async function runDataMapperCycle(): Promise<{
@@ -785,7 +788,7 @@ export async function runDataMapperCycle(): Promise<{
   correlated: number;
   reorged: number;
 }> {
-  logger.info('[DataMapper] Bat dau chu ky sync data mapper.');
+  logger.info('[DataMapper] Bắt đầu chu kỳ sync data mapper.');
 
   const reorgedCount = await detectAndMarkReorgs();
   const blockchainResult = await syncBlockchainDonationEvents();
@@ -795,7 +798,7 @@ export async function runDataMapperCycle(): Promise<{
   const { invalidateUnifiedTimelineCache } = await import('../services/unified-timeline.service');
   await invalidateUnifiedTimelineCache();
 
-  logger.info('[DataMapper] Hoan tat chu ky sync data mapper.', {
+  logger.info('[DataMapper] Hoàn tất chu kỳ sync data mapper.', {
     blockchainSynced: blockchainResult.syncedCount,
     payosSynced: payosSyncedCount,
     correlated: correlatedCount,
@@ -811,20 +814,20 @@ export async function runDataMapperCycle(): Promise<{
 }
 
 /**
- * Ham chinh: chay mot chu ky sync hoan chinh (co lock).
- * Su dung boi startDataMapperWorker cho ca initial run va recurring runs.
+ * Hàm chính: chạy một chu kỳ sync hoàn chỉnh (có lock).
+ * Sử dụng bởi startDataMapperWorker cho cả initial run và recurring runs.
  */
 async function runDataMapperCycleWithLock(): Promise<void> {
   const lockAcquired = await acquireDistributedLock();
   if (!lockAcquired) {
-    logger.info('[DataMapper] Lock khong acquired, bo qua run nay.');
+    logger.info('[DataMapper] Lock không acquired, bỏ qua run này.');
     return;
   }
 
   try {
     await runDataMapperCycle();
   } catch (err) {
-    logger.error('[DataMapper] Data mapper cycle that bai.', {
+    logger.error('[DataMapper] Data mapper cycle thất bại.', {
       errorMessage: (err as Error).message
     });
   } finally {
@@ -833,15 +836,15 @@ async function runDataMapperCycleWithLock(): Promise<void> {
 }
 
 /**
- * Khoi dong Data Mapper worker.
- * Chay moi 5 phut bang recursive setTimeout de dam bao moi lan
- * chay hoan tat truoc khi tinh delay cho lan tiep theo.
+ * Khởi động Data Mapper worker.
+ * Chạy mỗi 5 phút bằng recursive setTimeout để đảm bảo mỗi lần
+ * chạy hoàn tất trước khi tính delay cho lần tiếp theo.
  *
- * Ca initial run lan recurring deu duoc wrap trong distributed lock
- * de tranh multiple instances chay dong thoi tren multi-pod deployment.
+ * Cả initial run lẫn recurring đều được wrap trong distributed lock
+ * để tránh multiple instances chạy đồng thời trên multi-pod deployment.
  */
 export function startDataMapperWorker(): void {
-  logger.info('Data Mapper worker khoi dong (chu ky 5 phut).');
+  logger.info('Data Mapper worker khởi động (chu kỳ 5 phút).');
 
   const runWithInterval = (): void => {
     setTimeout(() => {
@@ -850,7 +853,7 @@ export function startDataMapperWorker(): void {
     }, SYNC_INTERVAL_MS);
   };
 
-  // Initial run cung phai qua distributed lock
+  // Initial run cũng phải qua distributed lock
   void runDataMapperCycleWithLock();
 
   runWithInterval();

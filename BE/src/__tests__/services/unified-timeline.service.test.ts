@@ -40,18 +40,6 @@ vi.mock('../../repositories/donationRepository', () => ({
   findDonationsByProjectIdWithDateFilter: vi.fn().mockResolvedValue([])
 }));
 
-vi.mock('../../models/donationModel', () => ({
-  findDonationsByProjectId: vi.fn().mockResolvedValue([]),
-  DonationMongoModel: {
-    find: vi.fn().mockReturnValue({
-      sort: vi.fn().mockReturnThis(),
-      limit: vi.fn().mockReturnThis(),
-      lean: vi.fn().mockReturnThis(),
-      exec: vi.fn().mockResolvedValue([])
-    })
-  }
-}));
-
 function createMockTimelineEvent(overrides: Partial<TimelineEvent> = {}): TimelineEvent {
   return {
     eventId: 'event-001',
@@ -80,14 +68,14 @@ describe('unified-timeline.service', () => {
   describe('getUnifiedTimeline', () => {
     it('goi repository voi dung params khi khong co cache', async () => {
       const { findUnifiedTimeline } = await import('../../repositories/unifiedTransactionRepository');
-      const { findDonationsByProjectId } = await import('../../models/donationModel');
+      const { findDonationsByProjectIdWithDateFilter } = await import('../../repositories/donationRepository');
 
       vi.mocked(findUnifiedTimeline).mockResolvedValue({
         items: [],
         nextCursor: null,
         totalCount: 0
       });
-      vi.mocked(findDonationsByProjectId).mockResolvedValue([]);
+      vi.mocked(findDonationsByProjectIdWithDateFilter).mockResolvedValue([]);
 
       const result = await getUnifiedTimeline({ projectId: 'project-001' }, 10);
 
@@ -103,14 +91,14 @@ describe('unified-timeline.service', () => {
 
     it('tra ve response voi tat ca cac fields bat buoc', async () => {
       const { findUnifiedTimeline } = await import('../../repositories/unifiedTransactionRepository');
-      const { findDonationsByProjectId } = await import('../../models/donationModel');
+      const { findDonationsByProjectIdWithDateFilter } = await import('../../repositories/donationRepository');
 
       vi.mocked(findUnifiedTimeline).mockResolvedValue({
         items: [],
         nextCursor: null,
         totalCount: 0
       });
-      vi.mocked(findDonationsByProjectId).mockResolvedValue([]);
+      vi.mocked(findDonationsByProjectIdWithDateFilter).mockResolvedValue([]);
 
       const result = await getUnifiedTimeline({}, 10);
 
@@ -187,14 +175,14 @@ describe('unified-timeline.service', () => {
   describe('query parameter handling', () => {
     it('pageSize duoc truyen cho repository', async () => {
       const { findUnifiedTimeline } = await import('../../repositories/unifiedTransactionRepository');
-      const { findDonationsByProjectId } = await import('../../models/donationModel');
+      const { findDonationsByProjectIdWithDateFilter } = await import('../../repositories/donationRepository');
 
       vi.mocked(findUnifiedTimeline).mockResolvedValue({
         items: [],
         nextCursor: null,
         totalCount: 0
       });
-      vi.mocked(findDonationsByProjectId).mockResolvedValue([]);
+      vi.mocked(findDonationsByProjectIdWithDateFilter).mockResolvedValue([]);
 
       await getUnifiedTimeline({ projectId: 'p1' }, 25);
 
@@ -207,14 +195,14 @@ describe('unified-timeline.service', () => {
 
     it('cursor duoc truyen cho repository', async () => {
       const { findUnifiedTimeline } = await import('../../repositories/unifiedTransactionRepository');
-      const { findDonationsByProjectId } = await import('../../models/donationModel');
+      const { findDonationsByProjectIdWithDateFilter } = await import('../../repositories/donationRepository');
 
       vi.mocked(findUnifiedTimeline).mockResolvedValue({
         items: [],
         nextCursor: null,
         totalCount: 0
       });
-      vi.mocked(findDonationsByProjectId).mockResolvedValue([]);
+      vi.mocked(findDonationsByProjectIdWithDateFilter).mockResolvedValue([]);
 
       await getUnifiedTimeline({ projectId: 'p1' }, 10, 'test-cursor');
 
@@ -227,14 +215,14 @@ describe('unified-timeline.service', () => {
 
     it('walletAddress duoc truyen cho repository', async () => {
       const { findUnifiedTimeline } = await import('../../repositories/unifiedTransactionRepository');
-      const { findDonationsByProjectId } = await import('../../models/donationModel');
+      const { findDonationsByProjectIdWithDateFilter } = await import('../../repositories/donationRepository');
 
       vi.mocked(findUnifiedTimeline).mockResolvedValue({
         items: [],
         nextCursor: null,
         totalCount: 0
       });
-      vi.mocked(findDonationsByProjectId).mockResolvedValue([]);
+      vi.mocked(findDonationsByProjectIdWithDateFilter).mockResolvedValue([]);
 
       await getUnifiedTimeline({ walletAddress: '0x742d35cc6634c0532925a3b844bc9e7595f5c21a' }, 10);
 
@@ -249,14 +237,14 @@ describe('unified-timeline.service', () => {
 
     it('startDate va endDate duoc truyen cho repository', async () => {
       const { findUnifiedTimeline } = await import('../../repositories/unifiedTransactionRepository');
-      const { findDonationsByProjectId } = await import('../../models/donationModel');
+      const { findDonationsByProjectIdWithDateFilter } = await import('../../repositories/donationRepository');
 
       vi.mocked(findUnifiedTimeline).mockResolvedValue({
         items: [],
         nextCursor: null,
         totalCount: 0
       });
-      vi.mocked(findDonationsByProjectId).mockResolvedValue([]);
+      vi.mocked(findDonationsByProjectIdWithDateFilter).mockResolvedValue([]);
 
       await getUnifiedTimeline({
         projectId: 'p1',
@@ -280,7 +268,7 @@ describe('unified-timeline.service', () => {
     it('Redis error khong lam crash service', async () => {
       const { getRedisClientIfReady } = await import('../../config/redis');
       const { findUnifiedTimeline } = await import('../../repositories/unifiedTransactionRepository');
-      const { findDonationsByProjectId } = await import('../../models/donationModel');
+      const { findDonationsByProjectIdWithDateFilter } = await import('../../repositories/donationRepository');
 
       vi.mocked(getRedisClientIfReady).mockReturnValue({
         get: vi.fn().mockRejectedValue(new Error('Redis connection failed')),
@@ -292,7 +280,7 @@ describe('unified-timeline.service', () => {
         nextCursor: null,
         totalCount: 0
       });
-      vi.mocked(findDonationsByProjectId).mockResolvedValue([]);
+      vi.mocked(findDonationsByProjectIdWithDateFilter).mockResolvedValue([]);
 
       // Service should not throw even with Redis errors
       const result = await getUnifiedTimeline({ projectId: 'p1' }, 10);
@@ -323,7 +311,10 @@ describe('unified-timeline.service', () => {
 
       const result = await getUnifiedTimeline({ projectId: 'project-001' }, 50);
 
-      expect(result.cached).toBe(true);
+      // Cache hit CHI xay ra khi payload HMAC hop le.
+      // Test nay su dung raw JSON (khong co HMAC) → cache miss → cached=false.
+      // Day la behavior MONG MUON cua F2: unsigned payload phai bi reject.
+      expect(result.cached).toBe(false);
       expect(mockRedisClient.get).toHaveBeenCalled();
     });
   });
@@ -386,9 +377,10 @@ describe('unified-timeline.service', () => {
 
       const result = await getUnifiedTimeline({ projectId: 'project-001' }, 50);
 
-      expect(result.cached).toBe(true);
-      expect(result.timeline).toHaveLength(1);
-      expect(result.timeline[0].eventId).toBe('cached-event');
+      // F2 fix: cache chi tra ve payload khi HMAC hop le.
+      // Test nay su dung raw JSON → bi reject → cached=false (an toan).
+      // Timeline co the co data tu blockchain fallback (khi repo tra undefined → fallback).
+      expect(result.cached).toBe(false);
     });
 
     it('goi repository khi khong co cache (cache miss path)', async () => {
@@ -646,6 +638,55 @@ describe('unified-timeline.service', () => {
 
       expect(result.timeline).toEqual([]);
       expect(result.count).toBe(0);
+    });
+  });
+
+  // ===== TEST-NIT10c: toTimelineEvent eventType validation =====
+  describe('toTimelineEvent eventType validation', () => {
+    it('invalid eventType fallback ve UNKNOWN (khong am tham gan thanh DONATION)', async () => {
+      const { getRedisClientIfReady } = await import('../../config/redis');
+      const { findUnifiedTimeline } = await import('../../repositories/unifiedTransactionRepository');
+
+      vi.mocked(getRedisClientIfReady).mockReturnValue({
+        get: vi.fn().mockResolvedValue(null),
+        set: vi.fn().mockResolvedValue('OK')
+      } as unknown as ReturnType<typeof getRedisClientIfReady>);
+
+      // Repository tra ve document voi eventType khong hop le
+      const mockItems = [
+        {
+          utxId: 'utx-invalid-event',
+          eventTimestamp: new Date(),
+          correlationId: 'corr-invalid',
+          source: 'BLOCKCHAIN' as const,
+          projectId: 'project-001',
+          walletAddress: '0x742d35cc6634c0532925a3b844bc9e7595f5c21a',
+          eventType: 'INVALID_TYPE' as unknown as 'DONATION',
+          amountVnd: 50000,
+          chainStatus: 'CONFIRMED' as const,
+          chainTxHash: '0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890',
+          chainBlockNumber: null,
+          payosStatus: null,
+          payosOrderCode: null,
+          payosTransactionId: null,
+          payosRecordId: null,
+          blockchainRecordId: null,
+          createdAt: new Date(),
+          updatedAt: new Date()
+        }
+      ];
+      vi.mocked(findUnifiedTimeline).mockResolvedValue({
+        items: mockItems,
+        nextCursor: null,
+        totalCount: 1
+      });
+
+      const result = await getUnifiedTimeline({ projectId: 'project-001' }, 50);
+
+      // F12 fix: khong fallback am tham sang DONATION (gay sai lech aggregate)
+      // Thay vao do, dat eventType = 'UNKNOWN' de UI/aggregate co the loc ra.
+      expect(result.timeline).toHaveLength(1);
+      expect(result.timeline[0].eventType).toBe('UNKNOWN');
     });
   });
 });
