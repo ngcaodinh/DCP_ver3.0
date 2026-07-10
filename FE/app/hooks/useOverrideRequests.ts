@@ -9,72 +9,57 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { buildApiUrl, fetchApi, type ApiErrorResponse } from '@/app/utils/apiClient';
 import { readAuthSession } from '@/app/utils/authSession';
-
-// =============================================================================
-// SHARED TYPES — định nghĩa trùng với PendingOverrideItem trong OverrideVoteDrawer.tsx
-// =============================================================================
-
-type GpsCoordinate = { lat: number; lng: number };
-type OverrideReason = 'OUT_OF_GEOFENCE' | 'GPS_EXIF_MISSING' | 'NO_GEOFENCE';
-type OverrideStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'EXPIRED';
-
-type CommissionerVote = {
-  commissionerId: string;
-  commissionerRole: string;
-  vote: 'APPROVE' | 'REJECT';
-  reason: string;
-  votedAt: string;
-};
-
-export type OverrideRequestItem = {
-  overrideRequestId: string;
-  projectId: string;
-  organizationId: string;
-  evidenceCid: string;
-  disbursementRequestId: string | null;
-  reason: OverrideReason;
-  gpsFromImage: GpsCoordinate | null;
-  gpsFromProject: GpsCoordinate;
-  distanceMeters: number | null;
-  commissionerSnapshot: Array<{ userId: string; role: string }>;
-  votes: CommissionerVote[];
-  status: OverrideStatus;
-  createdAt: string;
-};
-
-export type VoteApiResponseData = {
-  outcome: 'VOTE_RECORDED' | 'RESOLVED_APPROVED' | 'RESOLVED_REJECTED';
-  pendingVoters?: number;
-  totalVoters?: number;
-  disbursementAutoApproved?: boolean;
-};
+import type {
+  OverrideRequestItem,
+  VoteApiResponseData,
+  SubmitOverrideVotePayload
+} from '@/app/components/systemAdmin/tailwind/overrideVoting.types';
 
 // =============================================================================
 // API CALLS
 // =============================================================================
 
-/** Gọi GET /api/oracle/pending-overrides để lấy danh sách override request PENDING. */
+/**
+ * Gọi GET /api/oracle/pending-overrides để lấy danh sách override request PENDING.
+ * Trả về danh sách đã được BE redact userId ở commissionerSnapshot (xem overrideVoting.types).
+ */
 async function fetchOverrideRequests(): Promise<OverrideRequestItem[]> {
   const session = readAuthSession();
+  // [S6-fix] Early return nếu không có token — tránh gửi "Authorization: Bearer undefined"
+  if (!session?.accessToken) {
+    throw new Error('Chưa đăng nhập');
+  }
   const res = await fetchApi<{ items: OverrideRequestItem[]; total: number }>(
     buildApiUrl('/api/oracle/pending-overrides?limit=20&skip=0'),
-    { headers: { Authorization: `Bearer ${session?.accessToken ?? ''}` } }
+    { headers: { Authorization: `Bearer ${session.accessToken}` } }
   );
   return res.data.items ?? [];
 }
 
-/** Gọi POST /api/oracle/override-requests/:id/vote để submit vote. */
-async function submitOverrideVoteRequest(
-  overrideRequestId: string,
-  vote: 'APPROVE' | 'REJECT',
-  reason: string
-): Promise<VoteApiResponseData> {
+/**
+ * Gọi POST /api/oracle/override-requests/:id/vote để submit vote.
+ * Không gửi Idempotency-Key vì BE hiện không có idempotency store đáng tin cậy
+ * (multi-instance Redis chưa có cấu hình đảm bảo). Anti-double-vote dựa vào:
+ * - 409 ALREADY_VOTED trả về từ overrideVotingService
+ * - Atomic $push tại Mongo (xem addVoteToOverrideRequest + race guard).
+ */
+async function submitOverrideVoteRequest({
+  overrideRequestId,
+  vote,
+  reason
+}: SubmitOverrideVotePayload): Promise<VoteApiResponseData> {
   const session = readAuthSession();
+  // [S6-fix] Early return nếu không có token
+  if (!session?.accessToken) {
+    throw new Error('Chưa đăng nhập');
+  }
   const res = await fetchApi<VoteApiResponseData>(
     buildApiUrl(`/api/oracle/override-requests/${overrideRequestId}/vote`),
     {
       method: 'POST',
-      headers: { Authorization: `Bearer ${session?.accessToken ?? ''}` },
+      headers: {
+        Authorization: `Bearer ${session.accessToken}`
+      },
       body: JSON.stringify({ vote, reason })
     }
   );
@@ -88,12 +73,15 @@ async function submitOverrideVoteRequest(
 /**
  * Query hook lấy danh sách override request PENDING.
  * Tự động retry 1 lần khi gọi thất bại (không phải lỗi 401/403).
+ * [P5-fix] Thêm refetchInterval khi drawer open để tránh stale data trong voting scenario.
  */
 export function useOverrideRequests() {
   return useQuery<OverrideRequestItem[], ApiErrorResponse>({
     queryKey: ['overrideRequests'],
     queryFn: fetchOverrideRequests,
     staleTime: 30_000,
+    // [P5-fix] Refetch mỗi 10s khi có subscriber active (drawer open)
+    refetchInterval: 10_000,
     retry: (failureCount, error) => {
       // Không retry 401/403 — user phải đăng nhập lại
       if (error?.statusCode === 401 || error?.statusCode === 403) return false;
@@ -101,12 +89,6 @@ export function useOverrideRequests() {
     }
   });
 }
-
-export type SubmitOverrideVotePayload = {
-  overrideRequestId: string;
-  vote: 'APPROVE' | 'REJECT';
-  reason: string;
-};
 
 /**
  * Mutation hook submit vote cho một override request.
@@ -116,8 +98,7 @@ export function useSubmitOverrideVote() {
   const queryClient = useQueryClient();
 
   return useMutation<VoteApiResponseData, ApiErrorResponse, SubmitOverrideVotePayload>({
-    mutationFn: async ({ overrideRequestId, vote, reason }) =>
-      submitOverrideVoteRequest(overrideRequestId, vote, reason),
+    mutationFn: submitOverrideVoteRequest,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['overrideRequests'] });
     }

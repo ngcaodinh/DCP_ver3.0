@@ -170,7 +170,7 @@ export async function submitOverrideVote(
 }
 
 const COMMISSIONER_CACHE_KEY = 'commissioners:active';
-const COMMISSIONER_CACHE_TTL_S = 30; // 30 giây — commissioner set thay đổi rất hiếm
+const COMMISSIONER_CACHE_TTL_S = 5; // [S4-fix] 5 giây thay vì 30s — giảm race window cho revoked commissioner
 
 /**
  * Lấy danh sách commissioner đang active, ưu tiên từ Redis cache (TTL 30s).
@@ -390,6 +390,7 @@ async function tryAutoApproveDisbursement(
 /**
  * Thông báo đến tất cả ủy viên trong snapshot khi override request bị expire do commissioner set thay đổi.
  * Mục đích: ủy viên cũ biết request đã hết hiệu lực và không cần action thêm.
+ * [A8-fix] Log aggregate summary để ops có visibility vào notification system health.
  */
 async function notifyCommissionersOverrideExpired(
   request: OracleOverrideRequestRecord
@@ -414,7 +415,19 @@ async function notifyCommissionersOverrideExpired(
     })
   );
 
-  await Promise.allSettled(notifyPromises);
+  const results = await Promise.allSettled(notifyPromises);
+  const successCount = results.filter(r => r.status === 'fulfilled').length;
+  const failureCount = results.filter(r => r.status === 'rejected').length;
+  
+  // [A8-fix] Aggregate summary log cho ops visibility
+  if (failureCount > 0) {
+    logger.warn('Một số notification expire override gửi thất bại.', {
+      overrideRequestId: request.overrideRequestId,
+      successCount,
+      failureCount,
+      totalCommissioners: request.commissionerSnapshot.length
+    });
+  }
 }
 
 /**

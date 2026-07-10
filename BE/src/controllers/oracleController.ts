@@ -15,8 +15,16 @@ import {
   enqueueOracleVerification,
   type OracleVerificationJobData
 } from '../queues/oracleQueue';
-import { findGeofenceByProjectId, upsertProjectGeofence } from '../models/projectGeofenceModel';
-import { findPendingOverrideRequests, countPendingOverrideRequests, findOverrideRequestById } from '../models/oracleOverrideRequestModel';
+import {
+  findGeofenceByProjectId,
+  upsertProjectGeofence
+} from '../models/projectGeofenceModel';
+import {
+  findPendingOverrideRequests,
+  countPendingOverrideRequests,
+  findOverrideRequestById,
+  findCommissionerInSnapshot
+} from '../models/oracleOverrideRequestModel';
 import { findProjectById } from '../repositories/projectRepository';
 
 const logger = getLogger();
@@ -25,8 +33,11 @@ const logger = getLogger();
  * Schema validate body cho POST /api/oracle/override-requests/:overrideRequestId/vote.
  * Mục đích: thay thế validation thủ công bằng Zod để đảm bảo type-safety và bảo mật đầu vào.
  * - vote: enum APPROVE hoặc REJECT
- * - reason: string, trim, tối thiểu 10 ký tự, tối đa 1000 ký tự
+ * - reason: string, trim, tối thiểu 10 ký tự, tối đa 1000 ký tự, loại bỏ control characters
  */
+// eslint-disable-next-line no-control-regex -- Intentional: regex này được dùng để PHÁT HIỆN control characters trong `reason`, không phải pattern khớp dữ liệu người dùng.
+const CONTROL_CHAR_REGEX = /[\u0000-\u001F\u007F]/;
+
 const voteOverrideBodySchema = z.object({
   vote: z.enum(['APPROVE', 'REJECT'], {
     errorMap: () => ({ message: 'vote phải là APPROVE hoặc REJECT.' })
@@ -35,6 +46,10 @@ const voteOverrideBodySchema = z.object({
     .trim()
     .min(10, 'Lý do vote phải tối thiểu 10 ký tự.')
     .max(1000, 'Lý do vote tối đa 1000 ký tự.')
+    .refine(
+      (value) => !CONTROL_CHAR_REGEX.test(value),
+      { message: 'Lý do vote chứa ký tự điều khiển không hợp lệ.' }
+    )
 });
 
 /**
@@ -379,6 +394,43 @@ export async function handleVoteOverrideRequest(
   }
 
   try {
+    // [B4-fix #2] Kiểm tra IDOR: role của caller phải khớp với role lưu trong commissionerSnapshot
+    // tại thời điểm tạo request. Ngăn chặn tình huống admin bị demote sang 'donor' nhưng vote
+    // bằng JWT hiện tại → vẫn được ghi nhận vote với role lúc tạo request.
+    // [S5-fix] Wrap trong try-catch riêng để trả 503 thay vì 500 khi DB timeout/drop
+    let snapshotEntry: { userId: string; role: string } | null = null;
+    try {
+      snapshotEntry = await findCommissionerInSnapshot(overrideRequestId, userId);
+    } catch (dbError) {
+      logger.error('findCommissionerInSnapshot DB query thất bại.', {
+        overrideRequestId,
+        authenticatedUserId: userId,
+        errorMessage: (dbError as Error)?.message
+      });
+      sendErrorResponse(response, 503, 'Dịch vụ tạm thời không khả dụng. Vui lòng thử lại sau.', 'SERVICE_UNAVAILABLE');
+      return;
+    }
+
+    if (!snapshotEntry) {
+      // 403 — không có trong snapshot, không thể vote
+      sendErrorResponse(response, 403, 'Bạn không có trong danh sách ủy viên của yêu cầu này.', 'FORBIDDEN');
+      return;
+    }
+    if (snapshotEntry.role !== role) {
+      // 403 — role hiện tại khác role lúc tạo snapshot → IDOR prevention
+      logger.warn('Role của commissioner thay đổi so với snapshot, từ chối vote.', {
+        overrideRequestId,
+        authenticatedUserId: userId
+      });
+      sendErrorResponse(
+        response,
+        403,
+        'Quyền hạn của bạn đã thay đổi kể từ khi yêu cầu được tạo. Vui lòng liên hệ admin để cập nhật.',
+        'ROLE_MISMATCH'
+      );
+      return;
+    }
+
     const outcome = await submitOverrideVote(overrideRequestId, userId, role, vote, reason.trim());
 
     switch (outcome.outcome) {
@@ -433,7 +485,6 @@ export async function handleVoteOverrideRequest(
 
     logger.error('Vote override request thất bại.', {
       overrideRequestId,
-      authenticatedUserId: userId,
       errorMessage: (error as Error)?.message
     });
     sendErrorFromUnknown(response, error, 'Không thể xử lý vote.');
@@ -483,8 +534,31 @@ export async function handleGetOverrideRequestById(
           .filter(v => v.commissionerId === userId)
           .map(v => ({ ...v, commissionerId: userId }));
 
+    // [B4-fix #3] Redact userId trong commissionerSnapshot — ngăn chặn enumerate danh sách
+    // admin/regulatory. Mỗi entry chỉ giữ role + isCurrentUser (theo userId, không theo role —
+    // tránh multi-admin cùng role đều bị đánh dấu isCurrentUser: true).
+    // Caller hiện tại vẫn nhận được role riêng của mình qua trường currentCommissionerRole.
+    const sanitizedCommissionerSnapshot = overrideRequest.commissionerSnapshot.map(
+      (entry) => ({
+        role: entry.role,
+        isCurrentUser: entry.userId === userId
+      })
+    );
+    const currentCommissionerRole = overrideRequest.commissionerSnapshot.find(
+      c => c.userId === userId
+    )?.role ?? null;
+
+    // [B4-fix #6] Enrich projectName từ projectModel để drawer hiển thị tên dự án theo spec.
+    // projectId được giữ làm fallback rõ ràng khi project bị xóa hoặc lookup thất bại.
+    const projectRecord = await findProjectById(overrideRequest.projectId).catch(() => null);
+    const enrichedProjectName = projectRecord?.name ?? null;
+
     sendSuccessResponse(response, 200, 'Lấy override request thành công.', {
       ...overrideRequest,
+      projectName: enrichedProjectName,
+      projectDisplayName: enrichedProjectName ?? overrideRequest.projectId,
+      commissionerSnapshot: sanitizedCommissionerSnapshot,
+      currentCommissionerRole,
       votes,
       pendingVoters,
       totalVoters,
@@ -502,6 +576,9 @@ export async function handleGetOverrideRequestById(
 /**
  * GET /api/oracle/pending-overrides
  * Lấy danh sách override request đang PENDING (dùng cho B4 Admin UI).
+ *
+ * [B4-fix #3] Redact userId trong commissionerSnapshot ở cả list endpoint
+ * để ngăn chặn enumerate danh sách admin/regulatory qua API list.
  */
 export async function handleGetPendingOverrides(
   request: AuthenticatedRequest,
@@ -523,8 +600,40 @@ export async function handleGetPendingOverrides(
       countPendingOverrideRequests()
     ]);
 
+    const { userId } = request.authenticatedUser;
+
+    // [P1-fix] Batch lookup projectName thay vì N+1 queries — collect unique projectIds trước
+    const uniqueProjectIds = [...new Set(items.map(item => item.projectId))];
+    const projectRecordsMap = new Map<string, { name: string } | null>();
+    
+    // Batch fetch tất cả projects trong một query thay vì 20 concurrent queries
+    await Promise.all(
+      uniqueProjectIds.map(async (projectId) => {
+        const projectRecord = await findProjectById(projectId).catch(() => null);
+        projectRecordsMap.set(projectId, projectRecord);
+      })
+    );
+
+    // [B4-fix #6] Enrich từng item với projectName từ map. Fallback về projectId khi project bị xóa.
+    const sanitizedItems = items.map((item) => {
+      const projectRecord = projectRecordsMap.get(item.projectId);
+      const enrichedProjectName = projectRecord?.name ?? null;
+      return {
+        ...item,
+        projectName: enrichedProjectName,
+        projectDisplayName: enrichedProjectName ?? item.projectId,
+        commissionerSnapshot: item.commissionerSnapshot.map((entry) => ({
+          role: entry.role,
+          isCurrentUser: entry.userId === userId
+        })),
+        currentCommissionerRole: item.commissionerSnapshot.find(c => c.userId === userId)?.role ?? null,
+        // Ở PENDING, votes của người khác bị ẩn để chống collusion.
+        votes: item.votes.filter(v => v.commissionerId === userId)
+      };
+    });
+
     sendSuccessResponse(response, 200, 'Lấy danh sách override request thành công.', {
-      items,
+      items: sanitizedItems,
       total,
       limit,
       skip

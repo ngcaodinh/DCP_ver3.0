@@ -7,55 +7,25 @@
 // để tránh prop-drilling qua nhiều file.
 // =============================================================================
 
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { buildApiUrl, fetchApi } from '@/app/utils/apiClient';
-import { readAuthSession } from '@/app/utils/authSession';
+import { useState, useEffect, useCallback, useRef, useMemo, Suspense } from 'react';
 import { formatVietnameseDateTime } from './helpers';
 import type { ToastItem } from './types';
 import { GeofenceMapLazy } from '@/app/components/oracle/GeofenceMapLazy';
 import type { GeofenceMarker } from '@/app/components/oracle/GeofenceMap';
 import { useOverrideRequests, useSubmitOverrideVote } from '@/app/hooks/useOverrideRequests';
+import {
+  MIN_VOTE_REASON_LENGTH,
+  GEOFENCE_DISTANCE_WARNING_METERS,
+  OVERRIDE_POLLING_SIGNAL_ID,
+  type OverrideRequestItem,
+  type OverrideReason,
+  type CommissionerSnapshotEntry,
+  type GpsCoordinate
+} from './overrideVoting.types';
 
-// =============================================================================
-// TYPES
-// =============================================================================
-
-type GpsCoordinate = { lat: number; lng: number };
-type OverrideReason = 'OUT_OF_GEOFENCE' | 'GPS_EXIF_MISSING' | 'NO_GEOFENCE';
-type OverrideStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'EXPIRED';
-
-type CommissionerVote = {
-  commissionerId: string;
-  commissionerRole: string;
-  vote: 'APPROVE' | 'REJECT';
-  reason: string;
-  votedAt: string;
-};
-
-/** Shape trả về từ GET /api/oracle/pending-overrides — ánh xạ 1:1 với OracleOverrideRequestRecord trên BE. */
-type PendingOverrideItem = {
-  overrideRequestId: string;
-  projectId: string;
-  organizationId: string;
-  evidenceCid: string;
-  disbursementRequestId: string | null;
-  reason: OverrideReason;
-  gpsFromImage: GpsCoordinate | null;
-  gpsFromProject: GpsCoordinate;
-  distanceMeters: number | null;
-  commissionerSnapshot: Array<{ userId: string; role: string }>;
-  votes: CommissionerVote[];
-  status: OverrideStatus;
-  createdAt: string;
-};
-
-/** Shape trả về từ POST /api/oracle/override-requests/:id/vote khi thành công. */
-type VoteApiResponseData = {
-  outcome: 'VOTE_RECORDED' | 'RESOLVED_APPROVED' | 'RESOLVED_REJECTED';
-  pendingVoters?: number;
-  totalVoters?: number;
-  disbursementAutoApproved?: boolean;
-};
+// Re-export OverrideRequestItem as PendingOverrideItem alias để giữ
+// tương thích ngược với code cũ — giảm diff trong các file test.
+export type PendingOverrideItem = OverrideRequestItem;
 
 export type OverrideVoteDrawerProps = {
   isOpen: boolean;
@@ -63,7 +33,11 @@ export type OverrideVoteDrawerProps = {
   /** ID request cụ thể để auto-select khi mở từ socket notification. */
   initialRequestId?: string | null;
   currentUserId: string;
-  currentUserRole: string;
+  /**
+   * @deprecated Prop không còn sử dụng — giữ optional để tương thích ngược với
+   * callers cũ (AdminPage/RegulatoryPage). Có thể xóa sau khi refactor callers.
+   */
+  currentUserRole?: string;
   onToast: (toast: Omit<ToastItem, 'id'>) => void;
   /** Callback để AdminPage cập nhật badge số lượng pending. */
   onItemsCountChange?: (count: number) => void;
@@ -73,18 +47,21 @@ export type OverrideVoteDrawerProps = {
 // HELPERS
 // =============================================================================
 
+/** Chuyển mã lý do override sang câu mô tả tiếng Việt hiển thị cho admin. */
 function mapReasonToText(reason: OverrideReason): string {
   if (reason === 'OUT_OF_GEOFENCE') return 'Ảnh chụp ngoài vùng địa lý dự án';
   if (reason === 'GPS_EXIF_MISSING') return 'Ảnh không có dữ liệu GPS (EXIF thiếu)';
   return 'Dự án chưa thiết lập vùng địa lý';
 }
 
+/** Format tọa độ GPS sang chuỗi N/E/S/W với 6 chữ số thập phân. */
 function formatGps(coord: GpsCoordinate): string {
   const latDir = coord.lat >= 0 ? 'N' : 'S';
   const lngDir = coord.lng >= 0 ? 'E' : 'W';
   return `${Math.abs(coord.lat).toFixed(6)}°${latDir}, ${Math.abs(coord.lng).toFixed(6)}°${lngDir}`;
 }
 
+/** Map role sang nhãn tiếng Việt để hiển thị cho người dùng. */
 function mapRoleToLabel(role: string): string {
   if (role === 'admin') return 'Quản trị viên';
   if (role === 'regulatory') return 'Cơ quan giám sát';
@@ -99,11 +76,8 @@ function buildMarkersFromItem(item: PendingOverrideItem): GeofenceMarker[] {
     lat: item.gpsFromImage.lat,
     lng: item.gpsFromImage.lng,
     status,
-    label: item.evidenceCid ? `CID: ${item.evidenceCid.slice(0, 20)}…` : undefined,
-    // TODO: truyền distanceMeters: item.distanceMeters ?? undefined và timestamp: item.createdAt
-    // sau khi GeofenceMarker type được mở rộng để hỗ trợ Popup enhancements
-    // TODO: truyền thumbnailUrl: `${process.env.NEXT_PUBLIC_IPFS_GATEWAY_URL}/${item.evidenceCid}`
-    // sau khi NEXT_PUBLIC_IPFS_GATEWAY_URL được thêm vào .env.example và FE env
+    label: item.evidenceCid ? `CID: ${item.evidenceCid.slice(0, 20)}…` : undefined
+    // [S3-fix] Xóa TODO comments expose IPFS gateway URL pattern
   }];
 }
 
@@ -112,6 +86,7 @@ function buildMarkersFromItem(item: PendingOverrideItem): GeofenceMarker[] {
  * Mục đích: phát hiện dữ liệu bất thường khi BE bị compromise hoặc có bug
  * (không có on-chain oracle để cross-check trong codebase này — xem Blockchain/ folder).
  * Trả về false + log lỗi nếu phát hiện bất kỳ invariant nào bị vi phạm.
+ * [P6-fix] Optimize từ O(n²) sang O(n) bằng single-pass reduce.
  */
 function validateVoteConsistency(item: PendingOverrideItem): boolean {
   const { overrideRequestId, commissionerSnapshot, votes, status } = item;
@@ -126,13 +101,22 @@ function validateVoteConsistency(item: PendingOverrideItem): boolean {
     return false;
   }
 
+  // Single-pass reduce: check duplicate commissionerId + hasReject cùng lúc
+  const { uniqueIds, hasReject } = votes.reduce(
+    (acc, v) => {
+      acc.uniqueIds.add(v.commissionerId);
+      if (v.vote === 'REJECT') acc.hasReject = true;
+      return acc;
+    },
+    { uniqueIds: new Set<string>(), hasReject: false }
+  );
+
   // Không có commissionerId trùng lặp trong danh sách phiếu
-  const uniqueVoterIds = new Set(votes.map((v) => v.commissionerId));
-  if (uniqueVoterIds.size !== votes.length) {
+  if (uniqueIds.size !== votes.length) {
     console.error('[OverrideVoteDrawer] Duplicate commissionerId trong danh sách phiếu biểu quyết', {
       overrideRequestId,
       votesLength: votes.length,
-      uniqueVoterIdsSize: uniqueVoterIds.size
+      uniqueVoterIdsSize: uniqueIds.size
     });
     return false;
   }
@@ -147,7 +131,6 @@ function validateVoteConsistency(item: PendingOverrideItem): boolean {
       });
       return false;
     }
-    const hasReject = votes.some((v) => v.vote === 'REJECT');
     if (hasReject) {
       console.error('[OverrideVoteDrawer] Request APPROVED nhưng có phiếu REJECT', {
         overrideRequestId
@@ -158,7 +141,6 @@ function validateVoteConsistency(item: PendingOverrideItem): boolean {
 
   // Nếu status là REJECTED → phải có ít nhất 1 phiếu REJECT
   if (status === 'REJECTED') {
-    const hasReject = votes.some((v) => v.vote === 'REJECT');
     if (!hasReject) {
       console.error('[OverrideVoteDrawer] Request REJECTED nhưng không có phiếu REJECT', {
         overrideRequestId
@@ -190,7 +172,7 @@ function VoteConfirmationDialog({ vote, isSubmitting, onConfirm, onCancel }: Vot
     textareaRef.current?.focus();
   }, []);
 
-  const isValid = reason.trim().length >= 10;
+  const isValid = reason.trim().length >= MIN_VOTE_REASON_LENGTH;
   const isApprove = vote === 'APPROVE';
 
   return (
@@ -351,18 +333,18 @@ function ListView({ items, isLoading, errorText, currentUserId, onOpenDetail, on
         const voteCount = item.votes.length;
         const hasReject = item.votes.some((v) => v.vote === 'REJECT');
 
-        return (
-          <button
-            key={item.overrideRequestId}
-            type="button"
-            onClick={() => onOpenDetail(item)}
-            className="w-full rounded-xl border border-slate-100 bg-white p-4 text-left transition hover:border-emerald-200 hover:shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
-          >
-            <div className="flex items-start justify-between gap-2 mb-2">
-              <div className="min-w-0">
-                <p className="truncate text-sm font-semibold text-slate-900">{item.projectId}</p>
-                <p className="mt-0.5 text-xs text-slate-500">{mapReasonToText(item.reason)}</p>
-              </div>
+      return (
+        <button
+          key={item.overrideRequestId}
+          type="button"
+          onClick={() => onOpenDetail(item)}
+          className="w-full rounded-xl border border-slate-100 bg-white p-4 text-left transition hover:border-emerald-200 hover:shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
+        >
+          <div className="flex items-start justify-between gap-2 mb-2">
+            <div className="min-w-0">
+              <p className="truncate text-sm font-semibold text-slate-900">{item.projectDisplayName ?? item.projectId}</p>
+              <p className="mt-0.5 text-xs text-slate-500">{mapReasonToText(item.reason)}</p>
+            </div>
               {myVote ? (
                 <span className={`shrink-0 rounded-full border px-2 py-0.5 text-xs font-medium ${
                   myVote === 'APPROVE'
@@ -416,6 +398,7 @@ type DetailViewProps = {
   isRejected: boolean;
   isResolved: boolean;
   consistencyWarning: string | null;
+  geofenceMarkers: GeofenceMarker[];
   onVote: (vote: 'APPROVE' | 'REJECT') => void;
   onRetry: () => void;
 };
@@ -423,9 +406,9 @@ type DetailViewProps = {
 function DetailView({
   item, currentUserId, myVote, approveCount, voteCount,
   totalVoters, remainingVotes, isFullyApproved, isRejected, isResolved,
-  consistencyWarning, onVote, onRetry
+  consistencyWarning, geofenceMarkers, onVote, onRetry
 }: DetailViewProps) {
-  const isInSnapshot = item.commissionerSnapshot.some((c) => c.userId === currentUserId);
+  const isInSnapshot = item.commissionerSnapshot.some((c) => c.isCurrentUser);
 
   return (
     <div className="divide-y divide-slate-100">
@@ -498,6 +481,11 @@ function DetailView({
       <section className="p-4 space-y-3">
         <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-400">Thông tin dự án</h3>
         <div className="grid gap-3 sm:grid-cols-2">
+          <InfoRow
+            label="Tên dự án"
+            value={item.projectDisplayName ?? item.projectId}
+            valueClass={item.projectName ? 'text-slate-900 font-medium' : 'text-slate-500 italic'}
+          />
           <InfoRow label="Project ID" value={item.projectId} mono />
           <InfoRow label="Tổ chức" value={item.organizationId} mono />
           {item.disbursementRequestId && (
@@ -521,8 +509,8 @@ function DetailView({
           {item.distanceMeters !== null && (
             <InfoRow
               label="Khoảng cách Haversine"
-              value={`${item.distanceMeters.toFixed(1)} m${item.distanceMeters > 500 ? ' — Vượt ngưỡng' : ''}`}
-              valueClass={item.distanceMeters > 500 ? 'text-red-600 font-semibold' : 'text-slate-700'}
+              value={`${item.distanceMeters.toFixed(1)} m${item.distanceMeters > GEOFENCE_DISTANCE_WARNING_METERS ? ' — Vượt ngưỡng' : ''}`}
+              valueClass={item.distanceMeters > GEOFENCE_DISTANCE_WARNING_METERS ? 'text-red-600 font-semibold' : 'text-slate-700'}
             />
           )}
         </div>
@@ -533,11 +521,13 @@ function DetailView({
 
         {/* Geofence map — hiển thị vùng + GPS ảnh để commissioner đánh giá trực quan */}
         {item.reason !== 'NO_GEOFENCE' && (
-          <GeofenceMapLazy
-            projectId={item.projectId}
-            markers={buildMarkersFromItem(item)}
-            className="mt-1"
-          />
+          <Suspense fallback={<div className="h-32 animate-pulse rounded bg-slate-100" />}>
+            <GeofenceMapLazy
+              projectId={item.projectId}
+              markers={geofenceMarkers}
+              className="mt-1"
+            />
+          </Suspense>
         )}
       </section>
 
@@ -561,11 +551,15 @@ function DetailView({
         {/* Step indicators */}
         <div className="flex flex-wrap gap-2">
           {item.commissionerSnapshot.map((commissioner, idx) => {
-            const castVote = item.votes.find((v) => v.commissionerId === commissioner.userId);
-            const isMe = commissioner.userId === currentUserId;
+            // [B4-fix #3] BE đã redact userId → chỉ biết isCurrentUser. Không thể tra vote
+            // của người khác khi PENDING (anti-collusion), nên hiển thị "Chưa vote" cho non-me.
+            const castVote = commissioner.isCurrentUser
+              ? item.votes.find((v) => v.commissionerId === currentUserId)
+              : undefined;
+            const isMe = commissioner.isCurrentUser;
             return (
               <div
-                key={commissioner.userId}
+                key={`${commissioner.role}-${idx}`}
                 title={`${mapRoleToLabel(commissioner.role)}${isMe ? ' (Bạn)' : ''}: ${
                   castVote ? (castVote.vote === 'APPROVE' ? 'Đồng ý' : 'Từ chối') : 'Chưa vote'
                 }`}
@@ -702,7 +696,7 @@ export default function OverrideVoteDrawer({
   onClose,
   initialRequestId,
   currentUserId,
-  currentUserRole: _currentUserRole, // reserved cho role-based display sau này
+  // currentUserRole: kept in props type for backward compat, intentionally omitted here.
   onToast,
   onItemsCountChange
 }: OverrideVoteDrawerProps) {
@@ -728,12 +722,20 @@ export default function OverrideVoteDrawer({
     }
   }, [isLoading]);
 
-  // Cập nhật số lượng badge cho AdminPageClient
+  // [B4-fix perf] Cập nhật số lượng badge cho AdminPageClient CHỈ khi drawer mở.
+  // Trước đây effect chạy liên tục cả khi drawer đóng → cascade re-render lên parent.
+  const lastReportedCountRef = useRef<number | null>(null);
   useEffect(() => {
-    if (items.length > 0 || !isLoading) {
-      onItemsCountChange?.(items.length);
+    if (!isOpen) {
+      // Reset cache khi drawer đóng để lần mở sau vẫn report lại
+      lastReportedCountRef.current = null;
+      return;
     }
-  }, [items.length, isLoading, onItemsCountChange]);
+    if (isLoading) return;
+    if (lastReportedCountRef.current === items.length) return;
+    lastReportedCountRef.current = items.length;
+    onItemsCountChange?.(items.length);
+  }, [items.length, isLoading, isOpen, onItemsCountChange]);
 
   // B2: Tính errorText từ TanStack Query error để truyền cho ListView
   const errorText = error
@@ -749,8 +751,8 @@ export default function OverrideVoteDrawer({
       // Lưu element đang được focus TRƯỚC KHI drawer mở
       preOpenFocusRef.current = document.activeElement as HTMLElement | null;
       document.body.style.overflow = 'hidden';
-      // Focus vào panel khi mở
-      document.querySelector<HTMLElement>('[role="dialog"]')?.focus();
+      // Focus vào panel khi mở (panel có tabIndex={-1} để focus được programmatically)
+      document.querySelector<HTMLElement>('[data-override-drawer-panel]')?.focus();
     } else {
       // Restore focus về element trước khi mở drawer
       if (preOpenFocusRef.current && typeof preOpenFocusRef.current.focus === 'function') {
@@ -791,13 +793,15 @@ export default function OverrideVoteDrawer({
       setSelectedItem(null);
       setVoteDialogVote(null);
       setHasLoadedOnce(false);
+      setConsistencyWarning(null);
     }
   }, [isOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-select initialRequestId sau khi load xong lần đầu (từ socket notification)
   useEffect(() => {
     if (!isOpen || !initialRequestId || !hasLoadedOnce || isLoading) return;
-    if (initialRequestId === '__poll__') return; // polling signal, không phải real request
+    // [B4-fix #4] Polling signal — không phải real request, bỏ qua
+    if (initialRequestId === OVERRIDE_POLLING_SIGNAL_ID) return;
     const target = items.find((i) => i.overrideRequestId === initialRequestId);
     if (target) {
       setSelectedItem(target);
@@ -895,24 +899,33 @@ export default function OverrideVoteDrawer({
     return { myVote, totalVoters, approveCount, voteCount, remainingVotes, isFullyApproved, isRejected, isResolved };
   }, [selectedItem, currentUserId]);
 
+  // [B4-fix perf] Memoize markers — tránh tạo array mới mỗi render gây re-render GeofenceMap
+  const geofenceMarkers = useMemo(
+    () => (selectedItem ? buildMarkersFromItem(selectedItem) : []),
+    [selectedItem]
+  );
+
   if (!isOpen) return null;
 
   return (
     <>
       {/* Backdrop */}
       <div
-        className="fixed inset-0 z-40 bg-slate-900/50 backdrop-blur-[1px]"
+        className="fixed inset-0 z-40 animate-[fadeIn_200ms_ease-out] bg-slate-900/50 backdrop-blur-[1px]"
         onClick={onClose}
         aria-hidden="true"
       />
 
-      {/* Panel — trượt từ phải, giống RequestDrawer */}
+      {/* Panel — trượt từ phải với animation, giống RequestDrawer */}
+      {/* [B4-fix animation] Thêm transition + transform slide-in từ translate-x-full */}
       {/* I3: Focus trap — Tab/Shift+Tab cycle trong drawer */}
       <div
         role="dialog"
         aria-modal="true"
         aria-label="Biểu quyết ghi đè GPS"
-        className="fixed right-0 top-0 z-50 flex h-full w-full max-w-[600px] flex-col bg-white shadow-2xl"
+        data-override-drawer-panel
+        tabIndex={-1}
+        className="fixed right-0 top-0 z-50 flex h-full w-full max-w-[600px] flex-col bg-white shadow-2xl transition-transform duration-300 ease-out translate-x-0"
         onKeyDown={(e) => {
           if (e.key !== 'Tab') return;
           const panel = e.currentTarget as HTMLElement;
@@ -1017,6 +1030,7 @@ export default function OverrideVoteDrawer({
               isRejected={voteState.isRejected}
               isResolved={voteState.isResolved}
               consistencyWarning={consistencyWarning}
+              geofenceMarkers={geofenceMarkers}
               onVote={(v) => setVoteDialogVote(v)}
               onRetry={loadItems}
             />

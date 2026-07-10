@@ -36,6 +36,9 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
   });
 
   // Auth middleware: chỉ user đã đăng nhập mới được kết nối
+  // [S1-NOTE] JWT token không có revocation check — Socket tiếp tục active cho đến disconnect.
+  // TODO: Implement Redis token blacklist check hoặc short-lived socket tokens để ngăn
+  // revoked commissioners tiếp tục nhận override:new events trong window reconnect (max 10s).
   io.use((socket, next) => {
     const token = socket.handshake.auth?.token as string | undefined;
     if (!token) return next(new Error('UNAUTHORIZED'));

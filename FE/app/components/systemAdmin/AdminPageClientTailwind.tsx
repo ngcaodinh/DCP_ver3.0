@@ -7,8 +7,9 @@
 //           và các NonDashboard panels với đầy đủ auth, toast, drawer/modal coordination
 // =============================================================================
 
-import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import { useState, useCallback, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
+import { useQueryClient } from '@tanstack/react-query';
 import Sidebar from './tailwind/Sidebar';
 import Topbar from './tailwind/Topbar';
 import MetricCard from './tailwind/MetricCard';
@@ -23,7 +24,7 @@ import { getNavigationItems } from './tailwind/data';
 import { readAuthSession, clearAuthSession } from '@/app/utils/authSession';
 import { fetchApi, buildApiUrl } from '@/app/utils/apiClient';
 import { getPageTitle } from './tailwind/helpers';
-import { useOverrideSocket } from '@/app/hooks/useOverrideSocket';
+import { useOverrideDrawerController } from '@/app/hooks/useOverrideDrawerController';
 import type { PageKey, ToastItem, UrgentRequestItem, DrawerTabKey } from './tailwind/types';
 import type { AuditLogItem } from './tailwind/types';
 
@@ -93,8 +94,6 @@ export default function AdminPageClientTailwind() {
   const [isOverrideDrawerOpen, setIsOverrideDrawerOpen] = useState(false);
   const [overrideDrawerInitialId, setOverrideDrawerInitialId] = useState<string | null>(null);
   const [pendingOverridesCount, setPendingOverridesCount] = useState(0);
-  // I4: Track processed overrideRequestId để tránh duplicate toast/drawer open từ socket reconnect
-  const processedOverrideIdsRef = useRef<Set<string>>(new Set());
 
   // Dashboard real API state
   const [dashboardMetrics, setDashboardMetrics] = useState<MetricCardData[]>([]);
@@ -116,6 +115,7 @@ export default function AdminPageClientTailwind() {
   const [currentUserRole, setCurrentUserRole] = useState('');
 
   const router = useRouter();
+  const queryClient = useQueryClient();
 
   // =============================================================================
   // AUTH VERIFICATION + USER INFO + DASHBOARD DATA
@@ -321,47 +321,34 @@ export default function AdminPageClientTailwind() {
   // OVERRIDE SOCKET (B4) — lắng nghe override:new, gọi sau khi addToast đã được định nghĩa
   // =============================================================================
 
-  // I6: Hàm sync số lượng pending overrides từ API để đồng bộ badge
-  const syncPendingOverridesCount = useCallback(async () => {
-    const session = readAuthSession();
-    if (!session?.accessToken) return;
-    try {
-      const res = await fetchApi<{ total: number }>(
-        buildApiUrl('/api/oracle/pending-overrides?limit=0&skip=0'),
-        { headers: { Authorization: `Bearer ${session.accessToken}` } }
-      );
-      setPendingOverridesCount(res.data.total ?? 0);
-    } catch {
-      // Silently fail — badge sẽ được sync đúng khi drawer mở
-    }
+  /** Hàm sync số lượng pending overrides bằng cách invalidate cache TanStack Query
+   *  để `useOverrideRequests` ở drawer tự refetch và cập nhật badge qua `onItemsCountChange`. */
+  const syncPendingOverridesCount = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ['overrideRequests'] });
+  }, [queryClient]);
+
+  /** Mở drawer và đặt ID mặc định khi nhận sự kiện override:new từ socket. */
+  const handleOpenOverrideDrawer = useCallback((overrideRequestId: string) => {
+    setOverrideDrawerInitialId(overrideRequestId);
+    setIsOverrideDrawerOpen(true);
   }, []);
 
-  useOverrideSocket({
-    onEvent: useCallback((event) => {
-      if (event.type === 'override:new') {
-        // '__poll__' là polling signal từ fallback interval — không mở drawer
-        if (event.overrideRequestId === '__poll__') return;
-        // I4: Skip nếu đã xử lý request này rồi (tránh duplicate từ socket reconnect)
-        if (processedOverrideIdsRef.current.has(event.overrideRequestId)) return;
-        processedOverrideIdsRef.current.add(event.overrideRequestId);
-        // Tránh Set phình to vô hạn — giới hạn 100 items
-        if (processedOverrideIdsRef.current.size > 100) {
-          processedOverrideIdsRef.current = new Set(
-            Array.from(processedOverrideIdsRef.current).slice(-50)
-          );
-        }
-        setOverrideDrawerInitialId(event.overrideRequestId);
-        setIsOverrideDrawerOpen(true);
-        addToast({
-          titleText: 'Yêu cầu ghi đè GPS mới',
-          bodyText: `Dự án ${event.projectId} cần biểu quyết.`,
-          tone: 'info'
-        });
-      } else if (event.type === 'override:resolved') {
-        // I6: Sync count từ API thay vì optimistic decrement để tránh race condition
-        syncPendingOverridesCount();
-      }
-    }, [addToast, syncPendingOverridesCount])
+  /** Forward toast từ controller vào hệ thống toast của trang. */
+  const handleOverrideDrawerToast = useCallback((toast: { titleText: string; bodyText: string; tone: 'info' | 'success' | 'warning' | 'error' }) => {
+    addToast({
+      titleText: toast.titleText,
+      bodyText: toast.bodyText,
+      tone: toast.tone
+    });
+  }, [addToast]);
+
+  // Hook expose { isSocketConnected, isUsingFallback } — hiện không dùng ở trang này,
+  // nhưng vẫn gọi để đăng ký listener và side effects.
+  useOverrideDrawerController({
+    isDrawerOpen: isOverrideDrawerOpen,
+    onOpenDrawer: handleOpenOverrideDrawer,
+    onToast: handleOverrideDrawerToast,
+    onSyncCount: syncPendingOverridesCount
   });
 
   // =============================================================================
@@ -497,8 +484,8 @@ export default function AdminPageClientTailwind() {
           <svg className="text-red-400" width="48" height="48" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
           </svg>
-          <p className="text-base font-semibold text-red-700">Không có quy?n truy c?p</p>
-          <p className="text-sm text-slate-500">Bạn cần Đãng nhập với tài khoản Admin d? truy c?p trang này.</p>
+          <p className="text-base font-semibold text-red-700">Không có quyền truy cập</p>
+          <p className="text-sm text-slate-500">Bạn cần đăng nhập với tài khoản Admin để truy cập trang này.</p>
         </div>
       </div>
     );
