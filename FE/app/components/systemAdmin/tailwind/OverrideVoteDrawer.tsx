@@ -7,11 +7,10 @@
 // để tránh prop-drilling qua nhiều file.
 // =============================================================================
 
-import { useState, useEffect, useCallback, useRef, useMemo, Suspense } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { formatVietnameseDateTime } from './helpers';
 import type { ToastItem } from './types';
-import { GeofenceMapLazy } from '@/app/components/oracle/GeofenceMapLazy';
-import type { GeofenceMarker } from '@/app/components/oracle/GeofenceMap';
+import { GpsMarkerOnlyMap } from '@/app/components/oracle/GpsMarkerOnlyMap';
 import { useOverrideRequests, useSubmitOverrideVote } from '@/app/hooks/useOverrideRequests';
 import {
   MIN_VOTE_REASON_LENGTH,
@@ -68,18 +67,6 @@ function mapRoleToLabel(role: string): string {
   return role;
 }
 
-/** Chuyển override request thành danh sách markers cho GeofenceMap. */
-function buildMarkersFromItem(item: PendingOverrideItem): GeofenceMarker[] {
-  if (!item.gpsFromImage) return [];
-  const status = item.reason === 'OUT_OF_GEOFENCE' ? 'INVALID' : 'NO_GPS';
-  return [{
-    lat: item.gpsFromImage.lat,
-    lng: item.gpsFromImage.lng,
-    status,
-    label: item.evidenceCid ? `CID: ${item.evidenceCid.slice(0, 20)}…` : undefined
-    // [S3-fix] Xóa TODO comments expose IPFS gateway URL pattern
-  }];
-}
 
 /**
  * Kiểm tra tính nhất quán nội bộ của payload override request từ BE.
@@ -398,7 +385,6 @@ type DetailViewProps = {
   isRejected: boolean;
   isResolved: boolean;
   consistencyWarning: string | null;
-  geofenceMarkers: GeofenceMarker[];
   onVote: (vote: 'APPROVE' | 'REJECT') => void;
   onRetry: () => void;
 };
@@ -406,7 +392,7 @@ type DetailViewProps = {
 function DetailView({
   item, currentUserId, myVote, approveCount, voteCount,
   totalVoters, remainingVotes, isFullyApproved, isRejected, isResolved,
-  consistencyWarning, geofenceMarkers, onVote, onRetry
+  consistencyWarning, onVote, onRetry
 }: DetailViewProps) {
   const isInSnapshot = item.commissionerSnapshot.some((c) => c.isCurrentUser);
 
@@ -519,15 +505,15 @@ function DetailView({
           <p className="text-xs font-medium text-orange-700">Lý do cảnh báo: {mapReasonToText(item.reason)}</p>
         </div>
 
-        {/* Geofence map — hiển thị vùng + GPS ảnh để commissioner đánh giá trực quan */}
+        {/* GPS marker map — hiển thị 2 điểm GPS để commissioner đánh giá trực quan.
+            Dùng GpsMarkerOnlyMap (không fetch API) thay GeofenceMapLazy để tránh
+            20 concurrent API calls khi drawer liệt kê 20 items (spec B4, không cần polygon). */}
         {item.reason !== 'NO_GEOFENCE' && (
-          <Suspense fallback={<div className="h-32 animate-pulse rounded bg-slate-100" />}>
-            <GeofenceMapLazy
-              projectId={item.projectId}
-              markers={geofenceMarkers}
-              className="mt-1"
-            />
-          </Suspense>
+          <GpsMarkerOnlyMap
+            gpsFromImage={item.gpsFromImage}
+            gpsFromProject={item.gpsFromProject}
+            className="mt-1"
+          />
         )}
       </section>
 
@@ -710,7 +696,8 @@ export default function OverrideVoteDrawer({
   const [consistencyWarning, setConsistencyWarning] = useState<string | null>(null);
 
   // I1: Thay thế manual useState/useCallback bằng TanStack Query hooks
-  const { data: items = [], isLoading, error, refetch } = useOverrideRequests();
+  // [A3-fix] Truyền isOpen để tắt refetchInterval khi drawer đóng — tránh waste network
+  const { data: items = [], isLoading, error, refetch } = useOverrideRequests(isOpen);
   const submitVoteMutation = useSubmitOverrideVote();
 
   // Sync hasLoadedOnce khi loading hoàn tất (không có error)
@@ -899,12 +886,6 @@ export default function OverrideVoteDrawer({
     return { myVote, totalVoters, approveCount, voteCount, remainingVotes, isFullyApproved, isRejected, isResolved };
   }, [selectedItem, currentUserId]);
 
-  // [B4-fix perf] Memoize markers — tránh tạo array mới mỗi render gây re-render GeofenceMap
-  const geofenceMarkers = useMemo(
-    () => (selectedItem ? buildMarkersFromItem(selectedItem) : []),
-    [selectedItem]
-  );
-
   if (!isOpen) return null;
 
   return (
@@ -1030,7 +1011,6 @@ export default function OverrideVoteDrawer({
               isRejected={voteState.isRejected}
               isResolved={voteState.isResolved}
               consistencyWarning={consistencyWarning}
-              geofenceMarkers={geofenceMarkers}
               onVote={(v) => setVoteDialogVote(v)}
               onRetry={loadItems}
             />

@@ -23,6 +23,12 @@ export type AuthUser = {
   fcmDeviceToken: string | null;
   /** So dien thoai cua nguoi dung (dung cho SMS notification). */
   phoneNumber: string | null;
+  /**
+   * Auth version - tăng lên mỗi khi role thay đổi hoặc quyền bị thu hồi.
+   * Dùng để invalidate JWT cũ và disconnect socket khi quyền thay đổi.
+   * [S-NEW2 fix]
+   */
+  authVersion: number;
   updatedAt?: Date;
 };
 
@@ -71,7 +77,8 @@ const authUserSchema = new Schema<AuthUser>({
   lastLoginUserAgent: { type: String, default: null },
   correlationId: { type: String, required: true },
   fcmDeviceToken: { type: String, default: null },
-  phoneNumber: { type: String, default: null }
+  phoneNumber: { type: String, default: null },
+  authVersion: { type: Number, required: true, default: 1 }
 });
 
 // Ghi chú logic phức tạp: dùng partial unique index để chỉ bắt buộc duy nhất khi legalRegistrationNumber là chuỗi hợp lệ,
@@ -168,6 +175,25 @@ export async function updateUser(user: AuthUser): Promise<AuthUser> {
     { returnDocument: 'after' }
   ).exec();
   return (updatedUser?.toObject() as AuthUser) || user;
+}
+
+/**
+ * Tăng authVersion của user và invalidate tất cả socket connections.
+ * Dùng khi role thay đổi hoặc quyền bị thu hồi.
+ * [S-NEW2 fix]
+ */
+export async function incrementAuthVersion(userId: string): Promise<number> {
+  const updated = await AuthUserModel.findOneAndUpdate(
+    { id: userId },
+    { $inc: { authVersion: 1 } },
+    { returnDocument: 'after' }
+  ).lean<AuthUser>().exec();
+  
+  if (!updated) {
+    throw new Error(`User ${userId} not found for authVersion increment`);
+  }
+  
+  return updated.authVersion;
 }
 
 /**

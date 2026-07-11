@@ -163,7 +163,7 @@ export async function ensureSmartAccountProvisioned(existingUser: AuthUser): Pro
  * Hàm tạo JWT access token.
  * Mục đích: cấp token ngắn hạn cho xác thực API.
  */
-function createAccessToken(payload: Record<string, string>): string {
+function createAccessToken(payload: Record<string, string | number>): string {
   const signOptions: SignOptions = {
     issuer: jsonWebTokenConfig.issuer,
     audience: jsonWebTokenConfig.audience,
@@ -219,13 +219,15 @@ function buildGoogleUserProfile(googlePayload: TokenPayload): GoogleUserProfile 
 /**
  * Hàm tạo access token và refresh token.
  * Mục đích: trả về cặp token cùng metadata phiên.
+ * [S-NEW2 fix] Thêm authVersion vào JWT payload
  */
 async function generateTokenPair(user: AuthUser, ipAddress: string, userAgent: string) {
   const accessTokenPayload = {
     userId: user.id,
     email: user.email,
     walletAddress: user.walletAddress,
-    role: user.role
+    role: user.role,
+    authVersion: user.authVersion ?? 1 // Embed authVersion vào JWT
   };
 
   const accessToken = createAccessToken(accessTokenPayload);
@@ -505,7 +507,8 @@ export async function refreshAccessToken(
     userId: userData.id,
     email: userData.email,
     walletAddress: userData.walletAddress,
-    role: userData.role
+    role: userData.role,
+    authVersion: userData.authVersion ?? 1 // [S-NEW2 fix] Thêm authVersion vào refreshed token
   });
 
   const rotatedRefreshToken = createRefreshToken();

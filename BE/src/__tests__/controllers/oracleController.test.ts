@@ -383,6 +383,63 @@ describe('handleVoteOverrideRequest — Zod validation (B1)', () => {
     );
     expect(submitOverrideVote).not.toHaveBeenCalled();
   });
+
+  // ─── T2: Regulatory role path ──────────────────────────────────────────────
+
+  it('[T2-regulatory] 200 vote thành công với role regulatory', async () => {
+    // Clone test T5 200 vote thành công, đổi role sang regulatory
+    vi.mocked(findCommissionerInSnapshot).mockResolvedValue({
+      userId: 'regulatory-1',
+      role: 'regulatory'
+    });
+    vi.mocked(submitOverrideVote).mockResolvedValue({
+      outcome: 'VOTE_RECORDED',
+      pendingVoters: 2,
+      totalVoters: 3
+    } as never);
+    const req = buildVoteRequest({
+      authenticatedUser: { userId: 'regulatory-1', role: 'regulatory' },
+      body: { vote: 'APPROVE', reason: 'Cơ quan giám sát xác nhận tọa độ hợp lệ' }
+    });
+    const res = buildMockResponse();
+
+    await handleVoteOverrideRequest(req, res);
+
+    expect(sendSuccessResponse).toHaveBeenCalledWith(
+      res, 200, expect.any(String),
+      expect.objectContaining({ outcome: 'VOTE_RECORDED' })
+    );
+    // submitOverrideVote phải được gọi với đúng role regulatory
+    expect(submitOverrideVote).toHaveBeenCalledWith(
+      'req-001',
+      'regulatory-1',
+      'regulatory',
+      'APPROVE',
+      'Cơ quan giám sát xác nhận tọa độ hợp lệ'
+    );
+  });
+
+  it('[T2-regulatory] 403 ROLE_MISMATCH khi snapshot là admin nhưng caller có role regulatory', async () => {
+    // snapshotEntry.role === 'admin' nhưng caller JWT có role: 'regulatory'
+    vi.mocked(findCommissionerInSnapshot).mockResolvedValue({
+      userId: 'admin-1',
+      role: 'admin'   // snapshot ghi nhận là admin
+    });
+    // JWT hiện tại nói regulatory — không khớp snapshot
+    const req = buildVoteRequest({
+      authenticatedUser: { userId: 'admin-1', role: 'regulatory' },
+      body: { vote: 'APPROVE', reason: 'Lý do đủ dài để pass Zod validation' }
+    });
+    const res = buildMockResponse();
+
+    await handleVoteOverrideRequest(req, res);
+
+    expect(sendErrorResponse).toHaveBeenCalledWith(
+      res, 403, expect.any(String), 'ROLE_MISMATCH'
+    );
+    // submitOverrideVote KHÔNG được gọi — chặn sớm trước khi ghi vote
+    expect(submitOverrideVote).not.toHaveBeenCalled();
+  });
 });
 
 // ─── Tests: handleGetOverrideRequestById — data exposure (B4-fix #3) ─────────

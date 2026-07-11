@@ -6,7 +6,8 @@ import {
   resolveOverrideRequest,
   expireOverrideRequest,
   type CommissionerVote,
-  type OracleOverrideRequestRecord
+  type OracleOverrideRequestRecord,
+  type AddVoteResult
 } from '../models/oracleOverrideRequestModel';
 import { findActiveCommissioners, type AuthUser } from '../models/authModel';
 import {
@@ -54,10 +55,9 @@ export class VoteRejectedError extends Error {
  * Flow:
  * 1. Load request, kiểm tra tồn tại và trạng thái PENDING
  * 2. Kiểm tra commissionerId có trong snapshot (403 nếu không)
- * 3. Kiểm tra đã vote chưa (409 nếu rồi)
- * 4. Phát hiện thay đổi commissioner set — expire nếu khác snapshot
- * 5. Thêm vote vào DB (atomic $push)
- * 6. Kiểm tra điều kiện kết thúc:
+ * 3. Phát hiện thay đổi commissioner set — expire nếu khác snapshot
+ * 4. Thêm vote vào DB với atomic check ngăn duplicate vote (chặn race condition ở tầng DB)
+ * 5. Kiểm tra điều kiện kết thúc:
  *    - Bất kỳ REJECT → resolve REJECTED, notify org
  *    - Tất cả APPROVE → resolve APPROVED, auto-approve disbursement nếu có, emit override.executed
  *
@@ -94,15 +94,7 @@ export async function submitOverrideVote(
     throw new VoteRejectedError('NOT_IN_SNAPSHOT');
   }
 
-  // Bước 3: Chống vote lại
-  const hasAlreadyVoted = overrideRequest.votes.some(
-    v => v.commissionerId === commissionerId
-  );
-  if (hasAlreadyVoted) {
-    throw new VoteRejectedError('ALREADY_VOTED');
-  }
-
-  // Bước 4: Phát hiện thay đổi commissioner set
+  // Bước 3: Phát hiện thay đổi commissioner set (bỏ check ALREADY_VOTED ở đây vì sẽ check atomic ở bước 5)
   // Nếu tuple [userId, role] của admin/regulatory hiện tại khác snapshot → expire để tạo lại
   const isCommissionerSetChanged = await detectCommissionerSetChange(overrideRequest);
   if (isCommissionerSetChanged) {
@@ -145,7 +137,7 @@ export async function submitOverrideVote(
     return { outcome: 'EXPIRED_COMMISSIONER_SET_CHANGED' };
   }
 
-  // Bước 5: Thêm vote
+  // Bước 4: Thêm vote với atomic check ngăn duplicate vote từ cùng một commissioner
   const newVote: CommissionerVote = {
     commissionerId,
     commissionerRole,
@@ -153,10 +145,25 @@ export async function submitOverrideVote(
     reason,
     votedAt: new Date()
   };
-  const updatedRequest = await addVoteToOverrideRequest(overrideRequestId, newVote);
-  if (!updatedRequest) {
-    // Race condition: request không còn PENDING khi chúng ta vào bước 5 (concurrent vote REJECT vừa resolve)
+  const addResult = await addVoteToOverrideRequest(overrideRequestId, newVote);
+  
+  // Xử lý kết quả atomic operation
+  if (addResult === 'ALREADY_VOTED') {
+    throw new VoteRejectedError('ALREADY_VOTED');
+  }
+  if (addResult === 'NOT_PENDING') {
+    // Race condition: request không còn PENDING khi chúng ta vào bước 4 (concurrent vote REJECT vừa resolve)
     throw new VoteRejectedError('REQUEST_NOT_PENDING');
+  }
+
+  // addResult === 'OK' — vote đã được ghi thành công, cần load lại request để evaluate
+  const updatedRequest = await findOverrideRequestById(overrideRequestId);
+  if (!updatedRequest) {
+    // Replica lag hoặc bị xóa ngay sau khi ghi vote — edge case cực hiếm
+    logger.error('Không fetch được override request ngay sau khi ghi vote.', {
+      overrideRequestId
+    });
+    throw new VoteRejectedError('REQUEST_NOT_FOUND');
   }
 
   logger.info('Commissioner đã vote.', {
@@ -165,7 +172,7 @@ export async function submitOverrideVote(
     voteOutcome: vote
   });
 
-  // Bước 6: Kiểm tra điều kiện kết thúc
+  // Bước 5: Kiểm tra điều kiện kết thúc
   return await evaluateVoteOutcome(updatedRequest);
 }
 

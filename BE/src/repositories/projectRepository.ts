@@ -7,6 +7,7 @@ import {
   findProjectsByStatus,
   findPublicSupportProjectByProjectId,
   findPublicSupportProjects,
+  findAllProjectsByProjectIdList,
   ProjectEvidenceFileRecord,
   ProjectRecord,
   ProjectStatus,
@@ -39,6 +40,11 @@ export async function findProjectByOrganizationAndName(organizationId: string, n
 /** Hàm repository tìm dự án theo projectId. Mục đích: hỗ trợ submit/review vòng đời dự án. */
 export async function findProjectById(projectId: string): Promise<ProjectRecord | null> {
   return findProjectByProjectId(projectId);
+}
+
+/** Hàm repository tìm nhiều dự án theo danh sách projectId (batch query với $in). Mục đích: giảm N+1 queries. */
+export async function findProjectsByIdList(projectIdList: string[]): Promise<ProjectRecord[]> {
+  return findAllProjectsByProjectIdList(projectIdList);
 }
 
 /** Hàm repository đếm số dự án ACTIVE theo tổ chức. Mục đích: enforce giới hạn 5 dự án ACTIVE. */

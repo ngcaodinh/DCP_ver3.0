@@ -73,15 +73,19 @@ async function submitOverrideVoteRequest({
 /**
  * Query hook lấy danh sách override request PENDING.
  * Tự động retry 1 lần khi gọi thất bại (không phải lỗi 401/403).
- * [P5-fix] Thêm refetchInterval khi drawer open để tránh stale data trong voting scenario.
+ *
+ * @param enabled Khi false, tắt query + refetchInterval để tránh waste network khi drawer đóng.
+ *   Mặc định true để giữ tương thích ngược với callers hiện có.
+ * [A3-fix] refetchInterval chỉ active khi enabled=true (drawer đang mở).
  */
-export function useOverrideRequests() {
+export function useOverrideRequests(enabled = true) {
   return useQuery<OverrideRequestItem[], ApiErrorResponse>({
     queryKey: ['overrideRequests'],
     queryFn: fetchOverrideRequests,
     staleTime: 30_000,
-    // [P5-fix] Refetch mỗi 10s khi có subscriber active (drawer open)
-    refetchInterval: 10_000,
+    // Refetch mỗi 10s nhưng chỉ khi drawer đang mở (enabled=true) — tránh polling ngầm liên tục
+    refetchInterval: enabled ? 10_000 : false,
+    enabled,
     retry: (failureCount, error) => {
       // Không retry 401/403 — user phải đăng nhập lại
       if (error?.statusCode === 401 || error?.statusCode === 403) return false;

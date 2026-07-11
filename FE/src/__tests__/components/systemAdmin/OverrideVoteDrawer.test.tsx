@@ -27,9 +27,9 @@ vi.mock('@/app/utils/authSession', () => ({
   readAuthSession: vi.fn(),
 }));
 
-// GeofenceMapLazy dùng next/dynamic — trong Vitest/jsdom không lazy-load.
-vi.mock('@/app/components/oracle/GeofenceMapLazy', () => ({
-  GeofenceMapLazy: () => <div data-testid="geofence-map-mock" />,
+// GpsMarkerOnlyMap dùng next/dynamic (Leaflet DOM-only) — trong Vitest/jsdom không lazy-load thật.
+vi.mock('@/app/components/oracle/GpsMarkerOnlyMap', () => ({
+  GpsMarkerOnlyMap: () => <div data-testid="gps-marker-map-mock" />,
 }));
 
 // Mock TanStack Query hooks để có thể control data/error/loading per test

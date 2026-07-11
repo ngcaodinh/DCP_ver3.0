@@ -282,10 +282,10 @@ export default function GeofenceEditor({
             scrollWheelZoom
             className="h-full w-full"
           >
-            <TileLayer
-              attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-              url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-            />
+        <TileLayer
+          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+          url={`${process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:5000'}/api/tiles/{z}/{x}/{y}.png`}
+        />
 
             <MapClickHandler isDrawing={isDrawing} onAddPoint={handleAddPoint} />
 

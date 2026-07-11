@@ -7,10 +7,65 @@ import { webhookEvents } from '../events/webhookEvents';
 import { oracleEvents } from '../events/oracleEvents';
 import type { OverrideRequestedEventPayload, OverrideExecutedEventPayload } from '../events/oracleEvents';
 import { findDisbursementsInManualReview } from '../models/disbursementModel';
+import { findUserById } from '../models/authModel';
+import { getRedisClientIfReady } from './redis';
 
 const logger = getLogger();
 
-type JwtClaims = { userId: string; role: string };
+type JwtClaims = { userId: string; role: string; authVersion?: number };
+
+const AUTH_VERSION_CACHE_KEY_PREFIX = 'auth_version:';
+const AUTH_VERSION_CACHE_TTL_S = 10; // TTL ngắn để phát hiện revoke nhanh
+
+/**
+ * Lấy authVersion hiện tại của user từ Redis cache hoặc DB.
+ * Trả về null nếu user không tồn tại.
+ * [S-NEW2 fix]
+ */
+async function getCachedAuthVersion(userId: string): Promise<number | null> {
+  const redis = getRedisClientIfReady();
+  const cacheKey = `${AUTH_VERSION_CACHE_KEY_PREFIX}${userId}`;
+  
+  if (redis) {
+    try {
+      const cached = await redis.get(cacheKey);
+      if (cached) return parseInt(cached, 10);
+      
+      // Cache miss → query DB
+      const user = await findUserById(userId);
+      if (!user) return null;
+      
+      const authVersion = user.authVersion ?? 1;
+      await redis.setEx(cacheKey, AUTH_VERSION_CACHE_TTL_S, String(authVersion));
+      return authVersion;
+    } catch {
+      // Redis lỗi → fallback DB
+    }
+  }
+  
+  // Không có Redis hoặc Redis lỗi → query DB trực tiếp
+  const user = await findUserById(userId);
+  return user ? (user.authVersion ?? 1) : null;
+}
+
+/**
+ * Ngắt tất cả socket connections của một user cụ thể.
+ * Gọi khi role thay đổi hoặc quyền bị thu hồi.
+ * [S-NEW2 fix]
+ */
+export function disconnectUserSockets(userId: string): void {
+  if (!io) return;
+  
+  const userRoom = `user:${userId}`;
+  const sockets = io.in(userRoom).fetchSockets();
+  
+  void sockets.then(socketList => {
+    for (const socket of socketList) {
+      socket.disconnect(true); // true = close transport connection ngay lập tức
+    }
+    logger.info('Đã ngắt socket connections của user.', { userId, count: socketList.length });
+  });
+}
 
 let io: SocketIOServer | null = null;
 // Theo dõi các requestId đã biết để phát hiện item mới
@@ -35,13 +90,12 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
     path: '/socket.io'
   });
 
-  // Auth middleware: chỉ user đã đăng nhập mới được kết nối
-  // [S1-NOTE] JWT token không có revocation check — Socket tiếp tục active cho đến disconnect.
-  // TODO: Implement Redis token blacklist check hoặc short-lived socket tokens để ngăn
-  // revoked commissioners tiếp tục nhận override:new events trong window reconnect (max 10s).
-  io.use((socket, next) => {
+  // Auth middleware: validate JWT và check authVersion từ DB/Redis cache
+  // [S-NEW2 fix] So sánh authVersion trong JWT với giá trị hiện tại trong DB để phát hiện token đã bị revoke
+  io.use(async (socket, next) => {
     const token = socket.handshake.auth?.token as string | undefined;
     if (!token) return next(new Error('UNAUTHORIZED'));
+    
     try {
       const cfg = getJsonWebTokenConfig();
       const secret = getJsonWebTokenSecret();
@@ -49,10 +103,33 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
         issuer: cfg.issuer,
         audience: cfg.audience
       }) as JwtClaims;
-      socket.data.userId = payload.userId;
+      
+      const userId = payload.userId;
+      const tokenAuthVersion = payload.authVersion ?? 1; // JWT cũ không có authVersion → mặc định 1
+      
+      // Lấy authVersion hiện tại từ Redis cache (TTL 10s) hoặc DB
+      const currentAuthVersion = await getCachedAuthVersion(userId);
+      
+      if (currentAuthVersion === null) {
+        // User không tồn tại trong DB → từ chối
+        return next(new Error('UNAUTHORIZED'));
+      }
+      
+      if (tokenAuthVersion < currentAuthVersion) {
+        // Token đã bị revoke (authVersion trong DB đã tăng lên) → từ chối
+        logger.warn('Socket connection từ chối: JWT authVersion lỗi thời.', {
+          userId,
+          tokenAuthVersion,
+          currentAuthVersion
+        });
+        return next(new Error('UNAUTHORIZED'));
+      }
+      
+      socket.data.userId = userId;
       socket.data.role = payload.role;
       next();
-    } catch {
+    } catch (err) {
+      logger.warn('Socket JWT verification thất bại.', { errorMessage: String(err) });
       next(new Error('UNAUTHORIZED'));
     }
   });

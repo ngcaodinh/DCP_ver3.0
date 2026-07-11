@@ -25,7 +25,7 @@ import {
   findOverrideRequestById,
   findCommissionerInSnapshot
 } from '../models/oracleOverrideRequestModel';
-import { findProjectById } from '../repositories/projectRepository';
+import { findProjectById, findProjectsByIdList } from '../repositories/projectRepository';
 
 const logger = getLogger();
 
@@ -398,7 +398,7 @@ export async function handleVoteOverrideRequest(
     // tại thời điểm tạo request. Ngăn chặn tình huống admin bị demote sang 'donor' nhưng vote
     // bằng JWT hiện tại → vẫn được ghi nhận vote với role lúc tạo request.
     // [S5-fix] Wrap trong try-catch riêng để trả 503 thay vì 500 khi DB timeout/drop
-    let snapshotEntry: { userId: string; role: string } | null = null;
+    let snapshotEntry: { userId: string; role: 'admin' | 'regulatory' } | null = null;
     try {
       snapshotEntry = await findCommissionerInSnapshot(overrideRequestId, userId);
     } catch (dbError) {
@@ -602,21 +602,18 @@ export async function handleGetPendingOverrides(
 
     const { userId } = request.authenticatedUser;
 
-    // [P1-fix] Batch lookup projectName thay vì N+1 queries — collect unique projectIds trước
+    // [P1-fix] Batch lookup projectName sử dụng $in query thay vì N concurrent queries
+    // Trước đây: Promise.all(uniqueIds.map(id => findProjectById(id))) tạo N queries riêng lẻ
+    // Bây giờ: findProjectsByIdList dùng $in để fetch tất cả trong 1 query
     const uniqueProjectIds = [...new Set(items.map(item => item.projectId))];
-    const projectRecordsMap = new Map<string, { name: string } | null>();
-    
-    // Batch fetch tất cả projects trong một query thay vì 20 concurrent queries
-    await Promise.all(
-      uniqueProjectIds.map(async (projectId) => {
-        const projectRecord = await findProjectById(projectId).catch(() => null);
-        projectRecordsMap.set(projectId, projectRecord);
-      })
+    const projectRecords = await findProjectsByIdList(uniqueProjectIds);
+    const projectRecordsMap = new Map(
+      projectRecords.map(p => [p.id, p])
     );
 
     // [B4-fix #6] Enrich từng item với projectName từ map. Fallback về projectId khi project bị xóa.
     const sanitizedItems = items.map((item) => {
-      const projectRecord = projectRecordsMap.get(item.projectId);
+      const projectRecord = projectRecordsMap.get(item.projectId) ?? null;
       const enrichedProjectName = projectRecord?.name ?? null;
       return {
         ...item,

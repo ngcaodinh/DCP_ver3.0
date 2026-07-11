@@ -17,9 +17,10 @@ vi.mock('../../models/authModel', () => ({
   findActiveCommissioners: vi.fn()
 }));
 
-// Redis không cần trong test — mock để getCachedActiveCommissioners fallback về findActiveCommissioners
+// Redis không cần trong test — mock vi.fn() trả null mặc định (fallback về findActiveCommissioners).
+// Một số test Redis path sẽ override mockReturnValue trong describe block riêng.
 vi.mock('../../config/redis', () => ({
-  getRedisClientIfReady: () => null
+  getRedisClientIfReady: vi.fn(() => null)
 }));
 
 vi.mock('../../models/disbursementModel', () => ({
@@ -42,6 +43,7 @@ import {
   expireOverrideRequest
 } from '../../models/oracleOverrideRequestModel';
 import { findActiveCommissioners } from '../../models/authModel';
+import { getRedisClientIfReady } from '../../config/redis';
 import {
   findDisbursementByRequestId,
   updateDisbursementByRequestIdWithCondition
@@ -405,5 +407,110 @@ describe('submitOverrideVote', () => {
     expect(recordedCount).toBe(2);
     // Chỉ emit event 1 lần — winner emit, loser không emit vì resolved=null
     expect(vi.mocked(oracleEvents.emit)).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─── Tests: getCachedActiveCommissioners — Redis paths ───────────────────────
+// Hàm private, test gián tiếp qua submitOverrideVote (được gọi ngầm qua
+// detectCommissionerSetChange → getCachedActiveCommissioners).
+
+describe('getCachedActiveCommissioners — Redis cache paths (T3)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('[T3a] Cache HIT → trả cached data, KHÔNG gọi findActiveCommissioners', async () => {
+    // Giả lập Redis có dữ liệu cache
+    const cachedCommissioners = [
+      { id: 'admin-1', role: 'admin' },
+      { id: 'regulatory-1', role: 'regulatory' },
+      { id: 'admin-2', role: 'admin' }
+    ];
+    const mockRedis = {
+      get: vi.fn().mockResolvedValue(JSON.stringify(cachedCommissioners)),
+      setEx: vi.fn()
+    };
+    vi.mocked(getRedisClientIfReady).mockReturnValue(mockRedis as never);
+
+    // Setup request PENDING — commissioner set khớp cache → không EXPIRED
+    vi.mocked(findOverrideRequestById).mockResolvedValue(buildPendingRequest() as never);
+    const requestAfterVote = buildPendingRequest({
+      votes: [
+        { commissionerId: 'admin-1', commissionerRole: 'admin', vote: 'APPROVE', reason: 'ok', votedAt: new Date() }
+      ]
+    });
+    vi.mocked(addVoteToOverrideRequest).mockResolvedValue(requestAfterVote as never);
+
+    const result = await submitOverrideVote('req-001', 'admin-1', 'admin', 'APPROVE', 'ok');
+
+    // Cache HIT → findActiveCommissioners KHÔNG được gọi (dùng cached data)
+    expect(findActiveCommissioners).not.toHaveBeenCalled();
+    expect(mockRedis.get).toHaveBeenCalled();
+    // Vote thành công vì commissioner set không thay đổi
+    expect(result.outcome).toBe('VOTE_RECORDED');
+  });
+
+  it('[T3b] redis.setEx throw → vẫn trả fresh data từ DB, không throw lên caller', async () => {
+    // Cache MISS → setEx thất bại khi ghi cache
+    const mockRedis = {
+      get: vi.fn().mockResolvedValue(null),                // cache miss
+      setEx: vi.fn().mockRejectedValue(new Error('Redis write timeout'))
+    };
+    vi.mocked(getRedisClientIfReady).mockReturnValue(mockRedis as never);
+
+    // findActiveCommissioners vẫn trả data (DB fallback)
+    vi.mocked(findActiveCommissioners).mockResolvedValue([
+      { id: 'admin-1', role: 'admin' } as never,
+      { id: 'regulatory-1', role: 'regulatory' } as never,
+      { id: 'admin-2', role: 'admin' } as never
+    ]);
+
+    vi.mocked(findOverrideRequestById).mockResolvedValue(buildPendingRequest() as never);
+    const requestAfterVote = buildPendingRequest({
+      votes: [
+        { commissionerId: 'admin-1', commissionerRole: 'admin', vote: 'APPROVE', reason: 'ok', votedAt: new Date() }
+      ]
+    });
+    vi.mocked(addVoteToOverrideRequest).mockResolvedValue(requestAfterVote as never);
+
+    // setEx lỗi KHÔNG được bubble lên — vote flow vẫn thành công
+    await expect(
+      submitOverrideVote('req-001', 'admin-1', 'admin', 'APPROVE', 'ok')
+    ).resolves.toMatchObject({ outcome: 'VOTE_RECORDED' });
+
+    // DB đã được gọi để lấy fresh data dù cache lỗi
+    expect(findActiveCommissioners).toHaveBeenCalled();
+  });
+
+  it('[T3c] redis.get trả invalid JSON → fallback DB, không throw', async () => {
+    // Cache trả string không phải JSON hợp lệ — corrupt data
+    const mockRedis = {
+      get: vi.fn().mockResolvedValue('{ invalid json %%%'),
+      setEx: vi.fn()
+    };
+    vi.mocked(getRedisClientIfReady).mockReturnValue(mockRedis as never);
+
+    // DB fallback sau khi JSON.parse lỗi
+    vi.mocked(findActiveCommissioners).mockResolvedValue([
+      { id: 'admin-1', role: 'admin' } as never,
+      { id: 'regulatory-1', role: 'regulatory' } as never,
+      { id: 'admin-2', role: 'admin' } as never
+    ]);
+
+    vi.mocked(findOverrideRequestById).mockResolvedValue(buildPendingRequest() as never);
+    const requestAfterVote = buildPendingRequest({
+      votes: [
+        { commissionerId: 'admin-1', commissionerRole: 'admin', vote: 'APPROVE', reason: 'ok', votedAt: new Date() }
+      ]
+    });
+    vi.mocked(addVoteToOverrideRequest).mockResolvedValue(requestAfterVote as never);
+
+    // Invalid JSON trong Redis KHÔNG được crash vote flow
+    await expect(
+      submitOverrideVote('req-001', 'admin-1', 'admin', 'APPROVE', 'ok')
+    ).resolves.toMatchObject({ outcome: 'VOTE_RECORDED' });
+
+    // Phải fallback sang DB sau khi Redis cache corrupt
+    expect(findActiveCommissioners).toHaveBeenCalled();
   });
 });

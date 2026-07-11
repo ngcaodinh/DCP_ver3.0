@@ -175,7 +175,7 @@ export default function GeofenceMap({ projectId, markers = [], className }: Geof
       >
         <TileLayer
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+          url={`${process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:5000'}/api/tiles/{z}/{x}/{y}.png`}
         />
 
         {/* Fit bounds về polygon sau khi map mount */}

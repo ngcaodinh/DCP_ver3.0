@@ -47,7 +47,7 @@ export type OracleOverrideRequestRecord = {
   gpsFromProject: GpsCoordinate;
   distanceMeters: number | null;        // null khi reason=GPS_EXIF_MISSING
   // Snapshot commissioners tại thời điểm tạo request — dùng để check 403 và detect thay đổi
-  commissionerSnapshot: Array<{ userId: string; role: string }>;
+  commissionerSnapshot: Array<{ userId: string; role: 'admin' | 'regulatory' }>;
   votes: CommissionerVote[];
   status: OverrideRequestStatus;
   resolvedAt: Date | null;
@@ -139,11 +139,11 @@ export async function createOracleOverrideRequest(
 export async function findCommissionerInSnapshot(
   overrideRequestId: string,
   userId: string
-): Promise<{ userId: string; role: string } | null> {
+): Promise<{ userId: string; role: 'admin' | 'regulatory' } | null> {
   const doc = await OracleOverrideRequestMongoModel.findOne(
     { overrideRequestId, 'commissionerSnapshot.userId': userId },
     { 'commissionerSnapshot.$': 1 }
-  ).lean<{ commissionerSnapshot: Array<{ userId: string; role: string }> }>().exec();
+  ).lean<{ commissionerSnapshot: Array<{ userId: string; role: 'admin' | 'regulatory' }> }>().exec();
   return doc?.commissionerSnapshot?.[0] ?? null;
 }
 
@@ -198,20 +198,39 @@ export async function deleteOracleOverrideRequestById(overrideRequestId: string)
 }
 
 /**
- * Thêm vote của một commissioner vào danh sách votes.
- * Dùng $push atomic để tránh race condition khi nhiều commissioner vote cùng lúc.
- * Trả về record sau khi cập nhật, null nếu không tìm thấy.
+ * Kết quả atomic operation khi thêm vote.
+ * Giúp phân biệt lý do thất bại: request không PENDING hay commissioner đã vote.
+ */
+export type AddVoteResult = 'OK' | 'ALREADY_VOTED' | 'NOT_PENDING';
+
+/**
+ * Thêm vote của một commissioner vào danh sách votes với atomic check.
+ * Filter loại trừ commissionerId đã vote ngay tại DB để ngăn race condition.
+ * 
+ * @returns 'OK' nếu vote được ghi thành công
+ *          'ALREADY_VOTED' nếu commissionerId đã vote trước đó
+ *          'NOT_PENDING' nếu request không tồn tại hoặc không ở trạng thái PENDING
  */
 export async function addVoteToOverrideRequest(
   overrideRequestId: string,
   vote: CommissionerVote
-): Promise<OracleOverrideRequestRecord | null> {
+): Promise<AddVoteResult> {
   const updated = await OracleOverrideRequestMongoModel.findOneAndUpdate(
-    { overrideRequestId, status: 'PENDING' },
+    {
+      overrideRequestId,
+      status: 'PENDING',
+      'votes.commissionerId': { $ne: vote.commissionerId } // Atomic check: chặn trùng ngay tại DB
+    },
     { $push: { votes: vote } },
     { returnDocument: 'after' }
   ).lean<OracleOverrideRequestRecord>().exec();
-  return updated ?? null;
+
+  if (updated) return 'OK';
+
+  // Phân biệt nguyên nhân null: cần query lại để xác định
+  const current = await OracleOverrideRequestMongoModel.findOne({ overrideRequestId }).lean().exec();
+  if (!current || current.status !== 'PENDING') return 'NOT_PENDING';
+  return 'ALREADY_VOTED';
 }
 
 /**

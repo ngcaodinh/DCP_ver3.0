@@ -40,10 +40,15 @@ describe('useOverrideSocket', () => {
       userId: 'admin-1',
       userRole: 'admin'
     } as never);
+    // [Determinism] Mock Math.random để tránh jitter ±5s làm timer fire sai thời điểm.
+    // Hook dùng Math.random() để chống thundering herd ở production — không phù hợp test.
+    // Trả 0.5 → jitter = 0 → interval chính xác = pollingIntervalMs.
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
   });
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.mocked(Math.random).mockRestore();
   });
 
   it('enablePolling=false: KHÔNG gọi onEvent với OVERRIDE_POLLING_SIGNAL_ID khi socket ngắt', () => {
