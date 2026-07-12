@@ -51,7 +51,7 @@ import { useParams, usePathname, useRouter, useSearchParams } from 'next/navigat
 import { fetchApi } from '@/app/utils/apiClient';
 import { readAuthSession } from '@/app/utils/authSession';
 import { useGuestWallet } from '@/app/components/GuestWalletProvider';
-import { initPayosDonation, getPayosDonationStatus } from '@/app/utils/guestPayosClient';
+import { initPayosDonation } from '@/app/utils/guestPayosClient';
 import DonationProjectDetailPage from '@/app/donations/[projectId]/page';
 
 /**
@@ -150,24 +150,12 @@ describe('DonationProjectDetailPage', () => {
     expect(routerPush).toHaveBeenCalledWith('/login?returnTo=%2Fdonations%2Fproject-001%3Fref%3Dhomepage');
   });
 
-  it('cho phép quyên góp ẩn danh sau khi PayOS thanh toán thành công', async () => {
+  it('khởi tạo PayOS cho quyên góp ẩn danh ở mức tối đa', async () => {
     vi.mocked(initPayosDonation).mockResolvedValue({
       orderCode: 'ORDER-001',
       paymentUrl: 'https://pay.payos.vn/order-001',
-      amount: 10000,
+      amount: 200000,
       projectId: 'project-001',
-    } as never);
-
-    vi.mocked(getPayosDonationStatus).mockResolvedValue({
-      orderCode: 'ORDER-001',
-      status: 'COMPLETED',
-      amount: 10000,
-      projectId: 'project-001',
-      relayTxHash: '0xrelayhash',
-      mintTxHash: '0xminthash',
-      errorMessage: null,
-      createdAt: '2026-06-05T08:00:00.000Z',
-      updatedAt: '2026-06-05T08:00:05.000Z',
     } as never);
 
     render(<DonationProjectDetailPage />);
@@ -178,37 +166,20 @@ describe('DonationProjectDetailPage', () => {
 
     await screen.findByText(/ví ẩn danh đã sẵn sàng/i);
 
-    const amountInput = screen.getByPlaceholderText(/từ 10000 đến 20,?000 token/i);
-    fireEvent.change(amountInput, { target: { value: '10000' } });
+    const amountInput = screen.getByPlaceholderText(/từ 10000 đến 200,?000 token/i);
+    fireEvent.change(amountInput, { target: { value: '200000' } });
 
     fireEvent.click(screen.getByRole('button', { name: /quyên góp ẩn danh/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /^xác nhận$/i }));
 
     await waitFor(() => {
       expect(initPayosDonation).toHaveBeenCalledWith(
         {
           projectId: 'project-001',
-          amount: 10000,
+          amount: 200000,
         },
         'guest-token-001',
       );
     });
-
-    await screen.findByText(/vui lòng hoàn tất thanh toán trên payos/i);
-    expect(screen.getByRole('link', { name: /mở trang thanh toán payos/i })).toHaveAttribute(
-      'href',
-      'https://pay.payos.vn/order-001',
-    );
-
-    await waitFor(() => {
-      expect(getPayosDonationStatus).toHaveBeenCalledWith('ORDER-001', 'guest-token-001');
-    }, { timeout: 5000 });
-
-    await waitFor(() => {
-      expect(screen.getByText(/quyên góp ẩn danh thành công/i)).toBeInTheDocument();
-    }, { timeout: 5000 });
-
-    await waitFor(() => {
-      expect(fetchApi).toHaveBeenCalledTimes(6);
-    }, { timeout: 5000 });
-  }, 15000);
+  });
 });

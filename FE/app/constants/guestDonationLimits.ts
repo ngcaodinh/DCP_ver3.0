@@ -10,8 +10,8 @@ export const MAX_DONATIONS_PER_SESSION = 3;
 /** Số tiền donation tối thiểu mỗi lần cho guest. */
 export const MIN_AMOUNT_PER_DONATION = 10000;
 
-/** Số tiền donation tối đa mỗi lần cho guest. */
-export const MAX_AMOUNT_PER_DONATION = 20000;
+/** Số tiền donation tối đa mỗi lần cho guest/anonymous. */
+export const MAX_AMOUNT_PER_DONATION = 200000;
 
 /** Regex kiểm tra địa chỉ ví EIP-55 — dùng chung cho cả validation ở Provider và API client */
 export const WALLET_ADDRESS_REGEX = /^0x[a-fA-F0-9]{40}$/;
