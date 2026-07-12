@@ -136,6 +136,8 @@ describe('submitOverrideVote', () => {
         ]
       }) as never
     );
+    // [B-NEW1 fix] addVoteToOverrideRequest trả về 'ALREADY_VOTED' khi atomic check fails
+    vi.mocked(addVoteToOverrideRequest).mockResolvedValue('ALREADY_VOTED' as never);
 
     await expect(
       submitOverrideVote('req-001', 'admin-1', 'admin', 'APPROVE', 'ok')
@@ -162,17 +164,19 @@ describe('submitOverrideVote', () => {
 
   // ─── Ghi nhận vote (chưa đủ) ─────────────────────────────────────────────
   it('trả VOTE_RECORDED với pendingVoters đúng khi chưa đủ N vote', async () => {
-    vi.mocked(findOverrideRequestById).mockResolvedValue(
-      buildPendingRequest() as never
-    );
-    mockUnchangedCommissionerSet();
+    const initialRequest = buildPendingRequest();
     // Sau khi $push vote, request có 1 vote APPROVE, còn 2 người chưa vote
     const requestAfterVote = buildPendingRequest({
       votes: [
         { commissionerId: 'admin-1', commissionerRole: 'admin', vote: 'APPROVE', reason: 'ok', votedAt: new Date() }
       ]
     });
-    vi.mocked(addVoteToOverrideRequest).mockResolvedValue(requestAfterVote as never);
+    // [B-NEW1 fix] Service load request 2 lần: 1 cho check, 1 sau khi addVote trả OK
+    vi.mocked(findOverrideRequestById)
+      .mockResolvedValueOnce(initialRequest as never)
+      .mockResolvedValueOnce(requestAfterVote as never);
+    mockUnchangedCommissionerSet();
+    vi.mocked(addVoteToOverrideRequest).mockResolvedValue('OK' as never);
 
     const result = await submitOverrideVote('req-001', 'admin-1', 'admin', 'APPROVE', 'ok');
 
@@ -186,17 +190,19 @@ describe('submitOverrideVote', () => {
 
   // ─── REJECT ngay khi có 1 phiếu REJECT ────────────────────────────────────
   it('resolve REJECTED ngay khi có bất kỳ phiếu REJECT', async () => {
-    vi.mocked(findOverrideRequestById).mockResolvedValue(
-      buildPendingRequest() as never
-    );
-    mockUnchangedCommissionerSet();
+    const initialRequest = buildPendingRequest();
     // Sau khi $push vote REJECT
     const requestAfterReject = buildPendingRequest({
       votes: [
         { commissionerId: 'admin-1', commissionerRole: 'admin', vote: 'REJECT', reason: 'invalid', votedAt: new Date() }
       ]
     });
-    vi.mocked(addVoteToOverrideRequest).mockResolvedValue(requestAfterReject as never);
+    // [B-NEW1 fix] Service load request 2 lần
+    vi.mocked(findOverrideRequestById)
+      .mockResolvedValueOnce(initialRequest as never)
+      .mockResolvedValueOnce(requestAfterReject as never);
+    mockUnchangedCommissionerSet();
+    vi.mocked(addVoteToOverrideRequest).mockResolvedValue('OK' as never);
     vi.mocked(resolveOverrideRequest).mockResolvedValue(
       buildPendingRequest({ status: 'REJECTED', resolvedAt: new Date() }) as never
     );
@@ -209,10 +215,7 @@ describe('submitOverrideVote', () => {
 
   // ─── APPROVED khi tất cả vote APPROVE (không có disbursement) ─────────────
   it('resolve APPROVED khi tất cả N commissioner vote APPROVE (không link disbursement)', async () => {
-    vi.mocked(findOverrideRequestById).mockResolvedValue(
-      buildPendingRequest() as never
-    );
-    mockUnchangedCommissionerSet();
+    const initialRequest = buildPendingRequest();
     // Vote cuối cùng (admin-2) → đủ 3/3
     const requestAfterFinalVote = buildPendingRequest({
       disbursementRequestId: null,
@@ -222,7 +225,12 @@ describe('submitOverrideVote', () => {
         { commissionerId: 'admin-2', commissionerRole: 'admin', vote: 'APPROVE', reason: 'ok', votedAt: new Date() }
       ]
     });
-    vi.mocked(addVoteToOverrideRequest).mockResolvedValue(requestAfterFinalVote as never);
+    // [B-NEW1 fix] Service load request 2 lần
+    vi.mocked(findOverrideRequestById)
+      .mockResolvedValueOnce(initialRequest as never)
+      .mockResolvedValueOnce(requestAfterFinalVote as never);
+    mockUnchangedCommissionerSet();
+    vi.mocked(addVoteToOverrideRequest).mockResolvedValue('OK' as never);
     vi.mocked(resolveOverrideRequest).mockResolvedValue(
       buildPendingRequest({ status: 'APPROVED', resolvedAt: new Date() }) as never
     );
@@ -240,10 +248,7 @@ describe('submitOverrideVote', () => {
 
   // ─── APPROVED với disbursement auto-approve ───────────────────────────────
   it('auto-approve disbursement khi override APPROVED và có disbursementRequestId', async () => {
-    vi.mocked(findOverrideRequestById).mockResolvedValue(
-      buildPendingRequest({ disbursementRequestId: 'disb-001' }) as never
-    );
-    mockUnchangedCommissionerSet();
+    const initialRequest = buildPendingRequest({ disbursementRequestId: 'disb-001' });
     const requestAfterFinalVote = buildPendingRequest({
       disbursementRequestId: 'disb-001',
       votes: [
@@ -252,7 +257,11 @@ describe('submitOverrideVote', () => {
         { commissionerId: 'admin-2', commissionerRole: 'admin', vote: 'APPROVE', reason: 'ok', votedAt: new Date() }
       ]
     });
-    vi.mocked(addVoteToOverrideRequest).mockResolvedValue(requestAfterFinalVote as never);
+    vi.mocked(findOverrideRequestById)
+      .mockResolvedValueOnce(initialRequest as never)
+      .mockResolvedValueOnce(requestAfterFinalVote as never);
+    mockUnchangedCommissionerSet();
+    vi.mocked(addVoteToOverrideRequest).mockResolvedValue('OK' as never);
     vi.mocked(resolveOverrideRequest).mockResolvedValue(
       buildPendingRequest({ disbursementRequestId: 'disb-001', status: 'APPROVED', resolvedAt: new Date() }) as never
     );
@@ -278,10 +287,7 @@ describe('submitOverrideVote', () => {
 
   // ─── Disbursement không còn PENDING khi auto-approve ─────────────────────
   it('disbursementAutoApproved = false khi disbursement không còn PENDING', async () => {
-    vi.mocked(findOverrideRequestById).mockResolvedValue(
-      buildPendingRequest({ disbursementRequestId: 'disb-001' }) as never
-    );
-    mockUnchangedCommissionerSet();
+    const initialRequest = buildPendingRequest({ disbursementRequestId: 'disb-001' });
     const requestAfterFinalVote = buildPendingRequest({
       disbursementRequestId: 'disb-001',
       votes: [
@@ -290,14 +296,17 @@ describe('submitOverrideVote', () => {
         { commissionerId: 'admin-2', commissionerRole: 'admin', vote: 'APPROVE', reason: 'ok', votedAt: new Date() }
       ]
     });
-    vi.mocked(addVoteToOverrideRequest).mockResolvedValue(requestAfterFinalVote as never);
+    vi.mocked(findOverrideRequestById)
+      .mockResolvedValueOnce(initialRequest as never)
+      .mockResolvedValueOnce(requestAfterFinalVote as never);
+    mockUnchangedCommissionerSet();
+    vi.mocked(addVoteToOverrideRequest).mockResolvedValue('OK' as never);
     vi.mocked(resolveOverrideRequest).mockResolvedValue(
       buildPendingRequest({ disbursementRequestId: 'disb-001', status: 'APPROVED', resolvedAt: new Date() }) as never
     );
     vi.mocked(findDisbursementByRequestId).mockResolvedValue(
-      { requestId: 'disb-001', status: 'APPROVED' } as never  // đã được approve bởi luồng khác
+      { requestId: 'disb-001', status: 'APPROVED' } as never
     );
-    // updateDisbursementByRequestIdWithCondition trả null vì condition status='PENDING' không match
     vi.mocked(updateDisbursementByRequestIdWithCondition).mockResolvedValue(null);
 
     const result = await submitOverrideVote('req-001', 'admin-2', 'admin', 'APPROVE', 'confirmed');
@@ -308,13 +317,14 @@ describe('submitOverrideVote', () => {
     }
   });
 
-  // ─── Race condition: addVoteToOverrideRequest trả null ───────────────────
-  it('ném VoteRejectedError REQUEST_NOT_PENDING khi addVote trả null (race condition)', async () => {
+  // ─── Race condition: addVoteToOverrideRequest trả NOT_PENDING ────────────
+  it('ném VoteRejectedError REQUEST_NOT_PENDING khi addVote trả NOT_PENDING (race condition)', async () => {
     vi.mocked(findOverrideRequestById).mockResolvedValue(
       buildPendingRequest() as never
     );
     mockUnchangedCommissionerSet();
-    vi.mocked(addVoteToOverrideRequest).mockResolvedValue(null);
+    // [B-NEW1 fix] addVote trả 'NOT_PENDING' khi atomic findOneAndUpdate không match (concurrent resolve)
+    vi.mocked(addVoteToOverrideRequest).mockResolvedValue('NOT_PENDING' as never);
 
     await expect(
       submitOverrideVote('req-001', 'admin-1', 'admin', 'APPROVE', 'ok')
@@ -345,10 +355,7 @@ describe('submitOverrideVote', () => {
 
   // ─── T2: Disbursement đang EXECUTING khi auto-approve (B2-fix #3) ────────
   it('[T2] disbursementAutoApproved=false và không throw khi disbursement đang EXECUTING', async () => {
-    vi.mocked(findOverrideRequestById).mockResolvedValue(
-      buildPendingRequest({ disbursementRequestId: 'disb-001' }) as never
-    );
-    mockUnchangedCommissionerSet();
+    const initialRequest = buildPendingRequest({ disbursementRequestId: 'disb-001' });
     const requestAfterFinalVote = buildPendingRequest({
       disbursementRequestId: 'disb-001',
       votes: [
@@ -357,7 +364,12 @@ describe('submitOverrideVote', () => {
         { commissionerId: 'admin-2', commissionerRole: 'admin', vote: 'APPROVE', reason: 'ok', votedAt: new Date() }
       ]
     });
-    vi.mocked(addVoteToOverrideRequest).mockResolvedValue(requestAfterFinalVote as never);
+    // [B-NEW1 fix] Service load request 2 lần
+    vi.mocked(findOverrideRequestById)
+      .mockResolvedValueOnce(initialRequest as never)
+      .mockResolvedValueOnce(requestAfterFinalVote as never);
+    mockUnchangedCommissionerSet();
+    vi.mocked(addVoteToOverrideRequest).mockResolvedValue('OK' as never);
     vi.mocked(resolveOverrideRequest).mockResolvedValue(
       buildPendingRequest({ disbursementRequestId: 'disb-001', status: 'APPROVED', resolvedAt: new Date() }) as never
     );
@@ -377,9 +389,6 @@ describe('submitOverrideVote', () => {
 
   // ─── T3: Race condition — 3 APPROVE đồng thời qua Promise.all ────────────
   it('[T3] chỉ 1 winner resolve APPROVED khi 3 vote APPROVE gần như cùng lúc', async () => {
-    vi.mocked(findOverrideRequestById).mockResolvedValue(buildPendingRequest() as never);
-    mockUnchangedCommissionerSet();
-
     const fullVoteRequest = buildPendingRequest({
       votes: [
         { commissionerId: 'admin-1', commissionerRole: 'admin', vote: 'APPROVE', reason: 'ok', votedAt: new Date() },
@@ -387,7 +396,11 @@ describe('submitOverrideVote', () => {
         { commissionerId: 'admin-2', commissionerRole: 'admin', vote: 'APPROVE', reason: 'ok', votedAt: new Date() }
       ]
     });
-    vi.mocked(addVoteToOverrideRequest).mockResolvedValue(fullVoteRequest as never);
+    // Mỗi concurrent vote cần load request — dùng mockResolvedValue (luôn trả về cùng giá trị)
+    vi.mocked(findOverrideRequestById).mockResolvedValue(fullVoteRequest as never);
+    mockUnchangedCommissionerSet();
+    // [B-NEW1 fix] addVote trả 'OK' cho cả 3 vì dùng atomic check
+    vi.mocked(addVoteToOverrideRequest).mockResolvedValue('OK' as never);
 
     // Chỉ 1 trong 3 resolve thành công (winner), 2 còn lại trả null (loser — race)
     vi.mocked(resolveOverrideRequest)

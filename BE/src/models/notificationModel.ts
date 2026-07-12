@@ -73,9 +73,8 @@ export type Notification = {
 
 const channelDeliveryStatusSchema = new Schema(
   {
-    type: String,
-    enum: ['PENDING', 'SENT', 'FAILED', 'SKIPPED'] as const,
-    default: 'PENDING'
+    channel: { type: String, required: true, enum: ['IN_APP', 'EMAIL', 'PUSH', 'SMS'] },
+    status: { type: String, required: true, enum: ['PENDING', 'SENT', 'FAILED', 'SKIPPED'], default: 'PENDING' }
   },
   { _id: false }
 );

@@ -11,33 +11,33 @@ import * as Contracts from "./index.js";
 declare module "@nomicfoundation/hardhat-ethers/types" {
   interface HardhatEthersHelpers extends HardhatEthersHelpersBase {
   getContractFactory(name: 'DcpDonationRanking', signerOrOptions?: ethers.Signer | FactoryOptions): Promise<Contracts.DcpDonationRanking__factory>
-getContractFactory(name: 'DisbursementVault', signerOrOptions?: ethers.Signer | FactoryOptions): Promise<Contracts.DisbursementVault__factory>
 getContractFactory(name: 'DcpCharityToken', signerOrOptions?: ethers.Signer | FactoryOptions): Promise<Contracts.DcpCharityToken__factory>
 getContractFactory(name: 'IImpactSBT', signerOrOptions?: ethers.Signer | FactoryOptions): Promise<Contracts.IImpactSBT__factory>
+getContractFactory(name: 'DisbursementVault', signerOrOptions?: ethers.Signer | FactoryOptions): Promise<Contracts.DisbursementVault__factory>
 getContractFactory(name: 'MultisigDisbursement', signerOrOptions?: ethers.Signer | FactoryOptions): Promise<Contracts.MultisigDisbursement__factory>
 getContractFactory(name: 'IERC5192', signerOrOptions?: ethers.Signer | FactoryOptions): Promise<Contracts.IERC5192__factory>
 getContractFactory(name: 'ImpactSBT', signerOrOptions?: ethers.Signer | FactoryOptions): Promise<Contracts.ImpactSBT__factory>
 
   getContractAt(name: 'DcpDonationRanking', address: string | ethers.Addressable, signer?: ethers.Signer): Promise<Contracts.DcpDonationRanking>
-getContractAt(name: 'DisbursementVault', address: string | ethers.Addressable, signer?: ethers.Signer): Promise<Contracts.DisbursementVault>
 getContractAt(name: 'DcpCharityToken', address: string | ethers.Addressable, signer?: ethers.Signer): Promise<Contracts.DcpCharityToken>
 getContractAt(name: 'IImpactSBT', address: string | ethers.Addressable, signer?: ethers.Signer): Promise<Contracts.IImpactSBT>
+getContractAt(name: 'DisbursementVault', address: string | ethers.Addressable, signer?: ethers.Signer): Promise<Contracts.DisbursementVault>
 getContractAt(name: 'MultisigDisbursement', address: string | ethers.Addressable, signer?: ethers.Signer): Promise<Contracts.MultisigDisbursement>
 getContractAt(name: 'IERC5192', address: string | ethers.Addressable, signer?: ethers.Signer): Promise<Contracts.IERC5192>
 getContractAt(name: 'ImpactSBT', address: string | ethers.Addressable, signer?: ethers.Signer): Promise<Contracts.ImpactSBT>
 
   deployContract(name: 'DcpDonationRanking', signerOrOptions?: ethers.Signer | DeployContractOptions): Promise<Contracts.DcpDonationRanking>
-deployContract(name: 'DisbursementVault', signerOrOptions?: ethers.Signer | DeployContractOptions): Promise<Contracts.DisbursementVault>
 deployContract(name: 'DcpCharityToken', signerOrOptions?: ethers.Signer | DeployContractOptions): Promise<Contracts.DcpCharityToken>
 deployContract(name: 'IImpactSBT', signerOrOptions?: ethers.Signer | DeployContractOptions): Promise<Contracts.IImpactSBT>
+deployContract(name: 'DisbursementVault', signerOrOptions?: ethers.Signer | DeployContractOptions): Promise<Contracts.DisbursementVault>
 deployContract(name: 'MultisigDisbursement', signerOrOptions?: ethers.Signer | DeployContractOptions): Promise<Contracts.MultisigDisbursement>
 deployContract(name: 'IERC5192', signerOrOptions?: ethers.Signer | DeployContractOptions): Promise<Contracts.IERC5192>
 deployContract(name: 'ImpactSBT', signerOrOptions?: ethers.Signer | DeployContractOptions): Promise<Contracts.ImpactSBT>
 
   deployContract(name: 'DcpDonationRanking', args: any[], signerOrOptions?: ethers.Signer | DeployContractOptions): Promise<Contracts.DcpDonationRanking>
-deployContract(name: 'DisbursementVault', args: any[], signerOrOptions?: ethers.Signer | DeployContractOptions): Promise<Contracts.DisbursementVault>
 deployContract(name: 'DcpCharityToken', args: any[], signerOrOptions?: ethers.Signer | DeployContractOptions): Promise<Contracts.DcpCharityToken>
 deployContract(name: 'IImpactSBT', args: any[], signerOrOptions?: ethers.Signer | DeployContractOptions): Promise<Contracts.IImpactSBT>
+deployContract(name: 'DisbursementVault', args: any[], signerOrOptions?: ethers.Signer | DeployContractOptions): Promise<Contracts.DisbursementVault>
 deployContract(name: 'MultisigDisbursement', args: any[], signerOrOptions?: ethers.Signer | DeployContractOptions): Promise<Contracts.MultisigDisbursement>
 deployContract(name: 'IERC5192', args: any[], signerOrOptions?: ethers.Signer | DeployContractOptions): Promise<Contracts.IERC5192>
 deployContract(name: 'ImpactSBT', args: any[], signerOrOptions?: ethers.Signer | DeployContractOptions): Promise<Contracts.ImpactSBT>
