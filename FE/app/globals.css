@@ -3055,3 +3055,27 @@ footer {
     to   { transform: translateX(0); }
   }
 }
+
+/* ── D4: TRANSPARENCY DASHBOARD PRINT (Xuất PDF qua window.print) ── */
+/* Khi in: ẩn header/sidebar/nav toàn cục và các control của trang, chỉ giữ
+   khu vực báo cáo (timeline + donut). print-color-adjust: exact để donut giữ màu. */
+@media print {
+  nav,
+  .transparency-controls {
+    display: none !important;
+  }
+
+  .transparency-report,
+  .transparency-report * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  .transparency-report {
+    display: block !important;
+  }
+
+  body {
+    background: #ffffff !important;
+  }
+}
