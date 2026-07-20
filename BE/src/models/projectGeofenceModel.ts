@@ -8,6 +8,12 @@ export type GpsCoordinate = {
   lng: number;
 };
 
+/** Số điểm tối thiểu để tạo một polygon geofence hợp lệ. */
+export const MIN_GEOFENCE_POLYGON_POINTS = 3;
+
+/** Giới hạn số điểm polygon để tránh payload/snapshot quá lớn trên API và UI review. */
+export const MAX_GEOFENCE_POLYGON_POINTS = 100;
+
 /**
  * Ranh giới địa lý của dự án từ thiện.
  * Oracle dùng radiusMeters (Haversine) để kiểm tra ảnh minh chứng có chụp đúng địa điểm không.
@@ -34,8 +40,11 @@ const projectGeofenceSchema = new Schema<ProjectGeofenceRecord>(
       type: [gpsCoordinateSchema],
       required: true,
       validate: {
-        validator: (v: GpsCoordinate[]) => v.length >= 3,
-        message: 'Polygon phải có ít nhất 3 điểm.'
+        validator: (v: GpsCoordinate[]) => (
+          v.length >= MIN_GEOFENCE_POLYGON_POINTS &&
+          v.length <= MAX_GEOFENCE_POLYGON_POINTS
+        ),
+        message: `Polygon phải có từ ${MIN_GEOFENCE_POLYGON_POINTS} đến ${MAX_GEOFENCE_POLYGON_POINTS} điểm.`
       }
     },
     centroid: { type: gpsCoordinateSchema, required: true },
@@ -69,11 +78,15 @@ export async function upsertProjectGeofence(
   polygon: GpsCoordinate[],
   radiusMeters: number
 ): Promise<ProjectGeofenceRecord> {
+  if (polygon.length < MIN_GEOFENCE_POLYGON_POINTS || polygon.length > MAX_GEOFENCE_POLYGON_POINTS) {
+    throw new Error(`Polygon phải có từ ${MIN_GEOFENCE_POLYGON_POINTS} đến ${MAX_GEOFENCE_POLYGON_POINTS} điểm.`);
+  }
+
   const centroid = computeCentroid(polygon);
   const doc = await ProjectGeofenceMongoModel.findOneAndUpdate(
     { projectId },
     { $set: { polygon, centroid, radiusMeters } },
-    { upsert: true, new: true }
+    { upsert: true, new: true, runValidators: true }
   ).lean().exec();
   if (!doc) throw new Error(`Upsert geofence thất bại cho projectId=${projectId}`);
   return doc;

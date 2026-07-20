@@ -5,6 +5,8 @@ import type { GpsCoordinate } from '../../models/projectGeofenceModel';
 // Mock DB models để test không cần MongoDB
 vi.mock('../../models/projectGeofenceModel', () => ({
   findGeofenceByProjectId: vi.fn(),
+  MIN_GEOFENCE_POLYGON_POINTS: 3,
+  MAX_GEOFENCE_POLYGON_POINTS: 100,
   computeCentroid: vi.fn((polygon: GpsCoordinate[]) => {
     const lat = polygon.reduce((s, p) => s + p.lat, 0) / polygon.length;
     const lng = polygon.reduce((s, p) => s + p.lng, 0) / polygon.length;
@@ -263,6 +265,16 @@ describe('verifyEvidenceImage', () => {
     expect(result.reason).toBe('GPS_EXIF_MISSING');
     expect(result.distance).toBeNull();
     expect(result.overrideRequestId).toBeTruthy();
+
+    // [B3] NO_GPS vẫn phải persist geofenceSnapshot bất biến (polygon/centroid/radius đã clamp)
+    // để Admin review đúng vùng lịch sử — không được rơi mất khi đi qua handleNoGps.
+    const verificationCall = vi.mocked(createOracleVerificationResult).mock.calls[0]?.[0];
+    expect(verificationCall?.status).toBe('NO_GPS');
+    expect(verificationCall?.geofenceSnapshot).toEqual({
+      polygon: mockGeofenceWith500m.polygon,
+      centroid: mockGeofenceWith500m.centroid,
+      radiusMeters: 500
+    });
   });
 
   // --- in radius ---
@@ -311,6 +323,128 @@ describe('verifyEvidenceImage', () => {
       result.verificationId,
       result.overrideRequestId
     );
+
+    // [B3] INVALID (OUT_OF_GEOFENCE) là case chính tạo override + review bản đồ — snapshot bất biến
+    // phải được persist với radius đã clamp (100m), tránh regression âm thầm ở use case chính.
+    const verificationCall = vi.mocked(createOracleVerificationResult).mock.calls[0]?.[0];
+    expect(verificationCall?.status).toBe('INVALID');
+    expect(verificationCall?.geofenceSnapshot).toEqual({
+      polygon: mockGeofenceWith500m.polygon,
+      centroid: mockGeofenceWith500m.centroid,
+      radiusMeters: 100
+    });
+  });
+
+  // --- geofence snapshot bất biến (B3) ---
+
+  it('[B3] lưu geofenceSnapshot (polygon, centroid, radius đã clamp) khi verify VALID', async () => {
+    vi.mocked(findGeofenceByProjectId).mockResolvedValue(mockGeofenceWith500m);
+    vi.mocked(mockExifCreate).mockReturnValue({
+      enableSimpleValues: vi.fn().mockReturnThis(),
+      parse: vi.fn().mockReturnValue({
+        tags: { GPSLatitude: 10.7759, GPSLongitude: 106.703, GPSLatitudeRef: 'N', GPSLongitudeRef: 'E' }
+      })
+    } as unknown as ReturnType<typeof mockExifCreate>);
+
+    await verifyEvidenceImage(Buffer.alloc(64), mockProjectId, mockOrgId, mockCid);
+
+    const verificationCall = vi.mocked(createOracleVerificationResult).mock.calls[0]?.[0];
+    expect(verificationCall?.geofenceSnapshot).toEqual({
+      polygon: mockGeofenceWith500m.polygon,
+      centroid: mockGeofenceWith500m.centroid,
+      radiusMeters: 500
+    });
+  });
+
+  it('[B3] geofenceSnapshot bất biến — sửa geofence sau verify không làm đổi snapshot đã lưu', async () => {
+    // Verify lần đầu với polygon/radius gốc
+    const originalGeofence = {
+      ...mockGeofenceWith500m,
+      polygon: mockGeofenceWith500m.polygon.map((point) => ({ ...point })),
+      centroid: { ...mockGeofenceWith500m.centroid }
+    };
+    const expectedOriginalSnapshot = {
+      polygon: originalGeofence.polygon.map((point) => ({ ...point })),
+      centroid: { ...originalGeofence.centroid },
+      radiusMeters: 500
+    };
+    vi.mocked(findGeofenceByProjectId).mockResolvedValue(originalGeofence);
+    vi.mocked(mockExifCreate).mockReturnValue({
+      enableSimpleValues: vi.fn().mockReturnThis(),
+      parse: vi.fn().mockReturnValue({
+        tags: { GPSLatitude: 10.7759, GPSLongitude: 106.703, GPSLatitudeRef: 'N', GPSLongitudeRef: 'E' }
+      })
+    } as unknown as ReturnType<typeof mockExifCreate>);
+
+    await verifyEvidenceImage(Buffer.alloc(64), mockProjectId, mockOrgId, mockCid);
+    const firstSnapshot = vi.mocked(createOracleVerificationResult).mock.calls[0]?.[0]?.geofenceSnapshot;
+    originalGeofence.polygon[0]!.lat = 99;
+    originalGeofence.centroid.lat = 99;
+
+    // Organization sửa geofence (polygon + radius khác) rồi verify ảnh mới
+    const mutatedGeofence = {
+      ...mockGeofenceWith500m,
+      polygon: [{ lat: 20.0, lng: 100.0 }, { lat: 20.1, lng: 100.0 }, { lat: 20.1, lng: 100.1 }],
+      centroid: { lat: 20.05, lng: 100.05 },
+      radiusMeters: 1500
+    };
+    vi.mocked(findGeofenceByProjectId).mockResolvedValue(mutatedGeofence);
+    await verifyEvidenceImage(Buffer.alloc(64), mockProjectId, mockOrgId, 'QmSecondCid');
+
+    // Snapshot lần đầu vẫn giữ nguyên polygon/centroid/radius gốc, không bị mutate
+    expect(firstSnapshot).toEqual(expectedOriginalSnapshot);
+    // Snapshot lần hai phản ánh geofence mới
+    const secondSnapshot = vi.mocked(createOracleVerificationResult).mock.calls[1]?.[0]?.geofenceSnapshot;
+    expect(secondSnapshot?.radiusMeters).toBe(1500);
+    expect(secondSnapshot?.centroid).toEqual({ lat: 20.05, lng: 100.05 });
+  });
+
+  it('[B3] geofenceSnapshot dùng radius đã clamp, không dùng giá trị DB thô', async () => {
+    vi.mocked(findGeofenceByProjectId).mockResolvedValue({
+      ...mockGeofenceWith500m,
+      centroid: { lat: 10.775, lng: 106.703 },
+      radiusMeters: 9999 // vượt cap 2000
+    });
+    vi.mocked(mockExifCreate).mockReturnValue({
+      enableSimpleValues: vi.fn().mockReturnThis(),
+      parse: vi.fn().mockReturnValue({
+        tags: { GPSLatitude: 10.7759, GPSLongitude: 106.703, GPSLatitudeRef: 'N', GPSLongitudeRef: 'E' }
+      })
+    } as unknown as ReturnType<typeof mockExifCreate>);
+
+    await verifyEvidenceImage(Buffer.alloc(64), mockProjectId, mockOrgId, mockCid);
+
+    const verificationCall = vi.mocked(createOracleVerificationResult).mock.calls[0]?.[0];
+    // Radius trong snapshot phải là 2000 (đã cap), không phải 9999
+    expect(verificationCall?.geofenceSnapshot?.radiusMeters).toBe(2000);
+  });
+
+  it('[B3-performance] từ chối geofence polygon quá lớn trước khi copy snapshot', async () => {
+    vi.mocked(findGeofenceByProjectId).mockResolvedValue({
+      ...mockGeofenceWith500m,
+      polygon: Array.from({ length: 101 }, (_, index) => ({
+        lat: 10 + index * 0.0001,
+        lng: 106 + index * 0.0001
+      }))
+    });
+
+    await expect(verifyEvidenceImage(Buffer.alloc(64), mockProjectId, mockOrgId, mockCid))
+      .rejects.toThrow('100');
+    expect(createOracleVerificationResult).not.toHaveBeenCalled();
+  });
+
+  it('[B3] geofenceSnapshot = null khi project chưa có geofence (NO_GEOFENCE)', async () => {
+    vi.mocked(findGeofenceByProjectId).mockResolvedValue(null);
+    vi.mocked(mockExifCreate).mockReturnValue({
+      enableSimpleValues: vi.fn().mockReturnThis(),
+      parse: vi.fn().mockImplementation(() => { throw new Error('No EXIF'); })
+    } as unknown as ReturnType<typeof mockExifCreate>);
+
+    await verifyEvidenceImage(Buffer.alloc(64), mockProjectId, mockOrgId, mockCid);
+
+    const verificationCall = vi.mocked(createOracleVerificationResult).mock.calls[0]?.[0];
+    expect(verificationCall?.status).toBe('NO_GEOFENCE');
+    expect(verificationCall?.geofenceSnapshot).toBeNull();
   });
 
   // --- radius clamping ---

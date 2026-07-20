@@ -6,7 +6,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 // ============ Mock external modules ============
 
-vi.mock('../config/logger', () => ({
+vi.mock('../../config/logger', () => ({
   getLogger: () => ({
     info: vi.fn(),
     warn: vi.fn(),
@@ -30,7 +30,10 @@ const mockQueueInstance = {
   getDelayed: mockQueueGetDelayed,
 };
 
-vi.mock('../queues/disbursementTransferQueue', () => ({
+process.env.DISBURSEMENT_TRANSFER_POLL_INTERVAL_MS = '1';
+process.env.DISBURSEMENT_TRANSFER_POLL_MAX_ATTEMPTS = '3';
+
+vi.mock('../../queues/disbursementTransferQueue', () => ({
   PAYOS_TRANSFER_RETRY_DELAYS_MS: [60_000, 300_000, 1_800_000],
   getDisbursementTransferQueue: vi.fn(() => mockQueueInstance),
   enqueueDisbursementTransfer: vi.fn(() => ({ jobId: 'job-123', enqueued: true })),
@@ -38,17 +41,17 @@ vi.mock('../queues/disbursementTransferQueue', () => ({
   DisbursementTransferJobData: {},
 }));
 
-vi.mock('../models/disbursementModel', () => ({
+vi.mock('../../models/disbursementModel', () => ({
   findDisbursementByRequestId: vi.fn(),
   updateDisbursementByRequestId: vi.fn(),
 }));
 
-vi.mock('../models/disbursementTransferModel', () => ({
+vi.mock('../../models/disbursementTransferModel', () => ({
   createTransferLog: vi.fn(),
   updateTransferLogById: vi.fn(),
 }));
 
-vi.mock('../services/payosService', () => ({
+vi.mock('../../services/payosService', () => ({
   createPayosTransfer: vi.fn(),
   getPayosTransferStatusByReferenceId: vi.fn(),
 }));
@@ -57,15 +60,9 @@ vi.mock('../../services/notificationService', () => ({
   createUserNotification: vi.fn(),
 }));
 
-vi.mock('../services/disbursementService', () => ({
+vi.mock('../../services/disbursementService', () => ({
   processDisbursementTransferWebhook: vi.fn(),
 }));
-
-// ============ Import module under test ============
-
-import {
-  // Functions under test (exported for testing)
-} from '../../workers/payosTransferWorker';
 
 import * as disbursementModel from '../../models/disbursementModel';
 import * as disbursementTransferModel from '../../models/disbursementTransferModel';
@@ -359,7 +356,8 @@ describe('payosTransferWorker - isDisbursementTimedOut', () => {
 describe('payosTransferWorker - pollTransferUntilFinal', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.useFakeTimers();
+    vi.mocked(disbursementModel.findDisbursementByRequestId).mockReset();
+    vi.mocked(payosService.getPayosTransferStatusByReferenceId).mockReset();
   });
 
   afterEach(() => {
@@ -429,11 +427,9 @@ describe('payosTransferWorker - pollTransferUntilFinal', () => {
     (payosService.getPayosTransferStatusByReferenceId as ReturnType<typeof vi.fn>).mockResolvedValue({
       found: false,
     });
-    // Poll max attempts (60) * 15ms interval = 900ms
     const result = await pollTransferUntilFinal('DS-TEST-001', 'transfer-123');
     expect(result).toBe('PROCESSING');
-    // Should have been called 60 times (max attempts)
-    expect(payosService.getPayosTransferStatusByReferenceId).toHaveBeenCalledTimes(60);
+    expect(payosService.getPayosTransferStatusByReferenceId).toHaveBeenCalledTimes(3);
   });
 });
 
@@ -505,7 +501,15 @@ describe('payosTransferWorker - moveToManualReview', () => {
 describe('payosTransferWorker - processTransferJob', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.useFakeTimers();
+    vi.mocked(disbursementModel.findDisbursementByRequestId).mockReset();
+    vi.mocked(disbursementModel.updateDisbursementByRequestId).mockReset();
+    vi.mocked(disbursementTransferModel.createTransferLog).mockReset();
+    vi.mocked(disbursementTransferModel.updateTransferLogById).mockReset();
+    vi.mocked(payosService.createPayosTransfer).mockReset();
+    vi.mocked(payosService.getPayosTransferStatusByReferenceId).mockReset();
+    vi.mocked(disbursementService.processDisbursementTransferWebhook).mockReset();
+    vi.mocked(disbursementTransferQueue.removePendingJobsByRequestId).mockReset();
+    vi.mocked(notificationService.createUserNotification).mockReset();
   });
 
   afterEach(() => {

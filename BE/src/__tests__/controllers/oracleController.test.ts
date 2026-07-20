@@ -25,11 +25,20 @@ vi.mock('../../models/oracleOverrideRequestModel', () => ({
 
 vi.mock('../../models/projectGeofenceModel', () => ({
   findGeofenceByProjectId: vi.fn(),
+  MIN_GEOFENCE_POLYGON_POINTS: 3,
+  MAX_GEOFENCE_POLYGON_POINTS: 100,
   upsertProjectGeofence: vi.fn()
 }));
 
 vi.mock('../../repositories/projectRepository', () => ({
-  findProjectById: vi.fn()
+  findProjectById: vi.fn(),
+  findProjectsByIdList: vi.fn()
+}));
+
+// [B3] Controller detail endpoint đọc geofenceSnapshot bất biến qua findVerificationById.
+// Mock để test không chạm MongoDB thật (tránh treo timeout).
+vi.mock('../../models/oracleVerificationResultModel', () => ({
+  findVerificationById: vi.fn()
 }));
 
 vi.mock('../../services/oracleService', () => ({
@@ -56,10 +65,20 @@ vi.mock('../../utils/apiResponse', () => ({
   sendErrorFromUnknown: vi.fn()
 }));
 
-import { handleGetOverrideRequestById, handleGetPendingOverrides } from '../../controllers/oracleController';
+import {
+  handleGetOverrideRequestById,
+  handleGetPendingOverrides,
+  handleUpsertGeofence,
+  handleVerifyImage,
+  handleVerifyImageBatch
+} from '../../controllers/oracleController';
 import { findOverrideRequestById, findPendingOverrideRequests, findCommissionerInSnapshot } from '../../models/oracleOverrideRequestModel';
 import { sendSuccessResponse, sendErrorResponse } from '../../utils/apiResponse';
-import { findProjectById } from '../../repositories/projectRepository';
+import { findProjectById, findProjectsByIdList } from '../../repositories/projectRepository';
+import { findVerificationById } from '../../models/oracleVerificationResultModel';
+import { verifyEvidenceImage } from '../../services/oracleService';
+import { enqueueOracleVerification } from '../../queues/oracleQueue';
+import { upsertProjectGeofence } from '../../models/projectGeofenceModel';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -97,6 +116,125 @@ function buildOverrideRequest(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function buildProjectRecord(overrides: Record<string, unknown> = {}) {
+  return {
+    projectId: 'proj-001',
+    name: 'Dự án kiểm thử',
+    organizationId: 'org-001',
+    description: '',
+    goalAmount: 0,
+    deadline: new Date(),
+    status: 'ACTIVE',
+    evidenceCids: [],
+    evidenceFiles: [],
+    submittedAt: null,
+    reviewedAt: null,
+    reviewedBy: null,
+    rejectionReason: null,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    ...overrides
+  };
+}
+
+describe('handleVerifyImage — evidenceCid validation', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('[B3-security] 400 khi evidenceCid không đúng định dạng IPFS CID', async () => {
+    const req = {
+      body: { projectId: 'proj-001', evidenceCid: 'https://gateway.pinata.cloud/ipfs/QmBad' },
+      file: { buffer: Buffer.from('image'), size: 12, originalname: 'proof.jpg' },
+      authenticatedUser: { userId: 'org-001', role: 'organizations' }
+    } as unknown as AuthenticatedRequest;
+    const res = buildMockResponse();
+
+    await handleVerifyImage(req, res);
+
+    expect(sendErrorResponse).toHaveBeenCalledWith(res, 400, expect.any(String), 'VALIDATION_ERROR');
+    expect(findProjectById).not.toHaveBeenCalled();
+    expect(verifyEvidenceImage).not.toHaveBeenCalled();
+  });
+
+  it('[B3-security] trim CID hợp lệ trước khi gọi oracle service', async () => {
+    const validCid = 'QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG';
+    vi.mocked(findProjectById).mockResolvedValue(buildProjectRecord() as never);
+    vi.mocked(verifyEvidenceImage).mockResolvedValue({
+      isValid: true,
+      distance: 12,
+      reason: null,
+      verificationId: 'verif-001',
+      overrideRequestId: null
+    });
+    const req = {
+      body: { projectId: 'proj-001', evidenceCid: `  ${validCid}  ` },
+      file: { buffer: Buffer.from('image'), size: 12, originalname: 'proof.jpg' },
+      authenticatedUser: { userId: 'org-001', role: 'organizations' },
+      validatedFile: { isValid: true }
+    } as unknown as AuthenticatedRequest;
+    const res = buildMockResponse();
+
+    await handleVerifyImage(req, res);
+
+    expect(verifyEvidenceImage).toHaveBeenCalledWith(
+      expect.any(Buffer),
+      'proj-001',
+      'org-001',
+      validCid
+    );
+    expect(sendSuccessResponse).toHaveBeenCalledWith(res, 200, expect.any(String), expect.objectContaining({
+      verificationId: 'verif-001'
+    }));
+  });
+});
+
+describe('handleVerifyImageBatch — evidenceCid validation', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('[B3-security] 400 khi batch evidenceCids chứa CID không hợp lệ', async () => {
+    const req = {
+      body: { projectId: 'proj-001', evidenceCids: JSON.stringify(['not-a-cid']) },
+      files: [{ size: 12, originalname: 'proof.jpg' }],
+      authenticatedUser: { userId: 'org-001', role: 'organizations' }
+    } as unknown as AuthenticatedRequest;
+    const res = buildMockResponse();
+
+    await handleVerifyImageBatch(req, res);
+
+    expect(sendErrorResponse).toHaveBeenCalledWith(res, 400, expect.any(String), 'VALIDATION_ERROR');
+    expect(findProjectById).not.toHaveBeenCalled();
+    expect(enqueueOracleVerification).not.toHaveBeenCalled();
+  });
+});
+
+describe('handleUpsertGeofence — polygon bounds', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('[B3-performance] 400 khi polygon vượt quá giới hạn 100 điểm', async () => {
+    const polygon = Array.from({ length: 101 }, (_, index) => ({
+      lat: 10 + index * 0.0001,
+      lng: 106 + index * 0.0001
+    }));
+    const req = {
+      params: { projectId: 'proj-001' },
+      body: { polygon, radiusMeters: 500 },
+      authenticatedUser: { userId: 'org-001', role: 'organizations' }
+    } as unknown as AuthenticatedRequest;
+    const res = buildMockResponse();
+
+    await handleUpsertGeofence(req, res);
+
+    expect(sendErrorResponse).toHaveBeenCalledWith(res, 400, expect.any(String), 'VALIDATION_ERROR');
+    expect(findProjectById).not.toHaveBeenCalled();
+    expect(upsertProjectGeofence).not.toHaveBeenCalled();
+  });
+});
+
 // ─── Tests: handleGetOverrideRequestById ─────────────────────────────────────
 
 describe('handleGetOverrideRequestById', () => {
@@ -104,6 +242,8 @@ describe('handleGetOverrideRequestById', () => {
     vi.clearAllMocks();
     // [B4-fix #6] findProjectById mặc định trả null → controller fallback sang projectId
     vi.mocked(findProjectById).mockResolvedValue(null as never);
+    // [B3] Mặc định không có snapshot → geofenceSnapshot = null (record cũ hoặc NO_GEOFENCE)
+    vi.mocked(findVerificationById).mockResolvedValue(null);
   });
 
   it('[T4] 401 khi chưa đăng nhập', async () => {
@@ -449,6 +589,8 @@ describe('handleGetOverrideRequestById — data exposure (B4-fix #3)', () => {
     vi.clearAllMocks();
     // [B4-fix #6] Mặc định project không tìm thấy để test fallback
     vi.mocked(findProjectById).mockResolvedValue(null as never);
+    // [B3] Mặc định không có snapshot → geofenceSnapshot = null
+    vi.mocked(findVerificationById).mockResolvedValue(null);
   });
 
   it('[T4-fix] commissionerSnapshot KHÔNG lộ userId của người khác', async () => {
@@ -571,6 +713,72 @@ describe('handleGetOverrideRequestById — data exposure (B4-fix #3)', () => {
     const admin2Entries = responseData.commissionerSnapshot.filter(e => e.role === 'admin' && !e.isCurrentUser);
     expect(admin2Entries.length).toBeGreaterThanOrEqual(1);
   });
+
+  // [B3-BE-01] Detail endpoint enrich geofenceSnapshot bất biến từ verification result
+  it('[B3] trả geofenceSnapshot từ verification result cho Admin/Regulatory', async () => {
+    vi.mocked(findOverrideRequestById).mockResolvedValue(
+      buildOverrideRequest({ verificationId: 'verif-001' }) as never
+    );
+    const snapshot = {
+      polygon: [
+        { lat: 10.77, lng: 106.70 },
+        { lat: 10.78, lng: 106.70 },
+        { lat: 10.78, lng: 106.71 }
+      ],
+      centroid: { lat: 10.775, lng: 106.703 },
+      radiusMeters: 1000
+    };
+    vi.mocked(findVerificationById).mockResolvedValue({ geofenceSnapshot: snapshot } as never);
+
+    const req = buildMockRequest();
+    const res = buildMockResponse();
+
+    await handleGetOverrideRequestById(req, res);
+
+    const callArgs = vi.mocked(sendSuccessResponse).mock.calls[0];
+    const responseData = callArgs?.[3] as { geofenceSnapshot: typeof snapshot | null };
+    expect(responseData.geofenceSnapshot).toEqual(snapshot);
+    expect(responseData.geofenceSnapshot?.radiusMeters).toBe(1000);
+  });
+
+  // [B3-BE-01] Record cũ thiếu snapshot → trả null (FE hiển thị banner cảnh báo, không vẽ data giả)
+  it('[B3] trả geofenceSnapshot = null khi verification record cũ chưa có snapshot', async () => {
+    vi.mocked(findOverrideRequestById).mockResolvedValue(
+      buildOverrideRequest({ verificationId: 'verif-legacy' }) as never
+    );
+    vi.mocked(findVerificationById).mockResolvedValue({ geofenceSnapshot: null } as never);
+
+    const req = buildMockRequest();
+    const res = buildMockResponse();
+
+    await handleGetOverrideRequestById(req, res);
+
+    const callArgs = vi.mocked(sendSuccessResponse).mock.calls[0];
+    const responseData = callArgs?.[3] as { geofenceSnapshot: unknown; geofenceSnapshotUnavailable: boolean };
+    expect(responseData.geofenceSnapshot).toBeNull();
+    // Record cũ thật sự không có snapshot → KHÔNG bật cờ unavailable (phân biệt với lỗi đọc DB)
+    expect(responseData.geofenceSnapshotUnavailable).toBe(false);
+  });
+
+  // [B3-fix] Đọc verification thất bại (DB lỗi) → KHÔNG nuốt thành null im lặng.
+  // Trả HTTP 200 nhưng bật cờ geofenceSnapshotUnavailable=true để FE hiển thị lỗi/retry riêng,
+  // tránh reviewer hiểu nhầm "record cũ thiếu snapshot" khi thực chất dữ liệu không tải được.
+  it('[B3] bật geofenceSnapshotUnavailable=true khi đọc verification thất bại (không nuốt lỗi)', async () => {
+    vi.mocked(findOverrideRequestById).mockResolvedValue(
+      buildOverrideRequest({ verificationId: 'verif-db-error' }) as never
+    );
+    vi.mocked(findVerificationById).mockRejectedValue(new Error('Mongo connection lost'));
+
+    const req = buildMockRequest();
+    const res = buildMockResponse();
+
+    await handleGetOverrideRequestById(req, res);
+
+    const callArgs = vi.mocked(sendSuccessResponse).mock.calls[0];
+    const responseData = callArgs?.[3] as { geofenceSnapshot: unknown; geofenceSnapshotUnavailable: boolean };
+    expect(responseData.geofenceSnapshot).toBeNull();
+    expect(responseData.geofenceSnapshotUnavailable).toBe(true);
+  });
 });
 
 // ─── Tests: handleGetPendingOverrides — data exposure (B4-fix #3) ────────────
@@ -580,6 +788,8 @@ describe('handleGetPendingOverrides — data exposure (B4-fix #3)', () => {
     vi.clearAllMocks();
     // [B4-fix #6] Mặc định project không tìm thấy → fallback projectDisplayName = projectId
     vi.mocked(findProjectById).mockResolvedValue(null as never);
+    // [P1-fix] List endpoint batch lookup projectName qua findProjectsByIdList — mặc định mảng rỗng
+    vi.mocked(findProjectsByIdList).mockResolvedValue([] as never);
   });
 
   function buildListRequest(): AuthenticatedRequest {
@@ -622,5 +832,32 @@ describe('handleGetPendingOverrides — data exposure (B4-fix #3)', () => {
       expect(item.projectName).toBeNull();
       expect(item.projectDisplayName).toBe('proj-001');
     }
+  });
+
+  // [B3-BE-01] List KHÔNG lộ geofenceSnapshot và KHÔNG gọi findVerificationById (tránh N+1 + rò rỉ data)
+  it('[B3] list không kèm geofenceSnapshot và không truy vấn verification theo từng item', async () => {
+    vi.mocked(findPendingOverrideRequests).mockResolvedValue([
+      buildOverrideRequest({ overrideRequestId: 'req-001', projectId: 'proj-001', verificationId: 'verif-001' }) as never,
+      buildOverrideRequest({ overrideRequestId: 'req-002', projectId: 'proj-002', verificationId: 'verif-002' }) as never
+    ]);
+    vi.mocked((await import('../../models/oracleOverrideRequestModel')).countPendingOverrideRequests)
+      .mockResolvedValue(2);
+
+    const req = buildListRequest();
+    const res = buildMockResponse();
+
+    await handleGetPendingOverrides(req, res);
+
+    const callArgs = vi.mocked(sendSuccessResponse).mock.calls[0];
+    const responseData = callArgs?.[3] as {
+      items: Array<Record<string, unknown>>;
+    };
+
+    expect(responseData.items).toHaveLength(2);
+    for (const item of responseData.items) {
+      expect(item.geofenceSnapshot).toBeUndefined();
+    }
+    // Không có lookup verification per-item ở list endpoint
+    expect(vi.mocked(findVerificationById)).not.toHaveBeenCalled();
   });
 });

@@ -11,6 +11,18 @@ import type { GpsCoordinate } from './projectGeofenceModel';
 export type OracleVerificationStatus = 'VALID' | 'INVALID' | 'NO_GPS' | 'NO_GEOFENCE';
 
 /**
+ * Ảnh chụp bất biến của geofence tại đúng thời điểm Oracle xác minh (B3).
+ * Lưu polygon, centroid và bán kính đã dùng để verify — dùng cho Admin/Regulatory
+ * review lại trên bản đồ mà không bị ảnh hưởng khi Organization sửa geofence sau này.
+ * null khi project chưa có geofence (status NO_GEOFENCE).
+ */
+export type GeofenceSnapshot = {
+  polygon: GpsCoordinate[];   // Vùng ranh giới tại thời điểm verify
+  centroid: GpsCoordinate;    // Tâm polygon dùng làm điểm tham chiếu Haversine
+  radiusMeters: number;       // Bán kính đã clamp thực sự dùng để verify
+};
+
+/**
  * Bản ghi kết quả xác minh EXIF GPS của ảnh minh chứng.
  */
 export type OracleVerificationResultRecord = {
@@ -23,6 +35,7 @@ export type OracleVerificationResultRecord = {
   gpsFromProject: GpsCoordinate;         // Centroid geofence của project
   distanceMeters: number | null;         // Khoảng cách Haversine (mét), null nếu NO_GPS
   radiusMeters: number;                  // Bán kính per-project tại thời điểm verify
+  geofenceSnapshot: GeofenceSnapshot | null; // Ảnh chụp geofence bất biến lúc verify (B3), null khi NO_GEOFENCE
   overrideRequestId: string | null;      // Liên kết đến oracle_override_requests nếu có
   processedAt: Date;
   createdAt: Date;
@@ -31,6 +44,16 @@ export type OracleVerificationResultRecord = {
 
 const gpsCoordinateSchema = new Schema<GpsCoordinate>(
   { lat: { type: Number, required: true }, lng: { type: Number, required: true } },
+  { _id: false }
+);
+
+// Sub-schema cho geofence snapshot bất biến (B3) — lưu nguyên trạng lúc verify
+const geofenceSnapshotSchema = new Schema<GeofenceSnapshot>(
+  {
+    polygon: { type: [gpsCoordinateSchema], required: true },
+    centroid: { type: gpsCoordinateSchema, required: true },
+    radiusMeters: { type: Number, required: true }
+  },
   { _id: false }
 );
 
@@ -45,6 +68,8 @@ const oracleVerificationResultSchema = new Schema<OracleVerificationResultRecord
     gpsFromProject: { type: gpsCoordinateSchema, required: true },
     distanceMeters: { type: Number, default: null },
     radiusMeters: { type: Number, required: true },
+    // Snapshot bất biến của geofence lúc verify — null khi project chưa có geofence
+    geofenceSnapshot: { type: geofenceSnapshotSchema, default: null },
     overrideRequestId: { type: String, default: null, index: true },
     processedAt: { type: Date, required: true }
   },

@@ -108,7 +108,8 @@ describe('handleCreateGuestSession', () => {
       validWalletAddress,
       validFingerprintHash,
       '127.0.0.1',
-      'TestBrowser/1.0'
+      'TestBrowser/1.0',
+      undefined
     );
     expect(res.status).toHaveBeenCalledWith(201);
   });

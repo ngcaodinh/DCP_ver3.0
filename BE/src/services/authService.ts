@@ -363,7 +363,8 @@ export async function loginWithGoogle(
         lastLoginUserAgent: userAgent,
         correlationId,
         fcmDeviceToken: null,
-        phoneNumber: null
+        phoneNumber: null,
+        authVersion: 1
       });
     } catch (error) {
       // Logic phức tạp: xử lý trường hợp tạo user đồng thời gây lỗi trùng email, chuyển sang luồng đăng nhập.

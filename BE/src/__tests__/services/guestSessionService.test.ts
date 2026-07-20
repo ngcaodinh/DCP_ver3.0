@@ -27,6 +27,10 @@ vi.mock('../../services/guestRiskService', () => ({
   computeRiskLevelAndMultiplier: vi.fn()
 }));
 
+vi.mock('../../services/zeroDevService', () => ({
+  encryptOwnerPrivateKey: vi.fn().mockResolvedValue('encrypted-owner-private-key')
+}));
+
 vi.mock('../../config/guestJsonWebToken', () => ({
   signGuestSessionToken: vi.fn()
 }));

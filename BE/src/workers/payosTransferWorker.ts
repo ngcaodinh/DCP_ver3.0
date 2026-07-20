@@ -383,6 +383,14 @@ export async function processTransferJob(job: Job<DisbursementTransferJobData>):
         completedAt: new Date(finalEndTime),
         durationMs: finalDurationMs
       });
+      await processDisbursementTransferWebhook({
+        requestId,
+        transferId: transferResult.transferId,
+        status: 'SUCCESS'
+      }, {
+        skipChecksumVerify: true,
+        source: 'internal_poll'
+      });
       return;
     }
 

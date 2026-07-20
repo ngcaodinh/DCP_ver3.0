@@ -48,6 +48,7 @@ const RADIUS_MIN = 100;
 const RADIUS_MAX = 2000;
 const RADIUS_DEFAULT = 500;
 const AREA_WARNING_KM2 = 100;
+const MAX_GEOFENCE_POLYGON_POINTS = 100;
 
 // =============================================================================
 // HELPERS
@@ -198,11 +199,16 @@ export default function GeofenceEditor({
   const isAreaLarge = areaKm2 > AREA_WARNING_KM2;
   const centroid = points.length >= 3 ? calcCentroid(points) : null;
 
+  /** Thêm điểm geofence mới và chặn vượt giới hạn polygon để tránh payload quá lớn. */
   const handleAddPoint = useCallback((point: GpsPoint) => {
+    if (points.length >= MAX_GEOFENCE_POLYGON_POINTS) {
+      setSaveError(`Polygon chỉ được có tối đa ${MAX_GEOFENCE_POLYGON_POINTS} điểm.`);
+      return;
+    }
     setPoints((prev) => [...prev, point]);
     setSaveError(null);
     setSaveSuccess(false);
-  }, []);
+  }, [points.length]);
 
   const handleDeletePoint = useCallback((idx: number) => {
     setPoints((prev) => prev.filter((_, i) => i !== idx));
@@ -221,10 +227,15 @@ export default function GeofenceEditor({
     setInitialized(false);
   };
 
+  /** Validate và gửi polygon geofence lên API khi người dùng lưu vùng địa lý. */
   const handleSave = () => {
     // Validation theo spec B5 — hiển thị error message, không dùng disabled để chặn
     if (points.length < 3) {
       setSaveError('Polygon phải có ít nhất 3 điểm.');
+      return;
+    }
+    if (points.length > MAX_GEOFENCE_POLYGON_POINTS) {
+      setSaveError(`Polygon chỉ được có tối đa ${MAX_GEOFENCE_POLYGON_POINTS} điểm.`);
       return;
     }
     if (radiusMeters > RADIUS_MAX) {

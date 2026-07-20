@@ -69,6 +69,34 @@ export type OverrideRequestItem = {
   createdAt: string;
 };
 
+/**
+ * Snapshot geofence bất biến lúc Oracle verify (khớp GeofenceSnapshot ở BE).
+ * Chỉ có ở detail endpoint. null khi record cũ chưa lưu snapshot hoặc project NO_GEOFENCE.
+ */
+export type GeofenceSnapshotData = {
+  polygon: GpsCoordinate[];
+  centroid: GpsCoordinate;
+  radiusMeters: number;
+};
+
+/**
+ * Chi tiết một override request từ GET /api/oracle/override-requests/:id.
+ * Kế thừa OverrideRequestItem, bổ sung geofenceSnapshot phục vụ review bản đồ B3.
+ */
+export type OverrideRequestDetail = OverrideRequestItem & {
+  /**
+   * Snapshot geofence bất biến. null khi record cũ/NO_GEOFENCE thật sự không có snapshot.
+   * Chỉ đáng tin khi geofenceSnapshotUnavailable=false.
+   */
+  geofenceSnapshot: GeofenceSnapshotData | null;
+  /**
+   * true khi BE ĐỌC snapshot từ DB thất bại (không phân biệt được có/không có snapshot).
+   * Khác hoàn toàn với geofenceSnapshot=null (record cũ) — FE phải hiển thị trạng thái lỗi/retry
+   * riêng cho khối bản đồ, không dùng banner "record cũ thiếu snapshot" gây hiểu nhầm.
+   */
+  geofenceSnapshotUnavailable?: boolean;
+};
+
 // =============================================================================
 // API RESPONSE
 // =============================================================================
@@ -97,9 +125,6 @@ export const MIN_VOTE_REASON_LENGTH = 10;
 
 /** Ngưỡng tối đa ký tự lý do vote (đồng bộ với Zod schema ở BE). */
 export const MAX_VOTE_REASON_LENGTH = 1000;
-
-/** Khoảng cách Haversine (m) vượt ngưỡng → cảnh báo. */
-export const GEOFENCE_DISTANCE_WARNING_METERS = 500;
 
 /** Magic id dùng cho polling signal (không phải real override request). */
 export const OVERRIDE_POLLING_SIGNAL_ID = '__poll__';

@@ -3,11 +3,14 @@ import { create as createExifParser } from 'exif-parser';
 import { getLogger } from '../config/logger';
 import {
   findGeofenceByProjectId,
+  MAX_GEOFENCE_POLYGON_POINTS,
+  MIN_GEOFENCE_POLYGON_POINTS,
   type GpsCoordinate
 } from '../models/projectGeofenceModel';
 import {
   createOracleVerificationResult,
-  linkOverrideRequestToVerification
+  linkOverrideRequestToVerification,
+  type GeofenceSnapshot
 } from '../models/oracleVerificationResultModel';
 import {
   createOracleOverrideRequest
@@ -45,6 +48,13 @@ export type OracleVerificationResult = {
   verificationId: string;
   overrideRequestId: string | null;
 };
+
+type CommissionerSnapshotEntry = { userId: string; role: 'admin' | 'regulatory' };
+
+/** Kiểm tra role có thuộc tập commissioner được phép vote override hay không. */
+function isCommissionerRole(role: string): role is CommissionerSnapshotEntry['role'] {
+  return role === 'admin' || role === 'regulatory';
+}
 
 /**
  * Trích xuất tọa độ GPS từ EXIF metadata của ảnh.
@@ -115,9 +125,11 @@ export function haversineDistance(a: GpsCoordinate, b: GpsCoordinate): number {
  * Dùng để tạo commissionerSnapshot khi có override request.
  * Query sau mỗi request để đảm bảo snapshot phản ánh đúng trạng thái hệ thống tại thời điểm tạo.
  */
-async function fetchCommissionerSnapshot(): Promise<Array<{ userId: string; role: string }>> {
+async function fetchCommissionerSnapshot(): Promise<CommissionerSnapshotEntry[]> {
   const commissioners = await findActiveCommissioners();
-  return commissioners.map(u => ({ userId: u.id, role: u.role }));
+  return commissioners
+    .filter((user): user is typeof user & { role: CommissionerSnapshotEntry['role'] } => isCommissionerRole(user.role))
+    .map(u => ({ userId: u.id, role: u.role }));
 }
 
 /**
@@ -157,9 +169,22 @@ export async function verifyEvidenceImage(
     return await handleNoGeofence(verificationId, projectId, organizationId, evidenceCid, buffer, disbursementRequestId);
   }
 
+  if (geofence.polygon.length < MIN_GEOFENCE_POLYGON_POINTS || geofence.polygon.length > MAX_GEOFENCE_POLYGON_POINTS) {
+    throw new Error(`Geofence polygon phải có từ ${MIN_GEOFENCE_POLYGON_POINTS} đến ${MAX_GEOFENCE_POLYGON_POINTS} điểm.`);
+  }
+
   // Clamp radius: floor 100m và cap 2000m theo spec, bảo vệ khỏi giá trị DB không hợp lệ
   const radiusMeters = Math.min(Math.max(geofence.radiusMeters, MIN_RADIUS_METERS), MAX_RADIUS_METERS);
   const projectCentroid = geofence.centroid;
+
+  // Copy snapshot bất biến của geofence NGAY TRƯỚC Haversine (B3):
+  // lưu nguyên polygon/centroid/radius đã dùng để verify. Nếu Organization sửa geofence
+  // sau này, snapshot này không đổi → Admin review đúng bằng chứng cũ trên bản đồ.
+  const geofenceSnapshot: GeofenceSnapshot = {
+    polygon: geofence.polygon.map((point) => ({ lat: point.lat, lng: point.lng })),
+    centroid: { lat: projectCentroid.lat, lng: projectCentroid.lng },
+    radiusMeters
+  };
 
   // Bước 2: Trích xuất EXIF GPS
   const gpsFromImage = extractExifGps(buffer);
@@ -173,7 +198,7 @@ export async function verifyEvidenceImage(
   if (!gpsFromImage) {
     return await handleNoGps(
       verificationId, projectId, organizationId, evidenceCid,
-      projectCentroid, radiusMeters, disbursementRequestId
+      projectCentroid, radiusMeters, geofenceSnapshot, disbursementRequestId
     );
   }
 
@@ -192,12 +217,12 @@ export async function verifyEvidenceImage(
   if (isInRadius) {
     return await handleValid(
       verificationId, projectId, organizationId, evidenceCid,
-      gpsFromImage, projectCentroid, distanceMeters, radiusMeters
+      gpsFromImage, projectCentroid, distanceMeters, radiusMeters, geofenceSnapshot
     );
   } else {
     return await handleOutOfGeofence(
       verificationId, projectId, organizationId, evidenceCid,
-      gpsFromImage, projectCentroid, distanceMeters, radiusMeters, disbursementRequestId
+      gpsFromImage, projectCentroid, distanceMeters, radiusMeters, geofenceSnapshot, disbursementRequestId
     );
   }
 }
@@ -211,7 +236,8 @@ async function handleValid(
   gpsFromImage: GpsCoordinate,
   gpsFromProject: GpsCoordinate,
   distanceMeters: number,
-  radiusMeters: number
+  radiusMeters: number,
+  geofenceSnapshot: GeofenceSnapshot
 ): Promise<OracleVerificationResult> {
   await createOracleVerificationResult({
     verificationId,
@@ -223,6 +249,7 @@ async function handleValid(
     gpsFromProject,
     distanceMeters,
     radiusMeters,
+    geofenceSnapshot,
     overrideRequestId: null,
     processedAt: new Date()
   });
@@ -252,6 +279,7 @@ async function handleOutOfGeofence(
   gpsFromProject: GpsCoordinate,
   distanceMeters: number,
   radiusMeters: number,
+  geofenceSnapshot: GeofenceSnapshot,
   disbursementRequestId: string | null
 ): Promise<OracleVerificationResult> {
   // Bước 1: tạo verification (overrideRequestId=null sẽ được link ở bước 3)
@@ -265,6 +293,7 @@ async function handleOutOfGeofence(
     gpsFromProject,
     distanceMeters,
     radiusMeters,
+    geofenceSnapshot,
     overrideRequestId: null,
     processedAt: new Date()
   });
@@ -321,6 +350,7 @@ async function handleNoGps(
   evidenceCid: string,
   gpsFromProject: GpsCoordinate,
   radiusMeters: number,
+  geofenceSnapshot: GeofenceSnapshot,
   disbursementRequestId: string | null
 ): Promise<OracleVerificationResult> {
   await createOracleVerificationResult({
@@ -333,6 +363,7 @@ async function handleNoGps(
     gpsFromProject,
     distanceMeters: null,
     radiusMeters,
+    geofenceSnapshot,
     overrideRequestId: null,
     processedAt: new Date()
   });
@@ -400,6 +431,8 @@ async function handleNoGeofence(
     gpsFromProject: placeholderCentroid,
     distanceMeters: null,
     radiusMeters: DEFAULT_RADIUS_METERS,
+    // Project chưa có geofence → không có snapshot để lưu (B3 Q2)
+    geofenceSnapshot: null,
     overrideRequestId: null,
     processedAt: new Date()
   });

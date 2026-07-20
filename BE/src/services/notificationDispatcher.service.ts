@@ -214,6 +214,7 @@ async function dispatchSmsChannel(
   title: string,
   content: string,
   notificationType: NotificationType,
+  metadata: Record<string, unknown> | undefined,
   dispatchContext: DispatchContext
 ): Promise<DeliveryResult> {
   if (!dispatchContext.phoneNumber) {
@@ -315,7 +316,7 @@ export async function dispatchNotification(
         result = await dispatchPushChannel(notificationId, title, content, notificationType, metadata, dispatchContext);
         break;
       case 'SMS':
-        result = await dispatchSmsChannel(notificationId, title, content, notificationType, dispatchContext);
+        result = await dispatchSmsChannel(notificationId, title, content, notificationType, metadata, dispatchContext);
         break;
       case 'IN_APP':
         // IN_APP: success ngay (DB record đã được tạo bởi notificationService)

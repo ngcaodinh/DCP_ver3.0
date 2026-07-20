@@ -113,21 +113,21 @@ export async function submitOverrideVote(
         overrideRequestId
       });
     } else {
-      void logOverrideExpired(updatedRequest, commissionerId).catch((err: Error) => {
+      void Promise.resolve(logOverrideExpired(updatedRequest, commissionerId)).catch((err: Error) => {
         logger.error('Ghi multisig_override_logs EXPIRED thất bại.', {
           overrideRequestId, errorMessage: err.message
         });
       });
     }
     // [B2-fix #2] Ghi audit trail — OVERRIDE_EXPIRED phải có trong compliance log
-    void createAdminAuditLog({
+    void Promise.resolve(createAdminAuditLog({
       auditId: randomUUID(),
       adminUserId: commissionerId,
       action: 'OVERRIDE_EXPIRED',
       targetRequestId: overrideRequestId,
       reason: 'Commissioner set thay đổi (role hoặc thành viên)',
       metadata: { projectId: overrideRequest.projectId, triggeredBy: commissionerId }
-    }).catch((err: Error) => {
+    })).catch((err: Error) => {
       logger.error('Ghi audit log OVERRIDE_EXPIRED thất bại.', {
         overrideRequestId, errorMessage: err.message
       });
@@ -243,20 +243,20 @@ async function evaluateVoteOutcome(
     if (resolved) {
       // [B2-fix #2] Ghi audit trail ngay khi resolve — trước notify để đảm bảo trail không bị miss
       const rejectingVote = votes.find(v => v.vote === 'REJECT');
-      void createAdminAuditLog({
+      void Promise.resolve(createAdminAuditLog({
         auditId: randomUUID(),
         adminUserId: rejectingVote?.commissionerId ?? 'unknown',
         action: 'OVERRIDE_VOTE_REJECT',
         targetRequestId: resolved.overrideRequestId,
         reason: rejectingVote?.reason ?? null,
         metadata: { projectId: resolved.projectId, disbursementRequestId: resolved.disbursementRequestId }
-      }).catch((err: Error) => {
+      })).catch((err: Error) => {
         logger.error('Ghi audit log OVERRIDE_VOTE_REJECT thất bại.', {
           overrideRequestId: resolved.overrideRequestId, errorMessage: err.message
         });
       });
       // [D5] Ghi audit trail vào multisig_override_logs
-      void logOverrideRejected(resolved, rejectingVote!).catch((err: Error) => {
+      void Promise.resolve(logOverrideRejected(resolved, rejectingVote!)).catch((err: Error) => {
         logger.error('Ghi multisig_override_logs REJECTED thất bại.', {
           overrideRequestId: resolved.overrideRequestId, errorMessage: err.message
         });
@@ -297,7 +297,7 @@ async function evaluateVoteOutcome(
     );
 
     // [B2-fix #2] Ghi audit trail cho APPROVED — compliance yêu cầu immutable log
-    void createAdminAuditLog({
+    void Promise.resolve(createAdminAuditLog({
       auditId: randomUUID(),
       adminUserId: votes[votes.length - 1]?.commissionerId ?? 'unknown',
       action: 'OVERRIDE_VOTE_APPROVE',
@@ -308,14 +308,14 @@ async function evaluateVoteOutcome(
         disbursementRequestId: resolved.disbursementRequestId,
         disbursementAutoApproved
       }
-    }).catch((err: Error) => {
+    })).catch((err: Error) => {
       logger.error('Ghi audit log OVERRIDE_VOTE_APPROVE thất bại.', {
         overrideRequestId: resolved.overrideRequestId, errorMessage: err.message
       });
     });
 
     // [D5] Ghi audit trail vào multisig_override_logs
-    void logOverrideApproved(resolved, votes[votes.length - 1]!, disbursementAutoApproved).catch((err: Error) => {
+    void Promise.resolve(logOverrideApproved(resolved, votes[votes.length - 1]!, disbursementAutoApproved)).catch((err: Error) => {
       logger.error('Ghi multisig_override_logs APPROVED thất bại.', {
         overrideRequestId: resolved.overrideRequestId, errorMessage: err.message
       });

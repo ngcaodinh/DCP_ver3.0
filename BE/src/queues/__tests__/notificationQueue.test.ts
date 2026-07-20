@@ -2,6 +2,12 @@
  * Test cho notificationQueue - kiểm tra DLQ queue và moveToDLQ function.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { NotificationJobData } from '../notificationQueue';
+
+interface BullMockModule {
+  __mockAdd: ReturnType<typeof vi.fn>;
+  __mockRemove: ReturnType<typeof vi.fn>;
+}
 
 // Mock tất cả dependencies TRƯỚC KHI import module
 vi.mock('bull', () => {
@@ -90,13 +96,13 @@ describe('NotificationQueue - DLQ Config', () => {
 
 describe('NotificationQueue - moveNotificationToDLQ', () => {
   let moveNotificationToDLQ: (job: any) => Promise<void>;
-  let mockAdd: any;
-  let mockRemove: any;
+  let mockAdd: ReturnType<typeof vi.fn>;
+  let mockRemove: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
     vi.clearAllMocks();
     // Lấy mock functions từ Bull mock
-    const BullMock = await import('bull');
+    const BullMock = await import('bull') as unknown as BullMockModule;
     mockAdd = BullMock.__mockAdd;
     mockRemove = BullMock.__mockRemove;
 
@@ -168,8 +174,6 @@ describe('NotificationQueue - moveNotificationToDLQ', () => {
 
 describe('NotificationQueue - JobData Type', () => {
   it('nên export đúng NotificationJobData type', async () => {
-    const { NotificationJobData } = await import('../notificationQueue');
-
     const validJobData: NotificationJobData = {
       notificationId: 'NOTI-123',
       userId: 'user-456',

@@ -33,11 +33,22 @@ function arrayBufferToHex(source: ArrayBuffer | ArrayBufferLike | Uint8Array): s
 }
 
 /**
+ * Tạo ArrayBuffer thuần từ Uint8Array.
+ * Mục đích: Web Crypto trong Node/jsdom từ chối SharedArrayBuffer hoặc buffer view không chuẩn.
+ */
+function toPlainBytes(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
+  const buffer = new ArrayBuffer(bytes.byteLength);
+  const copy = new Uint8Array(buffer);
+  copy.set(bytes);
+  return copy;
+}
+
+/**
  * Chuyển chuỗi hex thành ArrayBuffer thuần (không phải SharedArrayBuffer).
  * @param hex - Chuỗi hex cần chuyển đổi
  * @returns ArrayBuffer chứa bytes tương ứng
  */
-function hexToArrayBuffer(hex: string): ArrayBuffer {
+function hexToBytes(hex: string): Uint8Array<ArrayBuffer> {
   // Strip 0x prefix nếu có
   const cleanHex = hex.startsWith('0x') ? hex.slice(2) : hex;
 
@@ -51,7 +62,7 @@ function hexToArrayBuffer(hex: string): ArrayBuffer {
     bytes[index / 2] = parseInt(cleanHex.substring(index, index + 2), 16);
   }
   // slice() tạo copy với ArrayBuffer thuần, tránh SharedArrayBuffer
-  return bytes.slice().buffer as ArrayBuffer;
+  return toPlainBytes(bytes);
 }
 
 /**
@@ -87,17 +98,17 @@ async function deriveAesKey(
 ): Promise<CryptoKey> {
   const passwordString = `${KEY_DERIVATION_CONTEXT}|${deviceFingerprint}|${serverSalt}`;
   const encoder = new TextEncoder();
-  const passwordBuffer = encoder.encode(passwordString);
+  const passwordBytes = toPlainBytes(encoder.encode(passwordString));
 
   // Dùng ArrayBuffer thuần cho salt — tránh SharedArrayBuffer TypeScript error
-  const combinedSalt = hexToArrayBuffer(serverSalt + clientSalt);
+  const combinedSalt = hexToBytes(serverSalt + clientSalt);
 
   // Nhường quyền cho main thread trước khi bắt đầu CPU-intensive PBKDF2
   await yieldToMain();
 
   const keyMaterial = await crypto.subtle.importKey(
     'raw',
-    passwordBuffer,
+    passwordBytes,
     'PBKDF2',
     false,
     ['deriveBits', 'deriveKey'],
@@ -140,7 +151,7 @@ export async function encryptOwnerKey(
   crypto.getRandomValues(ivBytes);
   const iv = arrayBufferToHex(ivBytes);
   // Dùng ArrayBuffer thuần cho IV trong AES-GCM params
-  const ivBuffer = ivBytes.slice().buffer as ArrayBuffer;
+  const ivBuffer = toPlainBytes(ivBytes);
 
   const aesKey = await deriveAesKey(deviceFingerprint, serverSalt, clientSalt);
 
@@ -148,12 +159,12 @@ export async function encryptOwnerKey(
   // để đảm bảo consistent format: 64 ký tự hex không có 0x (dùng cho cả ethers và non-ethers)
   const cleanOwnerKey = ownerKey.startsWith('0x') ? ownerKey.slice(2) : ownerKey;
   const encoder = new TextEncoder();
-  const ownerKeyBuffer = encoder.encode(cleanOwnerKey);
+  const ownerKeyBytes = toPlainBytes(encoder.encode(cleanOwnerKey));
 
   const encryptedBuffer = await crypto.subtle.encrypt(
     { name: 'AES-GCM', iv: ivBuffer },
     aesKey,
-    ownerKeyBuffer,
+    ownerKeyBytes,
   );
 
   const encryptedHex = arrayBufferToHex(encryptedBuffer);
@@ -185,9 +196,9 @@ export async function decryptOwnerKey(
   let decryptedBuffer: ArrayBuffer;
   try {
     decryptedBuffer = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv: hexToArrayBuffer(iv) },
+      { name: 'AES-GCM', iv: hexToBytes(iv) },
       aesKey,
-      hexToArrayBuffer(encryptedOwnerKey),
+      hexToBytes(encryptedOwnerKey),
     );
   } catch {
     throw new Error('Giải mã thất bại. Vui lòng kiểm tra lại thiết bị và phiên làm việc.');

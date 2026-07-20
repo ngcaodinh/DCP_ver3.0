@@ -441,9 +441,12 @@ describe('sbtMintService - executeSbtMint', () => {
 
   it('concurrent executeSbtMint chỉ một tx thành công (race protection)', async () => {
     // Mock state machine: call 1 = PENDING → SUBMITTED → CONFIRMED; call 2 = CONFIRMED
+    resetWritableContractForTest();
+    let findCallCount = 0;
     const mockFind = async () => {
       // First call returns PENDING record, subsequent calls return CONFIRMED (mimics DB state after first call updates)
-      const isFirst = !(findImpactSbtMetadataByMintRequestId as ReturnType<typeof vi.fn>).mock.calls.length;
+      findCallCount += 1;
+      const isFirst = findCallCount === 1;
       if (isFirst) {
         return {
           sbtId: 'SBT-race',
@@ -488,13 +491,34 @@ describe('sbtMintService - executeSbtMint', () => {
     (markImpactSbtAsConfirmed as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'CONFIRMED' } as any);
     (findSbtMintDlqByMintRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(null);
 
+    const iface = new ethers.Interface([
+      'event SBTMinted(address indexed to, uint256 indexed tokenId, string tokenURI_)'
+    ]);
+    const encoded = iface.encodeEventLog('SBTMinted', [
+      '0x1234567890123456789012345678901234567890',
+      BigInt(99),
+      'ipfs://QmTest'
+    ]);
+
     const mockContract = {
       mint: vi.fn().mockResolvedValue({
         hash: '0xtxhash-first',
         wait: vi.fn().mockResolvedValue({
           status: 1,
           blockNumber: 67890,
-          logs: []
+          logs: [
+            {
+              address: '0xContractAddress',
+              topics: encoded.topics,
+              data: encoded.data,
+              logIndex: 0,
+              blockHash: '0xBlockHash',
+              transactionHash: '0xtxhash-first',
+              transactionIndex: 0,
+              blockNumber: 67890,
+              removed: false
+            }
+          ]
         })
       })
     };

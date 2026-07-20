@@ -94,6 +94,7 @@ function mockUnchangedCommissionerSet() {
 describe('submitOverrideVote', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockUnchangedCommissionerSet();
   });
 
   // ─── Guard: request không tồn tại ────────────────────────────────────────

@@ -82,10 +82,18 @@ vi.mock('../../models/unifiedTransactionModel', () => ({
 
 vi.mock('ethers', () => ({
   ethers: {
-    JsonRpcProvider: vi.fn(),
-    Interface: vi.fn(),
+    JsonRpcProvider: vi.fn(() => ({
+      getBlockNumber: vi.fn().mockResolvedValue(0),
+      getLogs: vi.fn().mockResolvedValue([]),
+    })),
+    Interface: vi.fn(() => ({
+      getEvent: vi.fn(() => ({ topicHash: '0xDonationReceived' })),
+      parseLog: vi.fn(() => null),
+    })),
   },
 }));
+
+import { getRedisClientIfReady } from '../../config/redis';
 
 import {
   resetModuleState,
@@ -96,6 +104,14 @@ import {
 beforeEach(() => {
   vi.clearAllMocks();
   resetModuleState();
+  mockRedisSet.mockResolvedValue('OK');
+  mockRedisGet.mockResolvedValue(null);
+  mockRedisDel.mockResolvedValue(1);
+  vi.mocked(getRedisClientIfReady).mockReturnValue({
+    set: mockRedisSet,
+    get: mockRedisGet,
+    del: mockRedisDel,
+  } as never);
 });
 
 afterEach(() => {
@@ -138,8 +154,8 @@ describe('acquireDistributedLock', () => {
 // =========================================================
 describe('runDataMapperCycle', () => {
   beforeEach(() => {
-    vi.stubEnv('BLOCKCHAIN_RPC_URL', '');
-    vi.stubEnv('DONATION_RANKING_CONTRACT_ADDRESS', '');
+    vi.stubEnv('BLOCKCHAIN_RPC_URL', 'http://localhost:8545');
+    vi.stubEnv('DONATION_RANKING_CONTRACT_ADDRESS', '0x1234567890123456789012345678901234567890');
   });
 
   afterEach(() => {
