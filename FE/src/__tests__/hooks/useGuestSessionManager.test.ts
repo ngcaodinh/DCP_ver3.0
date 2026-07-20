@@ -21,6 +21,7 @@ const mockIsSessionExpired = vi.hoisted(() => vi.fn());
 const mockCreateGuestSession = vi.hoisted(() => vi.fn());
 const mockGetGuestSessionStatus = vi.hoisted(() => vi.fn());
 const mockRefreshGuestSession = vi.hoisted(() => vi.fn());
+const mockGetGuestServerSalt = vi.hoisted(() => vi.fn());
 const mockGenerateDeviceFingerprint = vi.hoisted(() => vi.fn());
 const mockEncryptOwnerKey = vi.hoisted(() => vi.fn());
 const mockGetDonationErrorMessage = vi.hoisted(() => vi.fn());
@@ -45,6 +46,7 @@ vi.mock('@/app/utils/guestApiClient', () => ({
   createGuestSession: mockCreateGuestSession,
   getGuestSessionStatus: mockGetGuestSessionStatus,
   refreshGuestSession: mockRefreshGuestSession,
+  getGuestServerSalt: mockGetGuestServerSalt,
   GuestApiError: class extends Error {
     constructor(public errorCode: string, public statusCode: number) {
       super();
@@ -109,6 +111,9 @@ describe('useGuestSessionManager', () => {
       guestSessionToken: 'newtoken',
       expiresAt: new Date(Date.now() + 86400000).toISOString(),
       renewalCount: 1,
+    });
+    mockGetGuestServerSalt.mockResolvedValue({
+      serverSalt: 'c'.repeat(32),
     });
     mockGenerateDeviceFingerprint.mockResolvedValue('a'.repeat(64));
     mockEncryptOwnerKey.mockResolvedValue({ encryptedOwnerKey: 'deadbeef', clientSalt: 'c1', iv: 'i1' });
@@ -260,7 +265,7 @@ describe('useGuestSessionManager', () => {
       expect(mockGetGuestSessionStatus).toHaveBeenCalledWith('sess123', 'token123');
     });
 
-    it('should trigger BOOTSTRAPPING_NEW when localStorage is empty', async () => {
+    it('should bootstrap a new wallet when localStorage is empty', async () => {
       mockHasGuestWallet.mockReturnValue(false);
       mockLoadGuestWallet.mockReturnValue(null);
 
@@ -270,10 +275,11 @@ describe('useGuestSessionManager', () => {
         await result.current.restoreGuestSession();
       });
 
-      expect(result.current.initState.initStatus).toBe('BOOTSTRAPPING_NEW');
+      expect(result.current.initState.initStatus).toBe('READY');
+      expect(mockCreateGuestSession).toHaveBeenCalled();
     });
 
-    it('should trigger BOOTSTRAPPING_NEW when stored data is expired', async () => {
+    it('should clear expired storage and bootstrap a new wallet', async () => {
       mockHasGuestWallet.mockReturnValue(true);
       mockLoadGuestWallet.mockReturnValue({
         encryptedOwnerKey: 'a'.repeat(64),
@@ -295,7 +301,8 @@ describe('useGuestSessionManager', () => {
       });
 
       expect(mockClearGuestWallet).toHaveBeenCalled();
-      expect(result.current.initState.initStatus).toBe('BOOTSTRAPPING_NEW');
+      expect(result.current.initState.initStatus).toBe('READY');
+      expect(mockCreateGuestSession).toHaveBeenCalled();
     });
 
     it('should fall back to localStorage data when server is unreachable', async () => {

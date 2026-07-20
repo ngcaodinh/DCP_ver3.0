@@ -56,6 +56,7 @@ function redactSensitiveData(metadata?: Record<string, unknown>): Record<string,
 }
 
 type LogMetadata = {
+  [key: string]: unknown;
   sessionId?: string;
   correlationId?: string;
   errorMessage?: string;
@@ -280,8 +281,6 @@ type LogMetadata = {
   // Time
   startAt?: string;
   endAt?: string;
-  // Error
-  errorMessage?: string;
 };
 
 

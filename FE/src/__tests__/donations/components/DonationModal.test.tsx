@@ -6,6 +6,9 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import '@testing-library/jest-dom';
 
+const mockInitPayosDonation = vi.hoisted(() => vi.fn());
+const mockGetPayosDonationStatus = vi.hoisted(() => vi.fn());
+
 vi.mock('@/app/components/GuestWalletProvider', () => ({
   useGuestWallet: vi.fn(),
 }));
@@ -17,6 +20,11 @@ vi.mock('@/app/utils/authSession', () => ({
 vi.mock('@/app/donations/components/DonationModal.services', () => ({
   executeOneClickDonationRequest: vi.fn(() => Promise.resolve('0xtxhash123')),
   recordDonationByTransactionHash: vi.fn(() => Promise.resolve()),
+}));
+
+vi.mock('@/app/utils/guestPayosClient', () => ({
+  initPayosDonation: mockInitPayosDonation,
+  getPayosDonationStatus: mockGetPayosDonationStatus,
 }));
 
 vi.mock('@/app/utils/apiClient', () => ({
@@ -136,6 +144,11 @@ describe('DonationModal -- Routing Logic', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(readAuthSession).mockReturnValue({ accessToken: undefined });
+    mockInitPayosDonation.mockResolvedValue({
+      orderCode: 'PAYOS-001',
+      paymentUrl: 'https://payos.test/checkout/PAYOS-001',
+    });
+    mockGetPayosDonationStatus.mockResolvedValue({ status: 'PENDING_PAYMENT' });
   });
 
   describe('Guest no-wallet path', () => {
@@ -356,7 +369,7 @@ describe('DonationModal -- Routing Logic', () => {
       render(<DonationModal campaignItem={mockCampaign} onClose={defaultOnClose} onDonationSuccess={defaultOnSuccess} />);
 
       const input = screen.getByPlaceholderText(/Từ/);
-      fireEvent.change(input, { target: { value: '100' } });
+      fireEvent.change(input, { target: { value: '10000' } });
       const btn = findButton('Quyên góp ngay');
       await act(async () => { fireEvent.click(btn!); });
 
@@ -386,21 +399,16 @@ describe('DonationModal -- Routing Logic', () => {
       expect(document.body.textContent ?? '').not.toContain('Xác nhận quyên góp');
     });
 
-    it('clears input on successful donation', async () => {
+    it('opens PayOS payment flow after confirm', async () => {
       vi.useFakeTimers();
       try {
-        const mockExecute = vi.fn().mockResolvedValue(true);
         mockGuestWallet({ initStatus: 'READY', remainingDonations: 3 });
-        vi.mocked(useGuestWallet).mockReturnValue({
-          ...vi.mocked(useGuestWallet)(),
-          executeDonation: mockExecute,
-        });
 
         render(<DonationModal campaignItem={mockCampaign} onClose={defaultOnClose} onDonationSuccess={defaultOnSuccess} />);
 
         const input = screen.getByPlaceholderText(/Từ/) as HTMLInputElement;
-        fireEvent.change(input, { target: { value: '100' } });
-        expect(input.value).toBe('100');
+        fireEvent.change(input, { target: { value: '10000' } });
+        expect(input.value).toBe('10000');
 
         const btn = findButton('Quyên góp ngay');
         await act(async () => { fireEvent.click(btn!); });
@@ -415,7 +423,11 @@ describe('DonationModal -- Routing Logic', () => {
 
         // Confirm modal should close immediately (UX fix: not waiting in finally)
         expect(document.body.textContent ?? '').not.toContain('Xác nhận quyên góp');
-        expect(input.value).toBe('');
+        expect(input.value).toBe('10000');
+        expect(mockInitPayosDonation).toHaveBeenCalledWith(
+          { projectId: mockCampaign.projectId, amount: 10000 },
+          'token123',
+        );
       } finally {
         vi.useRealTimers();
       }
@@ -424,33 +436,31 @@ describe('DonationModal -- Routing Logic', () => {
     it('does not re-parse input after confirm modal opens — uses pendingDonationAmount', async () => {
       // Verify fix: guest submit reads pendingDonationAmount, not donationAmountInput
       // by checking that a change AFTER opening confirm does NOT affect the submission
-      const mockExecute = vi.fn().mockResolvedValue(true);
       mockGuestWallet({ initStatus: 'READY', remainingDonations: 3 });
-      vi.mocked(useGuestWallet).mockReturnValue({
-        ...vi.mocked(useGuestWallet)(),
-        executeDonation: mockExecute,
-      });
 
       render(<DonationModal campaignItem={mockCampaign} onClose={defaultOnClose} onDonationSuccess={defaultOnSuccess} />);
 
       const input = screen.getByPlaceholderText(/Từ/) as HTMLInputElement;
 
-      // Step 1: Type 100 → open confirm modal → pendingDonationAmount = 100
-      fireEvent.change(input, { target: { value: '100' } });
+      // Step 1: Type 10000 → open confirm modal → pendingDonationAmount = 10000
+      fireEvent.change(input, { target: { value: '10000' } });
       const btn = findButton('Quyên góp ngay');
       await act(async () => { fireEvent.click(btn!); });
       assertText('Xác nhận quyên góp');
 
-      // Step 2: Change input to 999 AFTER modal is open — confirm modal still shows 100
+      // Step 2: Change input to 999 AFTER modal is open — confirm modal still shows 10000
       fireEvent.change(input, { target: { value: '999' } });
       expect(input.value).toBe('999');
 
-      // Step 3: Click confirm — should still submit 100 (pendingDonationAmount), not 999
+      // Step 3: Click confirm — should still submit 10000 (pendingDonationAmount), not 999
       const confirmBtn = findButton('Xác nhận');
       await act(async () => { fireEvent.click(confirmBtn!); });
 
-      // executeDonation được gọi với amount = 100 (pendingDonationAmount), không phải giá trị input hiện tại
-      expect(mockExecute).toHaveBeenCalledWith(mockCampaign.projectId, 100);
+      // initPayosDonation được gọi với amount = 10000 (pendingDonationAmount), không phải giá trị input hiện tại.
+      expect(mockInitPayosDonation).toHaveBeenCalledWith(
+        { projectId: mockCampaign.projectId, amount: 10000 },
+        'token123',
+      );
     });
   });
 });

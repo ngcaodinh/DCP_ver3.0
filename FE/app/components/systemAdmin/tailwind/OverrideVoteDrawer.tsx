@@ -10,16 +10,22 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { formatVietnameseDateTime } from './helpers';
 import type { ToastItem } from './types';
-import { GpsMarkerOnlyMap } from '@/app/components/oracle/GpsMarkerOnlyMap';
-import { useOverrideRequests, useSubmitOverrideVote } from '@/app/hooks/useOverrideRequests';
+import { GeofenceMapLazy } from '@/app/components/oracle/GeofenceMapLazy';
+import type { GeofenceMarker } from '@/app/components/oracle/GeofenceMap';
+import type { ApiErrorResponse } from '@/app/utils/apiClient';
+import {
+  useOverrideRequests,
+  useOverrideRequestDetail,
+  useSubmitOverrideVote
+} from '@/app/hooks/useOverrideRequests';
 import {
   MIN_VOTE_REASON_LENGTH,
-  GEOFENCE_DISTANCE_WARNING_METERS,
   OVERRIDE_POLLING_SIGNAL_ID,
   type OverrideRequestItem,
   type OverrideReason,
   type CommissionerSnapshotEntry,
-  type GpsCoordinate
+  type GpsCoordinate,
+  type GeofenceSnapshotData
 } from './overrideVoting.types';
 
 // Re-export OverrideRequestItem as PendingOverrideItem alias để giữ
@@ -65,6 +71,51 @@ function mapRoleToLabel(role: string): string {
   if (role === 'admin') return 'Quản trị viên';
   if (role === 'regulatory') return 'Cơ quan giám sát';
   return role;
+}
+
+/**
+ * Chuyển lỗi tải detail (chứa snapshot) sang tiêu đề tiếng Việt theo mã HTTP.
+ * Phân biệt rõ các nhóm lỗi để reviewer biết nguyên nhân thay vì hiểu nhầm "record cũ thiếu snapshot".
+ * @param error Lỗi từ detail query; null khi lỗi đến từ cờ geofenceSnapshotUnavailable của BE.
+ */
+function mapSnapshotErrorToText(error: ApiErrorResponse | null): string {
+  const statusCode = error?.statusCode;
+  if (statusCode === 401 || statusCode === 403) return 'Không có quyền xem dữ liệu bản đồ';
+  if (statusCode === 404) return 'Không tìm thấy dữ liệu bản đồ của yêu cầu này';
+  return 'Không thể tải dữ liệu bản đồ';
+}
+
+/**
+ * Dựng danh sách marker cho GeofenceMap từ một override request.
+ * Ánh xạ reason của Oracle sang verdict marker; KHÔNG tự tính lại khoảng cách hay verdict.
+ * - GPS_EXIF_MISSING → NO_GPS (coordinate=null, không vẽ pin giả tại (0,0)/centroid).
+ * - OUT_OF_GEOFENCE → INVALID (dùng tọa độ EXIF thật của ảnh).
+ * Trả mảng rỗng khi không có gpsFromImage và reason không phải NO_GPS (không đủ dữ liệu để vẽ).
+ */
+function buildMarkersFromItem(item: PendingOverrideItem): GeofenceMarker[] {
+  if (item.reason === 'GPS_EXIF_MISSING') {
+    return [{
+      id: item.overrideRequestId,
+      coordinate: null,
+      status: 'NO_GPS',
+      evidenceCid: item.evidenceCid,
+      distanceMeters: item.distanceMeters,
+      capturedAt: item.createdAt,
+      verificationMessage: mapReasonToText(item.reason)
+    }];
+  }
+
+  if (!item.gpsFromImage) return [];
+
+  return [{
+    id: item.overrideRequestId,
+    coordinate: item.gpsFromImage,
+    status: 'INVALID',
+    evidenceCid: item.evidenceCid,
+    distanceMeters: item.distanceMeters,
+    capturedAt: item.createdAt,
+    verificationMessage: mapReasonToText(item.reason)
+  }];
 }
 
 
@@ -385,16 +436,35 @@ type DetailViewProps = {
   isRejected: boolean;
   isResolved: boolean;
   consistencyWarning: string | null;
+  /** Snapshot geofence bất biến từ detail endpoint; undefined khi đang tải, null khi record cũ/NO_GEOFENCE. */
+  geofenceSnapshot: GeofenceSnapshotData | null | undefined;
+  /** true khi detail (snapshot) đang được fetch — hiển thị skeleton map, không chặn vote. */
+  isSnapshotLoading: boolean;
+  /**
+   * Lỗi từ detail query (401/403/404/5xx). Khi có, khối bản đồ hiển thị trạng thái lỗi/retry
+   * riêng — KHÔNG diễn giải thành "record cũ thiếu snapshot".
+   */
+  snapshotError: ApiErrorResponse | null;
+  /** true khi BE đọc snapshot từ DB thất bại dù trả HTTP 200 — cùng xử lý như snapshotError. */
+  snapshotUnavailable: boolean;
+  /** Retry riêng cho detail query (bản đồ), tách khỏi retry danh sách vote. */
+  onRetrySnapshot: () => void;
   onVote: (vote: 'APPROVE' | 'REJECT') => void;
   onRetry: () => void;
 };
 
+/** Hiển thị chi tiết override request, map snapshot và hành động vote theo verdict Oracle. */
 function DetailView({
   item, currentUserId, myVote, approveCount, voteCount,
   totalVoters, remainingVotes, isFullyApproved, isRejected, isResolved,
-  consistencyWarning, onVote, onRetry
+  consistencyWarning, geofenceSnapshot, isSnapshotLoading,
+  snapshotError, snapshotUnavailable, onRetrySnapshot, onVote, onRetry
 }: DetailViewProps) {
   const isInSnapshot = item.commissionerSnapshot.some((c) => c.isCurrentUser);
+
+  // Dựng marker verdict Oracle từ dữ liệu request — dùng snapshot cho polygon/circle.
+  // OUT_OF_GEOFENCE -> INVALID, GPS_EXIF_MISSING -> NO_GPS (coordinate=null, không vẽ pin giả).
+  const evidenceMarkers: GeofenceMarker[] = useMemo(() => buildMarkersFromItem(item), [item]);
 
   return (
     <div className="divide-y divide-slate-100">
@@ -491,12 +561,14 @@ function DetailView({
           ) : (
             <InfoRow label="GPS từ ảnh (EXIF)" value="Không có dữ liệu GPS" valueClass="text-red-600" />
           )}
-          <InfoRow label="GPS dự án (trung tâm)" value={formatGps(item.gpsFromProject)} mono />
+          {item.reason !== 'NO_GEOFENCE' && (
+            <InfoRow label="GPS dự án (trung tâm)" value={formatGps(item.gpsFromProject)} mono />
+          )}
           {item.distanceMeters !== null && (
             <InfoRow
               label="Khoảng cách Haversine"
-              value={`${item.distanceMeters.toFixed(1)} m${item.distanceMeters > GEOFENCE_DISTANCE_WARNING_METERS ? ' — Vượt ngưỡng' : ''}`}
-              valueClass={item.distanceMeters > GEOFENCE_DISTANCE_WARNING_METERS ? 'text-red-600 font-semibold' : 'text-slate-700'}
+              value={`${item.distanceMeters.toFixed(1)} m`}
+              valueClass={item.reason === 'OUT_OF_GEOFENCE' ? 'text-red-600 font-semibold' : 'text-slate-700'}
             />
           )}
         </div>
@@ -505,13 +577,45 @@ function DetailView({
           <p className="text-xs font-medium text-orange-700">Lý do cảnh báo: {mapReasonToText(item.reason)}</p>
         </div>
 
-        {/* GPS marker map — hiển thị 2 điểm GPS để commissioner đánh giá trực quan.
-            Dùng GpsMarkerOnlyMap (không fetch API) thay GeofenceMapLazy để tránh
-            20 concurrent API calls khi drawer liệt kê 20 items (spec B4, không cần polygon). */}
-        {item.reason !== 'NO_GEOFENCE' && (
-          <GpsMarkerOnlyMap
-            gpsFromImage={item.gpsFromImage}
-            gpsFromProject={item.gpsFromProject}
+        {/* Bản đồ review geofence (B3) — dùng snapshot bất biến lúc Oracle verify.
+            NO_GEOFENCE -> banner (project chưa có vùng); còn lại render GeofenceMapLazy
+            với polygon/circle từ snapshot và marker verdict Oracle.
+            Map loading/error KHÔNG chặn thông tin vote — chỉ ảnh hưởng khối bản đồ. */}
+        {item.reason === 'NO_GEOFENCE' ? (
+          <div data-testid="detail-no-geofence-banner" className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-center">
+            <p className="text-sm font-medium text-amber-700">Dự án chưa thiết lập vùng địa lý</p>
+            <p className="mt-1 text-xs text-amber-600">Không có tâm geofence để đối chiếu. Vui lòng đánh giá dựa trên minh chứng và thông tin request.</p>
+          </div>
+        ) : isSnapshotLoading ? (
+          <div className="flex h-64 w-full animate-pulse items-center justify-center rounded-xl bg-slate-100">
+            <div className="h-3 w-24 rounded bg-slate-200" />
+          </div>
+        ) : snapshotError || snapshotUnavailable ? (
+          // [B3-fix] Lỗi tải detail (401/403/404/5xx) hoặc BE báo đọc DB snapshot thất bại
+          // → trạng thái lỗi/retry riêng cho bản đồ. KHÔNG render map với snapshot=null (tránh
+          // banner "record cũ thiếu snapshot" gây hiểu nhầm dữ liệu quyết định vote).
+          <div
+            data-testid="detail-snapshot-error"
+            className="flex h-64 w-full flex-col items-center justify-center rounded-xl border border-red-200 bg-red-50 p-4 text-center"
+          >
+            <svg className="mb-2 h-8 w-8 text-red-400" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24" aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
+            <p className="text-sm font-medium text-red-700">{mapSnapshotErrorToText(snapshotError)}</p>
+            <p className="mt-1 text-xs text-red-500">Không thể xác nhận dữ liệu bản đồ để review. Hãy tải lại trước khi quyết định biểu quyết.</p>
+            <button
+              type="button"
+              onClick={onRetrySnapshot}
+              className="mt-3 rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-semibold text-red-700 transition-colors hover:bg-red-100"
+            >
+              Tải lại bản đồ
+            </button>
+          </div>
+        ) : (
+          <GeofenceMapLazy
+            projectId={item.projectId}
+            snapshot={geofenceSnapshot ?? null}
+            markers={evidenceMarkers}
             className="mt-1"
           />
         )}
@@ -699,6 +803,16 @@ export default function OverrideVoteDrawer({
   // [A3-fix] Truyền isOpen để tắt refetchInterval khi drawer đóng — tránh waste network
   const { data: items = [], isLoading, error, refetch } = useOverrideRequests(isOpen);
   const submitVoteMutation = useSubmitOverrideVote();
+
+  // [B3-FE-02] Fetch chi tiết (bao gồm geofenceSnapshot) CHỈ khi đang xem DetailView của một request.
+  // ListView truyền null → hook disabled → không tạo N detail/map request khi liệt kê (R4).
+  const detailRequestId = view === 'detail' ? selectedItem?.overrideRequestId ?? null : null;
+  const {
+    data: detailData,
+    isLoading: isDetailLoading,
+    error: detailError,
+    refetch: refetchDetail
+  } = useOverrideRequestDetail(detailRequestId);
 
   // Sync hasLoadedOnce khi loading hoàn tất (không có error)
   // Fix: thay vì kiểm tra items.length > 0 || error, kiểm tra !isLoading
@@ -1011,6 +1125,11 @@ export default function OverrideVoteDrawer({
               isRejected={voteState.isRejected}
               isResolved={voteState.isResolved}
               consistencyWarning={consistencyWarning}
+              geofenceSnapshot={detailData?.geofenceSnapshot}
+              isSnapshotLoading={isDetailLoading}
+              snapshotError={detailError ?? null}
+              snapshotUnavailable={detailData?.geofenceSnapshotUnavailable ?? false}
+              onRetrySnapshot={() => { void refetchDetail(); }}
               onVote={(v) => setVoteDialogVote(v)}
               onRetry={loadItems}
             />

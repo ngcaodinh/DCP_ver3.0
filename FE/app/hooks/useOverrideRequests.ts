@@ -11,6 +11,7 @@ import { buildApiUrl, fetchApi, type ApiErrorResponse } from '@/app/utils/apiCli
 import { readAuthSession } from '@/app/utils/authSession';
 import type {
   OverrideRequestItem,
+  OverrideRequestDetail,
   VoteApiResponseData,
   SubmitOverrideVotePayload
 } from '@/app/components/systemAdmin/tailwind/overrideVoting.types';
@@ -34,6 +35,24 @@ async function fetchOverrideRequests(): Promise<OverrideRequestItem[]> {
     { headers: { Authorization: `Bearer ${session.accessToken}` } }
   );
   return res.data.items ?? [];
+}
+
+/**
+ * Gọi GET /api/oracle/override-requests/:id để lấy chi tiết một override request.
+ * Chỉ gọi khi Admin mở DetailView của một request cụ thể (lazy — không prefetch ở list).
+ * Response enrich thêm geofenceSnapshot bất biến phục vụ review bản đồ B3.
+ */
+async function fetchOverrideRequestDetail(overrideRequestId: string): Promise<OverrideRequestDetail> {
+  const session = readAuthSession();
+  // [S6-fix] Early return nếu không có token — tránh gửi "Authorization: Bearer undefined"
+  if (!session?.accessToken) {
+    throw new Error('Chưa đăng nhập');
+  }
+  const res = await fetchApi<OverrideRequestDetail>(
+    buildApiUrl(`/api/oracle/override-requests/${overrideRequestId}`),
+    { headers: { Authorization: `Bearer ${session.accessToken}` } }
+  );
+  return res.data;
 }
 
 /**
@@ -89,6 +108,27 @@ export function useOverrideRequests(enabled = true) {
     retry: (failureCount, error) => {
       // Không retry 401/403 — user phải đăng nhập lại
       if (error?.statusCode === 401 || error?.statusCode === 403) return false;
+      return failureCount < 1;
+    }
+  });
+}
+
+/**
+ * Query hook lấy chi tiết một override request (bao gồm geofenceSnapshot cho bản đồ B3).
+ * Chỉ enabled khi có overrideRequestId — tức khi Admin mở DetailView của một request.
+ * ListView KHÔNG gọi hook này → tránh N detail/map request khi liệt kê nhiều item (R4).
+ *
+ * @param overrideRequestId ID request đang xem; null/undefined khi ở ListView → tắt query.
+ */
+export function useOverrideRequestDetail(overrideRequestId: string | null | undefined) {
+  return useQuery<OverrideRequestDetail, ApiErrorResponse>({
+    queryKey: ['overrideRequestDetail', overrideRequestId],
+    queryFn: () => fetchOverrideRequestDetail(overrideRequestId as string),
+    enabled: Boolean(overrideRequestId),
+    staleTime: 30_000,
+    retry: (failureCount, error) => {
+      // Không retry 401/403/404 — user phải đăng nhập lại hoặc request không tồn tại
+      if (error?.statusCode === 401 || error?.statusCode === 403 || error?.statusCode === 404) return false;
       return failureCount < 1;
     }
   });

@@ -43,10 +43,7 @@ function getTwilioClient(): ReturnType<typeof twilio> | null {
     const accountSid = process.env.TWILIO_ACCOUNT_SID!;
     const authToken = process.env.TWILIO_AUTH_TOKEN!;
 
-    twilioClient = twilio(accountSid, authToken, {
-      accountSid,
-      authToken
-    });
+    twilioClient = twilio(accountSid, authToken, { accountSid });
 
     logger.info('Twilio client đã được khởi tạo thành công.', {
       accountSid: accountSid.substring(0, 10) + '...'

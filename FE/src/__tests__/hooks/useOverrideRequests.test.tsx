@@ -19,9 +19,9 @@ vi.mock('@/app/utils/authSession', () => ({
 
 import { fetchApi } from '@/app/utils/apiClient';
 import { readAuthSession } from '@/app/utils/authSession';
-import { useOverrideRequests } from '@/app/hooks/useOverrideRequests';
+import { useOverrideRequestDetail, useOverrideRequests } from '@/app/hooks/useOverrideRequests';
 
-function renderWithQuery(hook: () => ReturnType<typeof useOverrideRequests>) {
+function renderWithQuery<T>(hook: () => T) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={client}>{children}</QueryClientProvider>
@@ -95,5 +95,58 @@ describe('useOverrideRequests', () => {
     });
     // Không retry khi 401 — chỉ 1 lần gọi
     expect(fetchApi).toHaveBeenCalledTimes(1);
+  });
+
+  it('[B3] detail hook id=null → KHÔNG fetch detail snapshot', async () => {
+    const { result } = renderWithQuery(() => useOverrideRequestDetail(null));
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(fetchApi).not.toHaveBeenCalled();
+    expect(result.current.isLoading).toBe(false);
+    expect(result.current.data).toBeUndefined();
+  });
+
+  it('[B3] detail hook gọi đúng endpoint, Authorization header và trả geofenceSnapshot', async () => {
+    const detailPayload = {
+      overrideRequestId: 'req-001',
+      projectId: 'proj-001',
+      organizationId: 'org-001',
+      evidenceCid: 'QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG',
+      disbursementRequestId: null,
+      reason: 'OUT_OF_GEOFENCE',
+      gpsFromImage: { lat: 10.123456, lng: 106.654321 },
+      gpsFromProject: { lat: 10.1, lng: 106.6 },
+      distanceMeters: 750.5,
+      commissionerSnapshot: [{ role: 'admin', isCurrentUser: true }],
+      votes: [],
+      status: 'PENDING',
+      createdAt: '2026-06-12T10:00:00.000Z',
+      geofenceSnapshot: {
+        polygon: [
+          { lat: 10.1, lng: 106.6 },
+          { lat: 10.2, lng: 106.6 },
+          { lat: 10.2, lng: 106.7 }
+        ],
+        centroid: { lat: 10.15, lng: 106.65 },
+        radiusMeters: 1000
+      },
+      geofenceSnapshotUnavailable: false
+    };
+    vi.mocked(fetchApi).mockResolvedValue({
+      success: true,
+      message: '',
+      data: detailPayload
+    } as never);
+
+    const { result } = renderWithQuery(() => useOverrideRequestDetail('req-001'));
+
+    await waitFor(() => {
+      expect(result.current.data?.geofenceSnapshot?.radiusMeters).toBe(1000);
+    });
+    expect(fetchApi).toHaveBeenCalledWith(
+      '/api/oracle/override-requests/req-001',
+      { headers: { Authorization: 'Bearer mock-token' } }
+    );
   });
 });

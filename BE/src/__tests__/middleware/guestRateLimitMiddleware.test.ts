@@ -204,7 +204,7 @@ describe('guestRateLimitMiddleware', () => {
       expect(mockRedisClient.zRem).toHaveBeenCalledTimes(1);
       const [key, member] = (mockRedisClient.zRem as ReturnType<typeof vi.fn>).mock.calls[0];
       expect(key).toBe('guest:rate:session:192.168.1.100');
-      expect(member).toMatch(/^\d+-\d+-[a-z0-9]+$/);
+      expect(member).toMatch(/^\d+-\d+-[a-z0-9-]+$/);
     });
 
     it('cho phép request khi Redis pipeline throw (fail open)', async () => {

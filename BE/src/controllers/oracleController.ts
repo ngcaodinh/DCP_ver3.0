@@ -17,6 +17,8 @@ import {
 } from '../queues/oracleQueue';
 import {
   findGeofenceByProjectId,
+  MAX_GEOFENCE_POLYGON_POINTS,
+  MIN_GEOFENCE_POLYGON_POINTS,
   upsertProjectGeofence
 } from '../models/projectGeofenceModel';
 import {
@@ -25,6 +27,7 @@ import {
   findOverrideRequestById,
   findCommissionerInSnapshot
 } from '../models/oracleOverrideRequestModel';
+import { findVerificationById } from '../models/oracleVerificationResultModel';
 import { findProjectById, findProjectsByIdList } from '../repositories/projectRepository';
 
 const logger = getLogger();
@@ -37,6 +40,29 @@ const logger = getLogger();
  */
 // eslint-disable-next-line no-control-regex -- Intentional: regex này được dùng để PHÁT HIỆN control characters trong `reason`, không phải pattern khớp dữ liệu người dùng.
 const CONTROL_CHAR_REGEX = /[\u0000-\u001F\u007F]/;
+
+const IPFS_CID_VERSION_ZERO_REGEX = /^Qm[1-9A-HJ-NP-Za-km-z]{44}$/;
+const IPFS_CID_VERSION_ONE_REGEX = /^b[a-z2-7]{20,}$/;
+const MAX_EVIDENCE_CID_LENGTH = 128;
+
+/** Chuẩn hóa và validate CID IPFS ở biên API trước khi service/queue xử lý. */
+function normalizeEvidenceCid(evidenceCid: unknown): string | null {
+  if (typeof evidenceCid !== 'string') return null;
+
+  const normalizedEvidenceCid = evidenceCid.trim();
+  if (!normalizedEvidenceCid || normalizedEvidenceCid.length > MAX_EVIDENCE_CID_LENGTH) {
+    return null;
+  }
+
+  if (
+    IPFS_CID_VERSION_ZERO_REGEX.test(normalizedEvidenceCid) ||
+    IPFS_CID_VERSION_ONE_REGEX.test(normalizedEvidenceCid)
+  ) {
+    return normalizedEvidenceCid;
+  }
+
+  return null;
+}
 
 const voteOverrideBodySchema = z.object({
   vote: z.enum(['APPROVE', 'REJECT'], {
@@ -90,8 +116,9 @@ export async function handleVerifyImage(
     sendErrorResponse(response, 400, 'Thiếu projectId.', 'VALIDATION_ERROR');
     return;
   }
-  if (!evidenceCid?.trim()) {
-    sendErrorResponse(response, 400, 'Thiếu evidenceCid.', 'VALIDATION_ERROR');
+  const normalizedEvidenceCid = normalizeEvidenceCid(evidenceCid);
+  if (!normalizedEvidenceCid) {
+    sendErrorResponse(response, 400, 'evidenceCid không hợp lệ.', 'VALIDATION_ERROR');
     return;
   }
 
@@ -111,12 +138,12 @@ export async function handleVerifyImage(
       file.buffer,
       projectId,
       request.authenticatedUser.userId,
-      evidenceCid
+      normalizedEvidenceCid
     );
 
     logger.info('Oracle verify-image hoàn thành.', {
       projectId,
-      evidenceCid,
+      evidenceCid: normalizedEvidenceCid,
       verificationId: result.verificationId,
       isValid: result.isValid
     });
@@ -125,7 +152,7 @@ export async function handleVerifyImage(
   } catch (error) {
     logger.error('Oracle verify-image thất bại.', {
       projectId,
-      evidenceCid,
+      evidenceCid: normalizedEvidenceCid,
       errorMessage: (error as Error)?.message
     });
     sendErrorFromUnknown(response, error, 'Không thể xác minh ảnh minh chứng.');
@@ -171,12 +198,27 @@ export async function handleVerifyImageBatch(
     return;
   }
 
-  let evidenceCids: string[];
+  let parsedEvidenceCids: unknown;
   try {
-    evidenceCids = JSON.parse(evidenceCidsRaw ?? '[]') as string[];
+    parsedEvidenceCids = JSON.parse(evidenceCidsRaw ?? '[]');
   } catch {
     sendErrorResponse(response, 400, 'evidenceCids phải là JSON array hợp lệ.', 'VALIDATION_ERROR');
     return;
+  }
+
+  if (!Array.isArray(parsedEvidenceCids)) {
+    sendErrorResponse(response, 400, 'evidenceCids phải là JSON array hợp lệ.', 'VALIDATION_ERROR');
+    return;
+  }
+
+  const evidenceCids: string[] = [];
+  for (const evidenceCid of parsedEvidenceCids) {
+    const normalizedEvidenceCid = normalizeEvidenceCid(evidenceCid);
+    if (!normalizedEvidenceCid) {
+      sendErrorResponse(response, 400, 'evidenceCids chứa CID không hợp lệ.', 'VALIDATION_ERROR');
+      return;
+    }
+    evidenceCids.push(normalizedEvidenceCid);
   }
 
   if (evidenceCids.length !== files.length) {
@@ -308,8 +350,13 @@ export async function handleUpsertGeofence(
     radiusMeters?: number;
   };
 
-  if (!Array.isArray(polygon) || polygon.length < 3) {
-    sendErrorResponse(response, 400, 'Polygon phải có ít nhất 3 điểm.', 'VALIDATION_ERROR');
+  if (!Array.isArray(polygon) || polygon.length < MIN_GEOFENCE_POLYGON_POINTS) {
+    sendErrorResponse(response, 400, `Polygon phải có ít nhất ${MIN_GEOFENCE_POLYGON_POINTS} điểm.`, 'VALIDATION_ERROR');
+    return;
+  }
+
+  if (polygon.length > MAX_GEOFENCE_POLYGON_POINTS) {
+    sendErrorResponse(response, 400, `Polygon chỉ được có tối đa ${MAX_GEOFENCE_POLYGON_POINTS} điểm.`, 'VALIDATION_ERROR');
     return;
   }
 
@@ -548,15 +595,41 @@ export async function handleGetOverrideRequestById(
       c => c.userId === userId
     )?.role ?? null;
 
-    // [B4-fix #6] Enrich projectName từ projectModel để drawer hiển thị tên dự án theo spec.
-    // projectId được giữ làm fallback rõ ràng khi project bị xóa hoặc lookup thất bại.
-    const projectRecord = await findProjectById(overrideRequest.projectId).catch(() => null);
+    // [B3][perf] projectName và geofenceSnapshot đều chỉ phụ thuộc overrideRequest và độc lập
+    // với nhau → chạy song song để bớt một round-trip DB mỗi lần mở drawer.
+    // Hai lookup được xử lý lỗi KHÁC NHAU theo mức độ quan trọng:
+    //  - projectName: không quan trọng cho quyết định vote → nuốt lỗi, fallback về projectId.
+    //  - geofenceSnapshot: là dữ liệu quyết định vote → KHÔNG nuốt lỗi. Phân biệt rõ giữa
+    //    "đọc DB thất bại" (geofenceSnapshotUnavailable=true) và "record cũ/NO_GEOFENCE thật sự
+    //    không có snapshot" (geofenceSnapshot=null). FE dựa vào flag này để hiển thị trạng thái
+    //    lỗi/retry riêng cho khối bản đồ thay vì banner "record cũ thiếu snapshot" gây hiểu nhầm.
+    const [projectRecord, verificationOutcome] = await Promise.all([
+      findProjectById(overrideRequest.projectId).catch(() => null),
+      findVerificationById(overrideRequest.verificationId)
+        .then((record) => ({ readFailed: false, record }))
+        .catch((verificationError: unknown) => {
+          logger.error('Đọc geofence snapshot của verification thất bại.', {
+            overrideRequestId,
+            verificationId: overrideRequest.verificationId,
+            errorMessage: (verificationError as Error)?.message
+          });
+          return { readFailed: true, record: null };
+        })
+    ]);
+
     const enrichedProjectName = projectRecord?.name ?? null;
+
+    // Chỉ trả null khi thực sự không có snapshot (record cũ/NO_GEOFENCE). Khi đọc DB thất bại,
+    // giữ snapshot=null NHƯNG bật cờ geofenceSnapshotUnavailable để FE không diễn giải sai.
+    const geofenceSnapshotUnavailable = verificationOutcome.readFailed;
+    const geofenceSnapshot = verificationOutcome.record?.geofenceSnapshot ?? null;
 
     sendSuccessResponse(response, 200, 'Lấy override request thành công.', {
       ...overrideRequest,
       projectName: enrichedProjectName,
       projectDisplayName: enrichedProjectName ?? overrideRequest.projectId,
+      geofenceSnapshot,
+      geofenceSnapshotUnavailable,
       commissionerSnapshot: sanitizedCommissionerSnapshot,
       currentCommissionerRole,
       votes,
@@ -608,7 +681,7 @@ export async function handleGetPendingOverrides(
     const uniqueProjectIds = [...new Set(items.map(item => item.projectId))];
     const projectRecords = await findProjectsByIdList(uniqueProjectIds);
     const projectRecordsMap = new Map(
-      projectRecords.map(p => [p.id, p])
+      projectRecords.map(p => [p.projectId, p])
     );
 
     // [B4-fix #6] Enrich từng item với projectName từ map. Fallback về projectId khi project bị xóa.

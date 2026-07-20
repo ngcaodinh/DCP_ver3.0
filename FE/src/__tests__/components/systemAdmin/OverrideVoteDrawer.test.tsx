@@ -27,9 +27,36 @@ vi.mock('@/app/utils/authSession', () => ({
   readAuthSession: vi.fn(),
 }));
 
-// GpsMarkerOnlyMap dùng next/dynamic (Leaflet DOM-only) — trong Vitest/jsdom không lazy-load thật.
-vi.mock('@/app/components/oracle/GpsMarkerOnlyMap', () => ({
-  GpsMarkerOnlyMap: () => <div data-testid="gps-marker-map-mock" />,
+// GeofenceMapLazy dùng next/dynamic (Leaflet DOM-only) — trong Vitest/jsdom không lazy-load thật.
+// Mock expose đủ snapshot/marker metadata để assertion bắt được mapping B3, không chỉ đếm marker.
+vi.mock('@/app/components/oracle/GeofenceMapLazy', () => ({
+  GeofenceMapLazy: (props: {
+    snapshot?: {
+      radiusMeters: number;
+      centroid?: { lat: number; lng: number };
+      polygon?: Array<{ lat: number; lng: number }>;
+    } | null;
+    markers?: Array<{
+      status?: string;
+      coordinate?: { lat: number; lng: number } | null;
+    }>;
+  }) => {
+    const markerCoordinates = props.markers
+      ?.map((marker) => marker.coordinate ? `${marker.coordinate.lat},${marker.coordinate.lng}` : 'null')
+      .join('|') ?? '';
+
+    return (
+      <div
+        data-testid="geofence-map-mock"
+        data-centroid={props.snapshot?.centroid ? `${props.snapshot.centroid.lat},${props.snapshot.centroid.lng}` : 'null'}
+        data-markers={String(props.markers?.length ?? 0)}
+        data-marker-coordinates={markerCoordinates}
+        data-marker-statuses={props.markers?.map((marker) => marker.status ?? '').join('|') ?? ''}
+        data-polygon-points={String(props.snapshot?.polygon?.length ?? 0)}
+        data-radius={props.snapshot ? String(props.snapshot.radiusMeters) : 'null'}
+      />
+    );
+  },
 }));
 
 // Mock TanStack Query hooks để có thể control data/error/loading per test
@@ -69,8 +96,28 @@ const submitVoteMock: {
   mutateAsync: vi.fn()
 };
 
+// [B3-FE-02] Mock detail hook — trả geofenceSnapshot cho DetailView. Mặc định snapshot=null.
+const detailMock: {
+  data: unknown;
+  isLoading: boolean;
+  error: unknown;
+  refetch: ReturnType<typeof vi.fn>;
+} = {
+  data: undefined,
+  isLoading: false,
+  error: null,
+  refetch: vi.fn().mockResolvedValue({ data: undefined, error: null }),
+};
+
+// Ghi nhận id được truyền vào useOverrideRequestDetail để assert lazy-fetch (list = null).
+const detailHookSpy = vi.fn();
+
 vi.mock('@/app/hooks/useOverrideRequests', () => ({
   useOverrideRequests: vi.fn(() => ({ ...overrideRequestsMock })),
+  useOverrideRequestDetail: vi.fn((id: string | null | undefined) => {
+    detailHookSpy(id);
+    return { ...detailMock };
+  }),
   useSubmitOverrideVote: vi.fn(() => ({ ...submitVoteMock })),
 }));
 
@@ -248,6 +295,11 @@ describe('OverrideVoteDrawer', () => {
     vi.clearAllMocks();
     mockAuthSession();
     mockSubmitSuccess({ outcome: 'VOTE_RECORDED', pendingVoters: 2, totalVoters: 3 });
+    // [B3-FE-02] Reset detail hook mock về mặc định (chưa có snapshot).
+    detailMock.data = undefined;
+    detailMock.isLoading = false;
+    detailMock.error = null;
+    detailMock.refetch = vi.fn().mockResolvedValue({ data: undefined, error: null });
   });
 
   // ---------------------------------------------------------------------------
@@ -274,6 +326,7 @@ describe('OverrideVoteDrawer', () => {
     assertText('106.600000');
     assertText('750.5');
     assertText('Anh chup ngoai vung dia ly du an');
+    expect(normalizeText(document.body.textContent ?? '')).not.toContain(normalizeText('Vuot nguong'));
   });
 
   // ---------------------------------------------------------------------------
@@ -472,6 +525,9 @@ describe('OverrideVoteDrawer', () => {
 
     assertText('Khong co du lieu GPS');
     assertText('Anh khong co du lieu GPS');
+    const map = screen.getByTestId('geofence-map-mock');
+    expect(map.getAttribute('data-marker-statuses')).toBe('NO_GPS');
+    expect(map.getAttribute('data-marker-coordinates')).toBe('null');
   });
 
   // ---------------------------------------------------------------------------
@@ -1044,5 +1100,288 @@ describe('OverrideVoteDrawer', () => {
         })
       );
     });
+  });
+});
+
+// =============================================================================
+// TESTS B3-FE-02 — Snapshot map trong DetailView (lazy fetch, đúng snapshot)
+// =============================================================================
+
+describe('OverrideVoteDrawer — B3 geofence snapshot map', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockAuthSession();
+    mockSubmitSuccess({ outcome: 'VOTE_RECORDED', pendingVoters: 2, totalVoters: 3 });
+    detailMock.data = undefined;
+    detailMock.isLoading = false;
+    detailMock.error = null;
+    detailMock.refetch = vi.fn().mockResolvedValue({ data: undefined, error: null });
+  });
+
+  // ---------------------------------------------------------------------------
+  // R4: ListView KHÔNG fetch detail — hook detail chỉ nhận null khi liệt kê
+  // ---------------------------------------------------------------------------
+  it('[B3] ListView với nhiều item KHÔNG tạo detail request (hook detail chỉ nhận null)', async () => {
+    const items = [
+      baseMockItem,
+      { ...baseMockItem, overrideRequestId: 'req-002', projectId: 'proj-2' },
+      { ...baseMockItem, overrideRequestId: 'req-003', projectId: 'proj-3' },
+    ];
+    mockApiResponse(items);
+
+    await act(async () => {
+      render(<OverrideVoteDrawer {...defaultProps} />);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('proj-abc')).toBeInTheDocument();
+    });
+
+    // Hook detail được gọi (mỗi render) nhưng chỉ với null khi đang ở ListView
+    expect(detailHookSpy).toHaveBeenCalled();
+    for (const call of detailHookSpy.mock.calls) {
+      expect(call[0]).toBeNull();
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Click một item → detail hook nhận đúng overrideRequestId (một detail request)
+  // ---------------------------------------------------------------------------
+  it('[B3] chọn một request → detail hook nhận đúng overrideRequestId', async () => {
+    mockApiResponse([baseMockItem]);
+
+    await act(async () => {
+      render(<OverrideVoteDrawer {...defaultProps} />);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('proj-abc')).toBeInTheDocument();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('proj-abc'));
+    });
+
+    await waitFor(() => {
+      expect(detailHookSpy).toHaveBeenCalledWith('req-001');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Map dùng snapshot radius từ detail endpoint (không tự tính, không dùng current geofence)
+  // ---------------------------------------------------------------------------
+  it('[B3] map nhận snapshot radius từ detail endpoint', async () => {
+    mockApiResponse([baseMockItem]);
+    detailMock.data = {
+      ...baseMockItem,
+      geofenceSnapshot: {
+        polygon: [
+          { lat: 10.10, lng: 106.60 },
+          { lat: 10.11, lng: 106.60 },
+          { lat: 10.11, lng: 106.61 },
+        ],
+        centroid: { lat: 10.105, lng: 106.605 },
+        radiusMeters: 1000,
+      },
+    };
+
+    await act(async () => {
+      render(<OverrideVoteDrawer {...defaultProps} />);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('proj-abc')).toBeInTheDocument();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('proj-abc'));
+    });
+
+    await waitFor(() => {
+      const map = screen.getByTestId('geofence-map-mock');
+      expect(map.getAttribute('data-radius')).toBe('1000');
+      expect(map.getAttribute('data-centroid')).toBe('10.105,106.605');
+      expect(map.getAttribute('data-polygon-points')).toBe('3');
+      // OUT_OF_GEOFENCE → 1 marker INVALID
+      expect(map.getAttribute('data-markers')).toBe('1');
+      expect(map.getAttribute('data-marker-statuses')).toBe('INVALID');
+      expect(map.getAttribute('data-marker-coordinates')).toBe('10.123456,106.654321');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // NO_GEOFENCE → banner riêng, không render map
+  // ---------------------------------------------------------------------------
+  it('[B3] reason NO_GEOFENCE hiển thị banner, không render map', async () => {
+    const noGeofenceItem = {
+      ...baseMockItem,
+      overrideRequestId: 'req-nogeo',
+      reason: 'NO_GEOFENCE' as const,
+      gpsFromImage: null,
+      gpsFromProject: { lat: 0, lng: 0 },
+      distanceMeters: null,
+    };
+    mockApiResponse([noGeofenceItem]);
+
+    await act(async () => {
+      render(<OverrideVoteDrawer {...defaultProps} />);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('proj-abc')).toBeInTheDocument();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('proj-abc'));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('detail-no-geofence-banner')).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId('geofence-map-mock')).not.toBeInTheDocument();
+    expect(document.body.textContent ?? '').not.toContain('0.000000');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Record cũ thiếu snapshot (null) → map vẫn render với snapshot=null (banner nội bộ map)
+  // ---------------------------------------------------------------------------
+  it('[B3] snapshot=null (record cũ) → map nhận data-radius="null"', async () => {
+    mockApiResponse([baseMockItem]);
+    detailMock.data = { ...baseMockItem, geofenceSnapshot: null };
+
+    await act(async () => {
+      render(<OverrideVoteDrawer {...defaultProps} />);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('proj-abc')).toBeInTheDocument();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('proj-abc'));
+    });
+
+    await waitFor(() => {
+      const map = screen.getByTestId('geofence-map-mock');
+      expect(map.getAttribute('data-radius')).toBe('null');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // [B3-fix] Lỗi detail query (5xx) → hiển thị trạng thái lỗi/retry riêng, KHÔNG render map
+  // ---------------------------------------------------------------------------
+  it('[B3-fix] detail query lỗi 500 → hiển thị block lỗi/retry, không render map với snapshot=null', async () => {
+    mockApiResponse([baseMockItem]);
+    // Detail query thất bại — undefined data + error (mô phỏng 5xx)
+    detailMock.data = undefined;
+    detailMock.error = { statusCode: 500, message: 'Internal Server Error' };
+
+    await act(async () => {
+      render(<OverrideVoteDrawer {...defaultProps} />);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('proj-abc')).toBeInTheDocument();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('proj-abc'));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('detail-snapshot-error')).toBeInTheDocument();
+    });
+    // KHÔNG được render map (tránh banner "record cũ thiếu snapshot" gây hiểu nhầm)
+    expect(screen.queryByTestId('geofence-map-mock')).not.toBeInTheDocument();
+    assertText('Khong the tai du lieu ban do');
+  });
+
+  // ---------------------------------------------------------------------------
+  // [B3-fix] Lỗi 403 → tiêu đề "Không có quyền xem dữ liệu bản đồ" (clear state cho lỗi auth)
+  // ---------------------------------------------------------------------------
+  it('[B3-fix] detail query lỗi 403 → tiêu đề quyền truy cập, không render map', async () => {
+    mockApiResponse([baseMockItem]);
+    detailMock.data = undefined;
+    detailMock.error = { statusCode: 403, message: 'Forbidden' };
+
+    await act(async () => {
+      render(<OverrideVoteDrawer {...defaultProps} />);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('proj-abc')).toBeInTheDocument();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('proj-abc'));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('detail-snapshot-error')).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId('geofence-map-mock')).not.toBeInTheDocument();
+    assertText('Khong co quyen xem du lieu ban do');
+  });
+
+  // ---------------------------------------------------------------------------
+  // [B3-fix] Nút "Tải lại bản đồ" gọi refetch của detail query (retry riêng)
+  // ---------------------------------------------------------------------------
+  it('[B3-fix] nút "Tải lại bản đồ" gọi refetch detail query', async () => {
+    mockApiResponse([baseMockItem]);
+    const detailRefetchSpy = vi.fn().mockResolvedValue({ data: undefined, error: null });
+    detailMock.data = undefined;
+    detailMock.error = { statusCode: 500, message: 'Internal Server Error' };
+    detailMock.refetch = detailRefetchSpy;
+
+    await act(async () => {
+      render(<OverrideVoteDrawer {...defaultProps} />);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('proj-abc')).toBeInTheDocument();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('proj-abc'));
+    });
+
+    const retryBtn = findButton('Tai lai ban do');
+    expect(retryBtn).not.toBeNull();
+
+    await act(async () => {
+      fireEvent.click(retryBtn!);
+    });
+
+    await waitFor(() => {
+      expect(detailRefetchSpy).toHaveBeenCalled();
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // [B3-fix] BE trả HTTP 200 nhưng geofenceSnapshotUnavailable=true (đọc DB snapshot thất bại)
+  // → cùng trạng thái lỗi/retry, KHÔNG diễn giải thành "record cũ thiếu snapshot"
+  // ---------------------------------------------------------------------------
+  it('[B3-fix] geofenceSnapshotUnavailable=true → hiển thị block lỗi, không render map dù HTTP 200', async () => {
+    mockApiResponse([baseMockItem]);
+    // BE trả 200 với snapshot=null NHƯNG bật cờ unavailable → không được coi là "record cũ"
+    detailMock.data = { ...baseMockItem, geofenceSnapshot: null, geofenceSnapshotUnavailable: true };
+    detailMock.error = null;
+
+    await act(async () => {
+      render(<OverrideVoteDrawer {...defaultProps} />);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('proj-abc')).toBeInTheDocument();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('proj-abc'));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('detail-snapshot-error')).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId('geofence-map-mock')).not.toBeInTheDocument();
   });
 });

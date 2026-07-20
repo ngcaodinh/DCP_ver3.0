@@ -4,6 +4,7 @@
  * Real service implementations run — fake timers chi can cho email retry delay.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { DeliveryResult, DispatchContext } from '../types/delivery.types';
 
 // Hoisted mock refs — chia se giua vi.mock factories va tests
 const mocks = vi.hoisted(() => ({
@@ -149,9 +150,11 @@ describe('E2 SMS Service', () => {
     mocks.mockTwilioCreate.mockResolvedValue({ sid: 'SM1', status: 'queued' });
     const { sendSms } = await import('../sms.service');
     const result = await sendSms({ to: '+84912345678', body: 'Test' });
-    expect(result.success).toBe(true);
-    expect(result.channel).toBe('SMS');
-    expect(result.providerMessageId).toBe('SM1');
+    expect(result).toMatchObject({
+      success: true,
+      channel: 'SMS',
+      providerMessageId: 'SM1'
+    });
   });
 
   it('normalize 0xxx thanh +84xxx', async () => {
@@ -183,8 +186,10 @@ describe('E2 SMS Service', () => {
     mocks.mockTwilioCreate.mockRejectedValue(new Error('Twilio server error'));
     const { sendSms } = await import('../sms.service');
     const result = await sendSms({ to: '+84912345678', body: 'T' });
-    expect(result.success).toBe(false);
-    expect(result.retryable).toBe(true);
+    expect(result).toMatchObject({
+      success: false,
+      retryable: true
+    });
   });
 });
 
@@ -375,7 +380,6 @@ describe('E2 Dispatcher', () => {
 
 describe('E2 Types', () => {
   it('DeliveryResult discriminated union', async () => {
-    const { DeliveryResult } = await import('../types/delivery.types');
     const s: DeliveryResult = { success: true, channel: 'EMAIL', providerMessageId: 'm1', latencyMs: 150 };
     expect(s.success).toBe(true);
     const f: DeliveryResult = { success: false, channel: 'SMS', errorMessage: 'err', retryable: true };
@@ -384,7 +388,6 @@ describe('E2 Types', () => {
   });
 
   it('DispatchContext type', async () => {
-    const { DispatchContext } = await import('../types/delivery.types');
     const ctx: DispatchContext = {
       userId: 'u1', userEmail: 'u@e.com', fcmDeviceToken: 'tok',
       phoneNumber: '+84912345678', unsubscribeToken: 'tok', donationAmountVnd: 50_000_000

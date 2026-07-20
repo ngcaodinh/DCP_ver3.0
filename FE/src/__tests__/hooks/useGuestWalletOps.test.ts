@@ -279,7 +279,7 @@ describe('useGuestWalletOps', () => {
       });
 
       await act(async () => {
-        await result.current.executeDonation('1001', 100, initState);
+        await result.current.executeDonation('1001', 10000, initState);
       });
 
       expect(result.current.donationState.donationStatus).toBe('FAILED');
@@ -297,7 +297,7 @@ describe('useGuestWalletOps', () => {
       });
 
       expect(result.current.donationState.donationStatus).toBe('FAILED');
-      expect(result.current.donationState.donationError).toContain('1');
+      expect(result.current.donationState.donationError).toContain('10000');
     });
 
     it('should set FAILED immediately when amount exceeds maximum', async () => {
@@ -317,7 +317,7 @@ describe('useGuestWalletOps', () => {
       const initState = makeInitState({ walletAddress: null });
 
       await act(async () => {
-        await result.current.executeDonation('1001', 100, initState);
+        await result.current.executeDonation('1001', 10000, initState);
       });
 
       expect(result.current.donationState.donationStatus).toBe('FAILED');
@@ -329,7 +329,7 @@ describe('useGuestWalletOps', () => {
       const initState = makeInitState({ sessionId: null });
 
       await act(async () => {
-        await result.current.executeDonation('1001', 100, initState);
+        await result.current.executeDonation('1001', 10000, initState);
       });
 
       expect(result.current.donationState.donationStatus).toBe('FAILED');
@@ -340,7 +340,7 @@ describe('useGuestWalletOps', () => {
       const initState = makeInitState({ walletAddress: 'invalid-address' });
 
       await act(async () => {
-        await result.current.executeDonation('1001', 100, initState);
+        await result.current.executeDonation('1001', 10000, initState);
       });
 
       expect(result.current.donationState.donationStatus).toBe('FAILED');
@@ -354,7 +354,7 @@ describe('useGuestWalletOps', () => {
       const initState = makeInitState();
 
       await act(async () => {
-        await result.current.executeDonation('1001', 100, initState);
+        await result.current.executeDonation('1001', 10000, initState);
       });
 
       expect(result.current.donationState.donationStatus).toBe('SUCCESS');
@@ -367,13 +367,13 @@ describe('useGuestWalletOps', () => {
       const initState = makeInitState();
 
       await act(async () => {
-        await result.current.executeDonation('1001', 100, initState);
+        await result.current.executeDonation('1001', 10000, initState);
       });
 
       expect(mockRequestPaymasterSponsorship).toHaveBeenCalledWith(
         expect.objectContaining({
           projectId: '1001',
-          amount: 100,
+          amount: 10000,
           sessionId: 'sess123',
         }),
         'token123',
@@ -385,7 +385,7 @@ describe('useGuestWalletOps', () => {
       const initState = makeInitState();
 
       await act(async () => {
-        await result.current.executeDonation('1001', 100, initState);
+        await result.current.executeDonation('1001', 10000, initState);
       });
 
       expect(mockSubmitUserOpToBundler).toHaveBeenCalled();
@@ -396,7 +396,7 @@ describe('useGuestWalletOps', () => {
       const initState = makeInitState();
 
       await act(async () => {
-        await result.current.executeDonation('1001', 100, initState);
+        await result.current.executeDonation('1001', 10000, initState);
       });
 
       expect(mockQueryClientInvalidate).toHaveBeenCalledWith({
@@ -409,7 +409,7 @@ describe('useGuestWalletOps', () => {
       const initState = makeInitState();
 
       await act(async () => {
-        await result.current.executeDonation('1001', 100, initState);
+        await result.current.executeDonation('1001', 10000, initState);
       });
 
       expect(result.current.getCachedOwnerKey()).toBeNull();
@@ -420,7 +420,7 @@ describe('useGuestWalletOps', () => {
       const initState = makeInitState();
 
       await act(async () => {
-        await result.current.executeDonation('1001', 100, initState);
+        await result.current.executeDonation('1001', 10000, initState);
       });
 
       expect(mockDecryptOwnerKey).toHaveBeenCalledWith(
@@ -443,7 +443,7 @@ describe('useGuestWalletOps', () => {
       const initState = makeInitState();
 
       await act(async () => {
-        await result.current.executeDonation('1001', 100, initState);
+        await result.current.executeDonation('1001', 10000, initState);
       });
 
       expect(result.current.donationState.donationStatus).toBe('FAILED');
@@ -457,7 +457,7 @@ describe('useGuestWalletOps', () => {
       const initState = makeInitState();
 
       await act(async () => {
-        await result.current.executeDonation('1001', 100, initState);
+        await result.current.executeDonation('1001', 10000, initState);
       });
 
       expect(mockQueryClientInvalidate).toHaveBeenCalled();
@@ -473,7 +473,7 @@ describe('useGuestWalletOps', () => {
       result.current.setOwnerKeyCache('0x' + 'f'.repeat(64));
 
       await act(async () => {
-        await result.current.executeDonation('1001', 100, initState);
+        await result.current.executeDonation('1001', 10000, initState);
       });
 
       expect(result.current.getCachedOwnerKey()).toBeNull();
@@ -486,7 +486,7 @@ describe('useGuestWalletOps', () => {
       const initState = makeInitState();
 
       await act(async () => {
-        await result.current.executeDonation('1001', 100, initState);
+        await result.current.executeDonation('1001', 10000, initState);
       });
 
       expect(result.current.donationState.donationStatus).toBe('FAILED');
@@ -499,7 +499,7 @@ describe('useGuestWalletOps', () => {
       const initState = makeInitState();
 
       await act(async () => {
-        await result.current.executeDonation('1001', 100, initState);
+        await result.current.executeDonation('1001', 10000, initState);
       });
 
       expect(result.current.donationState.donationStatus).toBe('FAILED');
@@ -513,7 +513,7 @@ describe('useGuestWalletOps', () => {
 
       // First donation
       await act(async () => {
-        await result.current.executeDonation('1001', 100, initState);
+        await result.current.executeDonation('1001', 10000, initState);
       });
 
       // Verify decrypt was called (first time)

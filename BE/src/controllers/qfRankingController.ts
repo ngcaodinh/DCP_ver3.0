@@ -79,9 +79,10 @@ export async function handleGetTrustAdjustedRankings(
       rankingResponse
     );
   } catch (error) {
+    const projectIdForLog = typeof request.query.projectId === 'string' ? request.query.projectId : undefined;
     logger.error('Error in handleGetTrustAdjustedRankings', {
       error: error instanceof Error ? error.message : String(error),
-      projectId: request.query.projectId
+      projectId: projectIdForLog
     });
     sendErrorFromUnknown(
       response,

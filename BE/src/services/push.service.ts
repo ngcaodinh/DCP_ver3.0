@@ -2,7 +2,7 @@
  * Service gửi push notification qua Firebase Cloud Messaging (FCM).
  * Fallback sang EMAIL khi FCM fail.
  */
-import { initializeApp, getApps, cert, type App } from 'firebase-admin/app';
+import { initializeApp, getApps, cert, type App, type ServiceAccount } from 'firebase-admin/app';
 import { getMessaging, type Messaging } from 'firebase-admin/messaging';
 import { getLogger } from '../config/logger';
 import { PUSH_TIMEOUT_MS } from './constants/notification.constants';
@@ -48,11 +48,10 @@ function initializeFirebase(): App | null {
     const privateKey = process.env.FCM_PRIVATE_KEY!
       .replace(/\\n/g, '\n');
 
-    const serviceAccount = {
-      type: 'service_account',
-      project_id: process.env.FCM_PROJECT_ID,
-      private_key: privateKey,
-      client_email: process.env.FCM_CLIENT_EMAIL
+    const serviceAccount: ServiceAccount = {
+      projectId: process.env.FCM_PROJECT_ID,
+      privateKey,
+      clientEmail: process.env.FCM_CLIENT_EMAIL
     };
 
     // Check if already initialized
@@ -157,17 +156,17 @@ export async function sendPushNotification(options: {
       }
     };
 
-    const result = await Promise.race([
+    const messageId = await Promise.race([
       messaging.send(message),
       new Promise<'timeout'>((_, reject) =>
         setTimeout(() => reject(new Error('FCM timeout')), PUSH_TIMEOUT_MS)
       )
-    ]) as { messageId: string };
+    ]);
 
     const latencyMs = Date.now() - startTime;
 
     logger.info('Push notification đã được gửi thành công qua FCM.', {
-      messageId: result.messageId,
+      messageId,
       deviceToken: options.deviceToken.substring(0, 20) + '...',
       latencyMs
     });
@@ -175,7 +174,7 @@ export async function sendPushNotification(options: {
     return {
       success: true,
       channel: 'PUSH',
-      providerMessageId: result.messageId,
+      providerMessageId: messageId,
       latencyMs
     };
   } catch (error) {

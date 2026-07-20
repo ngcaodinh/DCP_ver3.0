@@ -94,6 +94,7 @@ const MockNVE = vi.hoisted<new (code: 'INVALID_TYPE' | 'INVALID_CHANNEL', messag
 });
 
 vi.mock('../../services/constants/notification.constants', () => ({
+  VISIBLE_NOTIFICATION_TYPES: ['DONATION_RECEIVED', 'DISBURSEMENT_SIGNED'],
   NotificationValidationError: MockNVE
 }));
 
@@ -123,6 +124,7 @@ type MockAuthenticatedRequest = Partial<AuthenticatedRequest> & {
   params?: Record<string, string>;
   query?: Record<string, string>;
   body?: Record<string, unknown>;
+  on?: ReturnType<typeof vi.fn>;
 };
 
 /**
@@ -130,12 +132,13 @@ type MockAuthenticatedRequest = Partial<AuthenticatedRequest> & {
  */
 function buildMockRequest(overrides: MockAuthenticatedRequest = {}): AuthenticatedRequest {
   return {
-    authenticatedUser: overrides.authenticatedUser !== undefined
+    authenticatedUser: Object.prototype.hasOwnProperty.call(overrides, 'authenticatedUser')
       ? overrides.authenticatedUser
       : { userId: 'test-user-id', role: 'donor' },
     params: overrides.params ?? {},
     query: overrides.query ?? {},
-    body: overrides.body ?? {}
+    body: overrides.body ?? {},
+    on: overrides.on ?? vi.fn()
   } as unknown as AuthenticatedRequest;
 }
 
@@ -153,7 +156,9 @@ function buildMockResponse(): {
     status: statusMock,
     json: jsonMock,
     setHeader: vi.fn(),
-    flushHeaders: vi.fn()
+    flushHeaders: vi.fn(),
+    write: vi.fn(),
+    end: vi.fn()
   } as unknown as Response;
   return { response, statusMock, jsonMock };
 }
@@ -470,18 +475,19 @@ describe('notificationController', () => {
       }];
       const { NotificationModel } = await import('../../models/notificationModel');
       vi.mocked(NotificationModel.find).mockReturnValue({
-        skip: vi.fn().mockReturnValue({
-          limit: vi.fn().mockReturnValue({
-            lean: vi.fn().mockReturnValue({
-              exec: vi.fn().mockResolvedValue(mockNotifications)
+        sort: vi.fn().mockReturnValue({
+          skip: vi.fn().mockReturnValue({
+            limit: vi.fn().mockReturnValue({
+              lean: vi.fn().mockReturnValue({
+                exec: vi.fn().mockResolvedValue(mockNotifications)
+              })
             })
           })
         })
       } as unknown as ReturnType<typeof NotificationModel.find>);
-      vi.mocked(NotificationModel.countDocuments).mockReturnValue({
-        exec: vi.fn()
-      } as unknown as ReturnType<typeof NotificationModel.countDocuments>);
-      vi.mocked(getUnreadCount).mockResolvedValue(1);
+      vi.mocked(NotificationModel.countDocuments)
+        .mockReturnValueOnce({ exec: vi.fn().mockResolvedValue(1) } as unknown as ReturnType<typeof NotificationModel.countDocuments>)
+        .mockReturnValueOnce({ exec: vi.fn().mockResolvedValue(1) } as unknown as ReturnType<typeof NotificationModel.countDocuments>);
 
       const req = buildMockRequest({ query: { page: '1', limit: '10' } });
       const { response, jsonMock, statusMock } = buildMockResponse();
@@ -504,10 +510,12 @@ describe('notificationController', () => {
     it('gioi han limit at 20 theo spec', async () => {
       const { NotificationModel } = await import('../../models/notificationModel');
       vi.mocked(NotificationModel.find).mockReturnValue({
-        skip: vi.fn().mockReturnValue({
-          limit: vi.fn().mockReturnValue({
-            lean: vi.fn().mockReturnValue({
-              exec: vi.fn().mockResolvedValue([])
+        sort: vi.fn().mockReturnValue({
+          skip: vi.fn().mockReturnValue({
+            limit: vi.fn().mockReturnValue({
+              lean: vi.fn().mockReturnValue({
+                exec: vi.fn().mockResolvedValue([])
+              })
             })
           })
         })
@@ -515,7 +523,6 @@ describe('notificationController', () => {
       vi.mocked(NotificationModel.countDocuments).mockReturnValue({
         exec: vi.fn().mockResolvedValue(0)
       } as unknown as ReturnType<typeof NotificationModel.countDocuments>);
-      vi.mocked(getUnreadCount).mockResolvedValue(0);
 
       const req = buildMockRequest({ query: { limit: '100' } });
       const { response, jsonMock } = buildMockResponse();

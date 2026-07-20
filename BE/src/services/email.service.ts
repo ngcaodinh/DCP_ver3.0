@@ -5,7 +5,6 @@
 import nodemailer from 'nodemailer';
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
 import Handlebars from 'handlebars';
 import { getLogger } from '../config/logger';
 import {
@@ -16,6 +15,7 @@ import {
   getResolvedUnsubscribeBaseUrl
 } from './constants/notification.constants';
 import type { DeliveryResult, DispatchContext } from './types/delivery.types';
+import type SMTPTransport from 'nodemailer/lib/smtp-transport';
 
 const logger = getLogger();
 
@@ -23,9 +23,6 @@ const logger = getLogger();
  * ESM-compatible __dirname — hoạt động đúng trong bundled app, Docker, và TypeScript compiled output.
  * `__dirname` không tồn tại trong ESM; dùng `import.meta.url` thay thế.
  */
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 /**
  * Chuyển đổi HTML special characters thành entities.
  * Dùng làm sanitize trước khi render vào email template — phòng trường hợp
@@ -106,6 +103,13 @@ function getSmtpConfig(): SmtpConfig | null {
  */
 let transporter: nodemailer.Transporter | null = null;
 
+interface PooledSmtpTransportOptions extends SMTPTransport.Options {
+  pool: boolean;
+  maxConnections: number;
+  rateLimit: number;
+  timeout: number;
+}
+
 /**
  * Khởi tạo hoặc lấy transporter instance.
  * @returns Nodemailer transporter hoặc null nếu không có config
@@ -116,7 +120,7 @@ function getTransporter(): nodemailer.Transporter | null {
   const config = getSmtpConfig();
   if (!config) return null;
 
-  transporter = nodemailer.createTransport({
+  const transportOptions: PooledSmtpTransportOptions = {
     host: config.host,
     port: config.port,
     secure: config.secure,
@@ -128,7 +132,9 @@ function getTransporter(): nodemailer.Transporter | null {
     maxConnections: 5,
     rateLimit: 10, // Gmail limit: 100 email/ngày cho app password thường, 2000 cho Google Workspace
     timeout: EMAIL_TIMEOUT_MS
-  });
+  };
+
+  transporter = nodemailer.createTransport(transportOptions);
 
   return transporter;
 }

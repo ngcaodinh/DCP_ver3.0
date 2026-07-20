@@ -160,7 +160,7 @@ describe('Unsubscribe - Token Generation Integration', () => {
   it('generateUnsubscribeToken nên upsert preference record với token 64 ký tự', async () => {
     const { UserNotificationPreferenceModel } = await import('../../models/notificationPreferenceModel');
 
-    (UserNotificationPreferenceModel.findOneAndUpdate as any).mockImplementation((query, update) => {
+    (UserNotificationPreferenceModel.findOneAndUpdate as any).mockImplementation((query: { userId: string }, update: { $set: { unsubscribeToken: string } }) => {
       // Mock trả về token thực được tạo
       return Promise.resolve({
         userId: query.userId,
@@ -185,7 +185,7 @@ describe('Unsubscribe - Token Generation Integration', () => {
     const { UserNotificationPreferenceModel } = await import('../../models/notificationPreferenceModel');
 
     let capturedToken = '';
-    (UserNotificationPreferenceModel.findOneAndUpdate as any).mockImplementation((query, update) => {
+    (UserNotificationPreferenceModel.findOneAndUpdate as any).mockImplementation((query: { userId: string }, update: { $set: { unsubscribeToken: string } }) => {
       capturedToken = update.$set.unsubscribeToken;
       return Promise.resolve({
         userId: query.userId,

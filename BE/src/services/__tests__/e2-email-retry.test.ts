@@ -68,9 +68,11 @@ describe('E2 Email Retry', () => {
     const { sendEmailWithRetry } = await import('../email.service');
     const result = await sendEmailWithRetry({ to: 'u@e.com', subject: 'T', html: '<p>T</p>' });
 
-    expect(result.success).toBe(false);
-    expect(result.channel).toBe('EMAIL');
-    expect(result.retryable).toBe(true); // Bull se retry
+    expect(result).toMatchObject({
+      success: false,
+      channel: 'EMAIL',
+      retryable: true // Bull se retry
+    });
     expect(mocks.mockSendMail).toHaveBeenCalledTimes(1);
   });
 
@@ -78,8 +80,10 @@ describe('E2 Email Retry', () => {
     mocks.mockSendMail.mockResolvedValue({ messageId: 'msg-1' });
     const { sendEmailWithRetry } = await import('../email.service');
     const result = await sendEmailWithRetry({ to: 'u@e.com', subject: 'T', html: '<p>T</p>' });
-    expect(result.success).toBe(true);
-    expect(result.providerMessageId).toBe('msg-1');
+    expect(result).toMatchObject({
+      success: true,
+      providerMessageId: 'msg-1'
+    });
     expect(mocks.mockSendMail).toHaveBeenCalledTimes(1);
   });
 
@@ -87,8 +91,10 @@ describe('E2 Email Retry', () => {
     mocks.mockSendMail.mockRejectedValue(new Error('Authentication failed'));
     const { sendEmailWithRetry } = await import('../email.service');
     const result = await sendEmailWithRetry({ to: 'u@e.com', subject: 'T', html: '<p>T</p>' });
-    expect(result.success).toBe(false);
-    expect(result.retryable).toBe(false); // Khong retry — credentials sai
+    expect(result).toMatchObject({
+      success: false,
+      retryable: false // Khong retry — credentials sai
+    });
     expect(mocks.mockSendMail).toHaveBeenCalledTimes(1);
   });
 });
