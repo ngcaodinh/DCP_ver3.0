@@ -5,8 +5,8 @@
 // Dùng staleTime 5 phút vì geofence ít thay đổi (org chỉ cập nhật khi cần).
 // =============================================================================
 
-import { useQuery } from '@tanstack/react-query';
-import { buildApiUrl, fetchApi } from '@/app/utils/apiClient';
+import { useQuery, type UseQueryResult } from '@tanstack/react-query';
+import { buildApiUrl, fetchApi, type ApiErrorResponse } from '@/app/utils/apiClient';
 import { readAuthSession } from '@/app/utils/authSession';
 
 export type GeofenceData = {
@@ -16,18 +16,31 @@ export type GeofenceData = {
   radiusMeters: number;
 };
 
+/** Lỗi API geofence có thể bổ sung status HTTP để UI phân loại trạng thái tải. */
+export type GeofenceQueryError = ApiErrorResponse;
+
 /**
  * Fetch geofence của một dự án từ GET /api/oracle/geofence/:projectId.
  * Trả về null data + error.statusCode === 404 khi dự án chưa có geofence.
  * Disabled khi projectId undefined.
  */
-export function useGeofence(projectId: string | undefined) {
-  return useQuery<GeofenceData, { statusCode?: number; message?: string; errorCode?: string }>({
+export function useGeofence(projectId: string | undefined): UseQueryResult<GeofenceData, GeofenceQueryError> {
+  return useQuery<GeofenceData, GeofenceQueryError>({
     queryKey: ['geofence', projectId],
     queryFn: async () => {
+      if (!projectId) {
+        const missingProjectIdError: GeofenceQueryError = {
+          success: false,
+          message: 'Thiếu projectId để tải geofence.',
+          errorCode: 'VALIDATION_ERROR',
+          statusCode: 400
+        };
+        throw missingProjectIdError;
+      }
+
       const session = readAuthSession();
       const res = await fetchApi<GeofenceData>(
-        buildApiUrl(`/api/oracle/geofence/${projectId}`),
+        buildApiUrl(`/api/oracle/geofence/${encodeURIComponent(projectId)}`),
         { headers: { Authorization: `Bearer ${session?.accessToken ?? ''}` } }
       );
       return res.data;
@@ -35,8 +48,8 @@ export function useGeofence(projectId: string | undefined) {
     enabled: Boolean(projectId),
     staleTime: 5 * 60 * 1000,
     retry: (failureCount, error) => {
-      // Không retry 404 (dự án chưa có geofence) hoặc 403 (không có quyền)
-      if (error?.statusCode === 404 || error?.statusCode === 403) return false;
+      // Không retry lỗi xác thực/quyền hoặc 404 vì đây không phải lỗi mạng tạm thời.
+      if ([401, 403, 404].includes(error?.statusCode ?? 0)) return false;
       return failureCount < 1;
     }
   });

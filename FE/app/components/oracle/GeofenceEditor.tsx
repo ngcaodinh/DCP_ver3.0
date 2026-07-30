@@ -22,20 +22,21 @@ import {
 } from 'react-leaflet';
 import { useGeofence } from '@/app/hooks/useGeofence';
 import { useUpsertGeofence } from '@/app/hooks/useUpsertGeofence';
-
-// Sửa lỗi icon Leaflet bị broken khi bundle qua webpack/Next.js
-delete (L.Icon.Default.prototype as unknown as Record<string, unknown>)._getIconUrl;
-L.Icon.Default.mergeOptions({
-  iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
-  iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
-  shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
-});
+import {
+  calculateGeofenceAreaKm2,
+  calculateGeofenceCentroid,
+  GEOFENCE_AREA_WARNING_KM2,
+  MAX_GEOFENCE_POLYGON_POINTS,
+  MIN_GEOFENCE_POLYGON_POINTS,
+  type GeofencePoint,
+  validateGeofencePolygon
+} from '@/app/utils/geofenceGeometry';
 
 // =============================================================================
 // TYPES & CONSTANTS
 // =============================================================================
 
-type GpsPoint = { lat: number; lng: number };
+type GpsPoint = GeofencePoint;
 
 export type GeofenceEditorProps = {
   projectId: string;
@@ -47,39 +48,6 @@ export type GeofenceEditorProps = {
 const RADIUS_MIN = 100;
 const RADIUS_MAX = 2000;
 const RADIUS_DEFAULT = 500;
-const AREA_WARNING_KM2 = 100;
-const MAX_GEOFENCE_POLYGON_POINTS = 100;
-
-// =============================================================================
-// HELPERS
-// =============================================================================
-
-/**
- * Tính diện tích polygon (km²) bằng công thức Shoelace + chuyển đổi độ → km.
- * Chỉ dùng cho hiển thị; Haversine BE mới là nguồn sự thật.
- */
-function calcAreaKm2(points: GpsPoint[]): number {
-  if (points.length < 3) return 0;
-  let area = 0;
-  const n = points.length;
-  for (let i = 0; i < n; i++) {
-    const j = (i + 1) % n;
-    area += points[i].lng * points[j].lat;
-    area -= points[j].lng * points[i].lat;
-  }
-  area = Math.abs(area) / 2;
-  const meanLat = points.reduce((s, p) => s + p.lat, 0) / points.length;
-  const kmPerDegLat = 111.32;
-  const kmPerDegLng = 111.32 * Math.cos((meanLat * Math.PI) / 180);
-  return area * kmPerDegLat * kmPerDegLng;
-}
-
-/** Tính centroid đơn giản (trung bình cộng) — đủ chính xác cho polygon nhỏ < 5 km */
-function calcCentroid(points: GpsPoint[]): GpsPoint {
-  const lat = points.reduce((s, p) => s + p.lat, 0) / points.length;
-  const lng = points.reduce((s, p) => s + p.lng, 0) / points.length;
-  return { lat, lng };
-}
 
 // =============================================================================
 // MAP SUB-COMPONENTS
@@ -161,16 +129,59 @@ function AreaWarningBanner() {
   );
 }
 
+/** Hiển thị lỗi tải geofence theo status HTTP và chỉ cho retry khi lỗi có thể là tạm thời. */
+function GeofenceLoadErrorState({
+  statusCode,
+  onRetry,
+}: {
+  statusCode?: number;
+  onRetry: () => void;
+}) {
+  const isUnauthenticated = statusCode === 401;
+  const isForbidden = statusCode === 403;
+  const message = isUnauthenticated
+    ? 'Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.'
+    : isForbidden
+      ? 'Bạn không có quyền truy cập geofence của dự án này.'
+      : 'Không thể tải geofence. Vui lòng thử lại sau.';
+
+  return (
+    <div
+      data-testid="geofence-load-error"
+      role="alert"
+      className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700"
+    >
+      <p>{message}</p>
+      {!isUnauthenticated && !isForbidden ? (
+        <button
+          data-testid="btn-retry-geofence"
+          type="button"
+          onClick={onRetry}
+          className="mt-3 rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-100"
+        >
+          Thử lại
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 // =============================================================================
 // GeofenceEditor — main component
 // =============================================================================
 
+/** Render editor geofence client-only với draft cục bộ và trạng thái API đã được phân loại. */
 export default function GeofenceEditor({
   projectId,
   onSaveSuccess,
   className,
 }: GeofenceEditorProps) {
-  const { data: existingGeofence, isLoading: loadingGeofence } = useGeofence(projectId);
+  const {
+    data: existingGeofence,
+    error: geofenceError,
+    isLoading: loadingGeofence,
+    refetch: refetchGeofence
+  } = useGeofence(projectId);
   const { mutate: upsertGeofence, isPending: isSaving } = useUpsertGeofence();
 
   const [points, setPoints] = useState<GpsPoint[]>([]);
@@ -178,64 +189,119 @@ export default function GeofenceEditor({
   const [radiusMeters, setRadiusMeters] = useState(RADIUS_DEFAULT);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveSuccess, setSaveSuccess] = useState(false);
-  // Dùng để track đã load từ existing geofence chưa (tránh override khi user đang edit)
-  const [initialized, setInitialized] = useState(false);
+  const [initializedProjectId, setInitializedProjectId] = useState<string | null>(null);
+  const geofenceErrorStatusCode = geofenceError?.statusCode;
+  // Không cho thao tác với draft của project trước khi dữ liệu project hiện tại đã nạp xong.
+  const isGeofenceInitializing = loadingGeofence || initializedProjectId !== projectId;
+  const isEditorInteractionDisabled = isSaving || isGeofenceInitializing;
 
-  // Khi geofence hiện tại load xong → pre-populate form lần đầu
   useEffect(() => {
-    if (existingGeofence && !initialized) {
+    if (initializedProjectId !== null && initializedProjectId !== projectId) {
+      setSaveError(null);
+      setSaveSuccess(false);
+    }
+
+    if (loadingGeofence || initializedProjectId === projectId) {
+      return;
+    }
+
+    if (existingGeofence) {
       setPoints(existingGeofence.polygon);
       setRadiusMeters(existingGeofence.radiusMeters);
-      setInitialized(true);
+      setIsDrawing(false);
+      setInitializedProjectId(projectId);
+      return;
     }
-    // Không có geofence → enable draw mode mặc định (B5 spec)
-    if (!loadingGeofence && !existingGeofence && !initialized) {
-      setIsDrawing(true);
-      setInitialized(true);
-    }
-  }, [existingGeofence, loadingGeofence, initialized]);
 
-  const areaKm2 = calcAreaKm2(points);
-  const isAreaLarge = areaKm2 > AREA_WARNING_KM2;
-  const centroid = points.length >= 3 ? calcCentroid(points) : null;
+    if (geofenceErrorStatusCode === 404) {
+      setPoints([]);
+      setRadiusMeters(RADIUS_DEFAULT);
+      setIsDrawing(true);
+      setInitializedProjectId(projectId);
+    }
+  }, [existingGeofence, geofenceErrorStatusCode, initializedProjectId, loadingGeofence, projectId]);
+
+  const areaKm2 = calculateGeofenceAreaKm2(points);
+  const isAreaLarge = areaKm2 > GEOFENCE_AREA_WARNING_KM2;
+  const centroid = calculateGeofenceCentroid(points);
 
   /** Thêm điểm geofence mới và chặn vượt giới hạn polygon để tránh payload quá lớn. */
   const handleAddPoint = useCallback((point: GpsPoint) => {
+    if (isEditorInteractionDisabled) {
+      return;
+    }
     if (points.length >= MAX_GEOFENCE_POLYGON_POINTS) {
       setSaveError(`Polygon chỉ được có tối đa ${MAX_GEOFENCE_POLYGON_POINTS} điểm.`);
       return;
     }
-    setPoints((prev) => [...prev, point]);
-    setSaveError(null);
+    const nextPoints = [...points, point];
+    setPoints(nextPoints);
+    setSaveError(
+      nextPoints.length >= MIN_GEOFENCE_POLYGON_POINTS
+        ? validateGeofencePolygon(nextPoints)
+        : null
+    );
     setSaveSuccess(false);
-  }, [points.length]);
+  }, [isEditorInteractionDisabled, points]);
 
+  /** Xóa một điểm và cập nhật ngay thông báo hợp lệ của draft còn lại. */
   const handleDeletePoint = useCallback((idx: number) => {
-    setPoints((prev) => prev.filter((_, i) => i !== idx));
-  }, []);
+    if (isEditorInteractionDisabled) {
+      return;
+    }
+    const nextPoints = points.filter((_, pointIndex) => pointIndex !== idx);
+    setPoints(nextPoints);
+    setSaveError(
+      nextPoints.length >= MIN_GEOFENCE_POLYGON_POINTS
+        ? validateGeofencePolygon(nextPoints)
+        : null
+    );
+    setSaveSuccess(false);
+  }, [isEditorInteractionDisabled, points]);
 
-  const handleUndo = () => {
-    setPoints((prev) => prev.slice(0, -1));
-    setSaveError(null);
-  };
+  /** Xóa đỉnh vừa thêm gần nhất để người dùng điều chỉnh draft nhanh. */
+  const handleUndo = useCallback(() => {
+    if (isEditorInteractionDisabled) {
+      return;
+    }
+    const nextPoints = points.slice(0, -1);
+    setPoints(nextPoints);
+    setSaveError(
+      nextPoints.length >= MIN_GEOFENCE_POLYGON_POINTS
+        ? validateGeofencePolygon(nextPoints)
+        : null
+    );
+    setSaveSuccess(false);
+  }, [isEditorInteractionDisabled, points]);
 
-  const handleReset = () => {
+  /** Xóa draft hiện tại và giữ cờ khởi tạo để không tự nạp lại polygon đã lưu. */
+  const handleReset = useCallback(() => {
+    if (isEditorInteractionDisabled) {
+      return;
+    }
     setPoints([]);
     setIsDrawing(true);
     setSaveError(null);
     setSaveSuccess(false);
-    setInitialized(false);
-  };
+  }, [isEditorInteractionDisabled]);
+
+  /** Cập nhật bán kính draft và bỏ trạng thái đã lưu vì dữ liệu local đã thay đổi. */
+  const handleRadiusChange = useCallback((nextRadiusMeters: number) => {
+    if (isEditorInteractionDisabled) {
+      return;
+    }
+    setRadiusMeters(nextRadiusMeters);
+    setSaveSuccess(false);
+  }, [isEditorInteractionDisabled]);
 
   /** Validate và gửi polygon geofence lên API khi người dùng lưu vùng địa lý. */
   const handleSave = () => {
-    // Validation theo spec B5 — hiển thị error message, không dùng disabled để chặn
-    if (points.length < 3) {
-      setSaveError('Polygon phải có ít nhất 3 điểm.');
+    if (isEditorInteractionDisabled) {
       return;
     }
-    if (points.length > MAX_GEOFENCE_POLYGON_POINTS) {
-      setSaveError(`Polygon chỉ được có tối đa ${MAX_GEOFENCE_POLYGON_POINTS} điểm.`);
+    const polygonValidationError = validateGeofencePolygon(points);
+    if (polygonValidationError) {
+      setSaveError(polygonValidationError);
       return;
     }
     if (radiusMeters > RADIUS_MAX) {
@@ -252,7 +318,10 @@ export default function GeofenceEditor({
     upsertGeofence(
       { projectId, polygon: points, radiusMeters },
       {
-        onSuccess: () => {
+        onSuccess: (geofence) => {
+          // Lấy lại polygon/radius từ response authoritative để UI luôn phản ánh bản đã persist.
+          setPoints(geofence.polygon);
+          setRadiusMeters(geofence.radiusMeters);
           setIsDrawing(false);
           setSaveSuccess(true);
           onSaveSuccess?.();
@@ -263,6 +332,15 @@ export default function GeofenceEditor({
       }
     );
   };
+
+  /** Gọi lại GET geofence sau lỗi mạng hoặc lỗi máy chủ có thể hồi phục. */
+  const handleRetryGeofence = useCallback(() => {
+    void refetchGeofence();
+  }, [refetchGeofence]);
+
+  if (geofenceError && geofenceErrorStatusCode !== 404) {
+    return <GeofenceLoadErrorState statusCode={geofenceErrorStatusCode} onRetry={handleRetryGeofence} />;
+  }
 
   // Tâm bản đồ mặc định: trung tâm Việt Nam
   const defaultCenter: [number, number] = [16.047, 108.206];
@@ -277,9 +355,9 @@ export default function GeofenceEditor({
       {/* Map */}
       <div
         data-testid="geofence-editor-map"
-        className={`relative h-96 w-full overflow-hidden rounded-xl border border-slate-200 ${isDrawing ? 'cursor-crosshair' : ''}`}
+        className={`relative h-96 w-full overflow-hidden rounded-xl border border-slate-200 ${isDrawing && !isEditorInteractionDisabled ? 'cursor-crosshair' : ''}`}
       >
-        {loadingGeofence ? (
+        {isGeofenceInitializing ? (
           <div className="flex h-full w-full animate-pulse items-center justify-center bg-slate-100">
             <div className="space-y-2 text-center">
               <div className="mx-auto h-10 w-10 rounded-full bg-slate-200" />
@@ -298,7 +376,10 @@ export default function GeofenceEditor({
           url={`${process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:5000'}/api/tiles/{z}/{x}/{y}.png`}
         />
 
-            <MapClickHandler isDrawing={isDrawing} onAddPoint={handleAddPoint} />
+            <MapClickHandler
+              isDrawing={isDrawing && !isEditorInteractionDisabled}
+              onAddPoint={handleAddPoint}
+            />
 
             {/* Fit bounds về polygon hiện tại khi load lần đầu */}
             {existingGeofence && <BoundsFitter polygon={existingGeofence.polygon} />}
@@ -343,15 +424,17 @@ export default function GeofenceEditor({
                   fillOpacity: 1,
                   weight: 2,
                 }}
-                eventHandlers={{ click: () => handleDeletePoint(idx) }}
+                eventHandlers={isEditorInteractionDisabled ? undefined : { click: () => handleDeletePoint(idx) }}
               >
                 <Popup>
                   <div className="text-xs">
                     <p className="font-semibold text-slate-700">Điểm {idx + 1}</p>
                     <p className="text-slate-500">{`${p.lat.toFixed(6)}, ${p.lng.toFixed(6)}`}</p>
                     <button
+                      type="button"
                       onClick={() => handleDeletePoint(idx)}
-                      className="mt-1 text-red-500 underline"
+                      disabled={isEditorInteractionDisabled}
+                      className="mt-1 text-red-500 underline disabled:cursor-not-allowed disabled:opacity-40"
                     >
                       Xóa điểm này
                     </button>
@@ -371,7 +454,7 @@ export default function GeofenceEditor({
         )}
 
         {/* Banner "đang vẽ" */}
-        {isDrawing && !loadingGeofence && <DrawingBanner />}
+        {isDrawing && !isGeofenceInitializing && <DrawingBanner />}
       </div>
 
       {/* Controls */}
@@ -390,7 +473,7 @@ export default function GeofenceEditor({
               data-testid="area-display"
               className="rounded-full bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700"
             >
-              Diện tích: {areaKm2.toFixed(2)} km²
+              Diện tích ước tính: {areaKm2.toFixed(2)} km²
             </span>
           )}
 
@@ -398,8 +481,9 @@ export default function GeofenceEditor({
             {/* Toggle draw mode */}
             <button
               data-testid="btn-toggle-draw"
+              type="button"
               onClick={() => setIsDrawing((d) => !d)}
-              disabled={isSaving}
+              disabled={isEditorInteractionDisabled}
               className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
                 isDrawing
                   ? 'bg-blue-600 text-white hover:bg-blue-700'
@@ -412,8 +496,9 @@ export default function GeofenceEditor({
             {/* Undo last point */}
             <button
               data-testid="btn-undo"
+              type="button"
               onClick={handleUndo}
-              disabled={points.length === 0 || isSaving}
+              disabled={points.length === 0 || isEditorInteractionDisabled}
               className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
             >
               Xóa điểm cuối
@@ -422,8 +507,9 @@ export default function GeofenceEditor({
             {/* Reset */}
             <button
               data-testid="btn-reset"
+              type="button"
               onClick={handleReset}
-              disabled={isSaving}
+              disabled={isEditorInteractionDisabled}
               className="rounded-lg border border-red-200 bg-white px-3 py-1.5 text-xs font-medium text-red-600 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
             >
               Vẽ lại
@@ -448,8 +534,8 @@ export default function GeofenceEditor({
               max={RADIUS_MAX}
               step={50}
               value={radiusMeters}
-              onChange={(e) => setRadiusMeters(Number(e.target.value))}
-              disabled={isSaving}
+              onChange={(e) => handleRadiusChange(Number(e.target.value))}
+              disabled={isEditorInteractionDisabled}
               className="h-2 w-full cursor-pointer appearance-none rounded-full bg-slate-200 accent-blue-600"
             />
             <input
@@ -460,9 +546,9 @@ export default function GeofenceEditor({
               onChange={(e) => {
                 // Không clamp tại đây — để user nhập tự do, validation ở handleSave
                 const v = Number(e.target.value);
-                if (!isNaN(v)) setRadiusMeters(v);
+                if (!isNaN(v)) handleRadiusChange(v);
               }}
-              disabled={isSaving}
+              disabled={isEditorInteractionDisabled}
               className={`w-20 rounded-lg border px-2 py-1 text-center text-sm focus:outline-none disabled:opacity-50 ${
                 radiusMeters > RADIUS_MAX || radiusMeters < RADIUS_MIN
                   ? 'border-red-400 focus:border-red-500'
@@ -492,9 +578,10 @@ export default function GeofenceEditor({
         {isAreaLarge && <AreaWarningBanner />}
 
         {/* Lỗi validation / API */}
-        {saveError && (
+        {saveError && !isGeofenceInitializing && (
           <div
             data-testid="save-error"
+            role="alert"
             className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
           >
             {saveError}
@@ -502,9 +589,10 @@ export default function GeofenceEditor({
         )}
 
         {/* Thành công */}
-        {saveSuccess && (
+        {saveSuccess && !isGeofenceInitializing && (
           <div
             data-testid="save-success"
+            role="alert"
             className="rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700"
           >
             Đã lưu vùng địa lý thành công!
@@ -514,8 +602,9 @@ export default function GeofenceEditor({
         {/* Save button */}
         <button
           data-testid="btn-save"
+          type="button"
           onClick={handleSave}
-          disabled={isSaving}
+          disabled={isEditorInteractionDisabled}
           className="w-full rounded-xl bg-blue-600 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {isSaving ? 'Đang lưu…' : 'Lưu vùng địa lý'}

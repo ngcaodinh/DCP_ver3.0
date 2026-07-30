@@ -106,3 +106,75 @@ describe('oracleRoutes — override request detail RBAC', () => {
     expect(oracleControllerMocks.handleGetOverrideRequestById).not.toHaveBeenCalled();
   });
 });
+
+describe('oracleRoutes — geofence RBAC', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it.each([
+    ['GET', (app: express.Express) => request(app).get('/api/oracle/geofence/proj-001'), 'handleGetGeofence'],
+    ['POST', (app: express.Express) => request(app).post('/api/oracle/geofence/proj-001').send({ polygon: [] }), 'handleUpsertGeofence']
+  ])('[B5-security] %s geofence yêu cầu authentication', async (_method, makeRequest, handlerName) => {
+    const app = createTestApp();
+
+    const response = await makeRequest(app);
+
+    expect(response.status).toBe(401);
+    expect(oracleControllerMocks[handlerName as keyof typeof oracleControllerMocks]).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['organization', 'test-token-organization'],
+    ['admin', 'test-token-admin'],
+    ['regulatory', 'test-token-regulatory']
+  ])('[B5-security] %s được phép GET geofence theo route policy', async (_role, token) => {
+    const app = createTestApp();
+
+    const response = await request(app)
+      .get('/api/oracle/geofence/proj-001')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(oracleControllerMocks.handleGetGeofence).toHaveBeenCalledTimes(1);
+  });
+
+  it('[B5-security] donor bị chặn trước khi gọi GET geofence controller', async () => {
+    const app = createTestApp();
+
+    const response = await request(app)
+      .get('/api/oracle/geofence/proj-001')
+      .set('Authorization', 'Bearer test-token-donor');
+
+    expect(response.status).toBe(403);
+    expect(oracleControllerMocks.handleGetGeofence).not.toHaveBeenCalled();
+  });
+
+  it('[B5-security] chỉ Organization được phép POST geofence theo route policy', async () => {
+    const app = createTestApp();
+
+    const response = await request(app)
+      .post('/api/oracle/geofence/proj-001')
+      .set('Authorization', 'Bearer test-token-organization')
+      .send({ polygon: [] });
+
+    expect(response.status).toBe(200);
+    expect(oracleControllerMocks.handleUpsertGeofence).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['admin', 'test-token-admin'],
+    ['regulatory', 'test-token-regulatory'],
+    ['donor', 'test-token-donor']
+  ])('[B5-security] %s bị chặn trước khi gọi POST geofence controller', async (_role, token) => {
+    const app = createTestApp();
+
+    const response = await request(app)
+      .post('/api/oracle/geofence/proj-001')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ polygon: [] });
+
+    expect(response.status).toBe(403);
+    expect(oracleControllerMocks.handleUpsertGeofence).not.toHaveBeenCalled();
+  });
+});

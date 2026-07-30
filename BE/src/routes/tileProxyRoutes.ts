@@ -1,15 +1,19 @@
 import { Router } from 'express';
 import { proxyOsmTile } from '../controllers/tileProxyController';
+import { createRateLimitMiddleware } from '../middleware/rateLimitMiddleware';
 
 /**
  * Tạo router cho tile proxy endpoints.
- * [A-NEW3 fix] Proxy OSM tiles qua backend để tránh lộ GPS coordinates ra third-party.
+ * Browser không gọi OSM trực tiếp, nhưng provider vẫn nhận z/x/y từ backend.
  */
 export function createTileProxyRoutes(): Router {
   const router = Router();
+  const tileProxyRateLimit = createRateLimitMiddleware(120, 60 * 1000, {
+    bucketName: 'tiles:proxy'
+  });
 
-  // GET /api/tiles/:z/:x/:y.png - Proxy OSM tile request
-  router.get('/:z/:x/:y.png', proxyOsmTile);
+  // Public cho Leaflet; giới hạn theo IP để bảo vệ quota và outbound capacity của OSM.
+  router.get('/:z/:x/:y.png', tileProxyRateLimit, proxyOsmTile);
 
   return router;
 }
