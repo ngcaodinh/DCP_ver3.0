@@ -2,9 +2,11 @@ import { randomUUID } from 'crypto';
 import { create as createExifParser } from 'exif-parser';
 import { getLogger } from '../config/logger';
 import {
-  findGeofenceByProjectId,
   MAX_GEOFENCE_POLYGON_POINTS,
-  MIN_GEOFENCE_POLYGON_POINTS,
+  MIN_GEOFENCE_POLYGON_POINTS
+} from '../constants/geofenceConstants';
+import {
+  findGeofenceByProjectId,
   type GpsCoordinate
 } from '../models/projectGeofenceModel';
 import {

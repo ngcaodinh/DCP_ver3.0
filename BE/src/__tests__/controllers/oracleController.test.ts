@@ -25,8 +25,6 @@ vi.mock('../../models/oracleOverrideRequestModel', () => ({
 
 vi.mock('../../models/projectGeofenceModel', () => ({
   findGeofenceByProjectId: vi.fn(),
-  MIN_GEOFENCE_POLYGON_POINTS: 3,
-  MAX_GEOFENCE_POLYGON_POINTS: 100,
   upsertProjectGeofence: vi.fn()
 }));
 
@@ -66,6 +64,7 @@ vi.mock('../../utils/apiResponse', () => ({
 }));
 
 import {
+  handleGetGeofence,
   handleGetOverrideRequestById,
   handleGetPendingOverrides,
   handleUpsertGeofence,
@@ -78,7 +77,7 @@ import { findProjectById, findProjectsByIdList } from '../../repositories/projec
 import { findVerificationById } from '../../models/oracleVerificationResultModel';
 import { verifyEvidenceImage } from '../../services/oracleService';
 import { enqueueOracleVerification } from '../../queues/oracleQueue';
-import { upsertProjectGeofence } from '../../models/projectGeofenceModel';
+import { findGeofenceByProjectId, upsertProjectGeofence } from '../../models/projectGeofenceModel';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -229,9 +228,212 @@ describe('handleUpsertGeofence — polygon bounds', () => {
 
     await handleUpsertGeofence(req, res);
 
-    expect(sendErrorResponse).toHaveBeenCalledWith(res, 400, expect.any(String), 'VALIDATION_ERROR');
+    expect(sendErrorResponse).toHaveBeenCalledWith(
+      res,
+      400,
+      expect.any(String),
+      'VALIDATION_ERROR',
+      expect.any(Array)
+    );
     expect(findProjectById).not.toHaveBeenCalled();
     expect(upsertProjectGeofence).not.toHaveBeenCalled();
+  });
+});
+
+describe('handleUpsertGeofence — validation and ownership', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('[B5] trả 401 khi caller chưa đăng nhập', async () => {
+    const req = buildMockRequest({
+      params: { projectId: 'proj-001' },
+      authenticatedUser: null
+    });
+    const res = buildMockResponse();
+
+    await handleUpsertGeofence(req, res);
+
+    expect(sendErrorResponse).toHaveBeenCalledWith(res, 401, expect.any(String), 'UNAUTHENTICATED');
+    expect(findProjectById).not.toHaveBeenCalled();
+    expect(upsertProjectGeofence).not.toHaveBeenCalled();
+  });
+
+  it('[B5] chặn payload malformed trước khi truy vấn project hoặc upsert', async () => {
+    const req = buildMockRequest({ params: { projectId: 'proj-001' } });
+    req.body = null;
+    const res = buildMockResponse();
+
+    await handleUpsertGeofence(req, res);
+
+    expect(sendErrorResponse).toHaveBeenCalledWith(
+      res,
+      400,
+      expect.any(String),
+      'VALIDATION_ERROR',
+      expect.arrayContaining([expect.objectContaining({ field: 'body' })])
+    );
+    expect(findProjectById).not.toHaveBeenCalled();
+    expect(upsertProjectGeofence).not.toHaveBeenCalled();
+  });
+
+  it('[B5] lưu polygon hợp lệ của owner với bán kính mặc định do server áp dụng', async () => {
+    const polygon = [
+      { lat: 10.76, lng: 106.68 },
+      { lat: 10.77, lng: 106.69 },
+      { lat: 10.76, lng: 106.70 }
+    ];
+    const geofence = { projectId: 'proj-001', polygon, centroid: { lat: 10.763, lng: 106.69 }, radiusMeters: 500 };
+    vi.mocked(findProjectById).mockResolvedValue(buildProjectRecord() as never);
+    vi.mocked(upsertProjectGeofence).mockResolvedValue(geofence as never);
+    const req = buildMockRequest({
+      params: { projectId: 'proj-001' },
+      authenticatedUser: { userId: 'org-001', role: 'organizations' }
+    });
+    req.body = { polygon };
+    const res = buildMockResponse();
+
+    await handleUpsertGeofence(req, res);
+
+    expect(upsertProjectGeofence).toHaveBeenCalledWith('proj-001', polygon, 500);
+    expect(sendSuccessResponse).toHaveBeenCalledWith(res, 200, expect.any(String), geofence);
+  });
+
+  it('[B5] trả 403 khi Organization không sở hữu project cần cập nhật', async () => {
+    vi.mocked(findProjectById).mockResolvedValue(buildProjectRecord({ organizationId: 'org-other' }) as never);
+    const req = buildMockRequest({
+      params: { projectId: 'proj-001' },
+      authenticatedUser: { userId: 'org-001', role: 'organizations' }
+    });
+    req.body = { polygon: [{ lat: 10.76, lng: 106.68 }, { lat: 10.77, lng: 106.69 }, { lat: 10.76, lng: 106.70 }] };
+    const res = buildMockResponse();
+
+    await handleUpsertGeofence(req, res);
+
+    expect(sendErrorResponse).toHaveBeenCalledWith(res, 403, expect.any(String), 'FORBIDDEN');
+    expect(upsertProjectGeofence).not.toHaveBeenCalled();
+  });
+
+  it('[B5] trả 404 khi project cần cập nhật không tồn tại', async () => {
+    vi.mocked(findProjectById).mockResolvedValue(null);
+    const req = buildMockRequest({
+      params: { projectId: 'proj-missing' },
+      authenticatedUser: { userId: 'org-001', role: 'organizations' }
+    });
+    req.body = { polygon: [{ lat: 10.76, lng: 106.68 }, { lat: 10.77, lng: 106.69 }, { lat: 10.76, lng: 106.70 }] };
+    const res = buildMockResponse();
+
+    await handleUpsertGeofence(req, res);
+
+    expect(sendErrorResponse).toHaveBeenCalledWith(res, 404, expect.any(String), 'NOT_FOUND');
+    expect(upsertProjectGeofence).not.toHaveBeenCalled();
+  });
+});
+
+describe('handleGetGeofence — ownership by role', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('[B5] trả 401 khi caller chưa đăng nhập', async () => {
+    const req = buildMockRequest({
+      params: { projectId: 'proj-001' },
+      authenticatedUser: null
+    });
+    const res = buildMockResponse();
+
+    await handleGetGeofence(req, res);
+
+    expect(sendErrorResponse).toHaveBeenCalledWith(res, 401, expect.any(String), 'UNAUTHENTICATED');
+    expect(findProjectById).not.toHaveBeenCalled();
+    expect(findGeofenceByProjectId).not.toHaveBeenCalled();
+  });
+
+  it('[B5] trả 404 khi Organization đọc project không tồn tại', async () => {
+    vi.mocked(findProjectById).mockResolvedValue(null);
+    const req = buildMockRequest({
+      params: { projectId: 'proj-missing' },
+      authenticatedUser: { userId: 'org-001', role: 'organizations' }
+    });
+    const res = buildMockResponse();
+
+    await handleGetGeofence(req, res);
+
+    expect(sendErrorResponse).toHaveBeenCalledWith(res, 404, expect.any(String), 'NOT_FOUND');
+    expect(findGeofenceByProjectId).not.toHaveBeenCalled();
+  });
+
+  it('[B5] trả geofence cho Organization sở hữu project', async () => {
+    const geofence = { projectId: 'proj-001', polygon: [], centroid: { lat: 10.76, lng: 106.68 }, radiusMeters: 500 };
+    vi.mocked(findProjectById).mockResolvedValue(buildProjectRecord() as never);
+    vi.mocked(findGeofenceByProjectId).mockResolvedValue(geofence as never);
+    const req = buildMockRequest({
+      params: { projectId: 'proj-001' },
+      authenticatedUser: { userId: 'org-001', role: 'organizations' }
+    });
+    const res = buildMockResponse();
+
+    await handleGetGeofence(req, res);
+
+    expect(sendSuccessResponse).toHaveBeenCalledWith(res, 200, expect.any(String), geofence);
+  });
+
+  it('[B5] trả 404 cho owner khi project chưa có geofence', async () => {
+    vi.mocked(findProjectById).mockResolvedValue(buildProjectRecord() as never);
+    vi.mocked(findGeofenceByProjectId).mockResolvedValue(null);
+    const req = buildMockRequest({
+      params: { projectId: 'proj-001' },
+      authenticatedUser: { userId: 'org-001', role: 'organizations' }
+    });
+    const res = buildMockResponse();
+
+    await handleGetGeofence(req, res);
+
+    expect(sendErrorResponse).toHaveBeenCalledWith(res, 404, expect.any(String), 'NOT_FOUND');
+  });
+
+  it('[B5] chặn Organization đọc geofence project của organization khác trước khi query geofence', async () => {
+    vi.mocked(findProjectById).mockResolvedValue(buildProjectRecord({ organizationId: 'org-other' }) as never);
+    const req = buildMockRequest({
+      params: { projectId: 'proj-001' },
+      authenticatedUser: { userId: 'org-001', role: 'organizations' }
+    });
+    const res = buildMockResponse();
+
+    await handleGetGeofence(req, res);
+
+    expect(sendErrorResponse).toHaveBeenCalledWith(res, 403, expect.any(String), 'FORBIDDEN');
+    expect(findGeofenceByProjectId).not.toHaveBeenCalled();
+  });
+
+  it('[B5] giữ quyền đọc geofence cho Admin phục vụ review B3', async () => {
+    const geofence = { projectId: 'proj-001', polygon: [], centroid: { lat: 10.76, lng: 106.68 }, radiusMeters: 500 };
+    vi.mocked(findGeofenceByProjectId).mockResolvedValue(geofence as never);
+    const req = buildMockRequest({
+      params: { projectId: 'proj-001' },
+      authenticatedUser: { userId: 'admin-1', role: 'admin' }
+    });
+    const res = buildMockResponse();
+
+    await handleGetGeofence(req, res);
+
+    expect(findProjectById).not.toHaveBeenCalled();
+    expect(sendSuccessResponse).toHaveBeenCalledWith(res, 200, expect.any(String), geofence);
+  });
+
+  it('[B5] giữ quyền đọc geofence cho Regulatory phục vụ review B3', async () => {
+    const geofence = { projectId: 'proj-001', polygon: [], centroid: { lat: 10.76, lng: 106.68 }, radiusMeters: 500 };
+    vi.mocked(findGeofenceByProjectId).mockResolvedValue(geofence as never);
+    const req = buildMockRequest({
+      params: { projectId: 'proj-001' },
+      authenticatedUser: { userId: 'regulatory-1', role: 'regulatory' }
+    });
+    const res = buildMockResponse();
+
+    await handleGetGeofence(req, res);
+
+    expect(findProjectById).not.toHaveBeenCalled();
+    expect(sendSuccessResponse).toHaveBeenCalledWith(res, 200, expect.any(String), geofence);
   });
 });
 

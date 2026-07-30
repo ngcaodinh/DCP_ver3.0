@@ -5,8 +5,6 @@ import type { GpsCoordinate } from '../../models/projectGeofenceModel';
 // Mock DB models để test không cần MongoDB
 vi.mock('../../models/projectGeofenceModel', () => ({
   findGeofenceByProjectId: vi.fn(),
-  MIN_GEOFENCE_POLYGON_POINTS: 3,
-  MAX_GEOFENCE_POLYGON_POINTS: 100,
   computeCentroid: vi.fn((polygon: GpsCoordinate[]) => {
     const lat = polygon.reduce((s, p) => s + p.lat, 0) / polygon.length;
     const lng = polygon.reduce((s, p) => s + p.lng, 0) / polygon.length;

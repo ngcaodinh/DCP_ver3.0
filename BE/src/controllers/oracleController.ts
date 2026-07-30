@@ -17,8 +17,6 @@ import {
 } from '../queues/oracleQueue';
 import {
   findGeofenceByProjectId,
-  MAX_GEOFENCE_POLYGON_POINTS,
-  MIN_GEOFENCE_POLYGON_POINTS,
   upsertProjectGeofence
 } from '../models/projectGeofenceModel';
 import {
@@ -29,6 +27,7 @@ import {
 } from '../models/oracleOverrideRequestModel';
 import { findVerificationById } from '../models/oracleVerificationResultModel';
 import { findProjectById, findProjectsByIdList } from '../repositories/projectRepository';
+import { validateGeofenceRequestBody } from '../validators/geofenceValidator';
 
 const logger = getLogger();
 
@@ -311,6 +310,18 @@ export async function handleGetGeofence(
   }
 
   try {
+    if (request.authenticatedUser.role === 'organizations') {
+      const project = await findProjectById(projectId);
+      if (!project) {
+        sendErrorResponse(response, 404, 'Dự án không tồn tại.', 'NOT_FOUND');
+        return;
+      }
+      if (project.organizationId !== request.authenticatedUser.userId) {
+        sendErrorResponse(response, 403, 'Bạn không có quyền xem geofence của dự án này.', 'FORBIDDEN');
+        return;
+      }
+    }
+
     const geofence = await findGeofenceByProjectId(projectId);
     if (!geofence) {
       sendErrorResponse(response, 404, 'Dự án chưa có geofence.', 'NOT_FOUND');
@@ -328,7 +339,7 @@ export async function handleGetGeofence(
  * Tạo hoặc cập nhật geofence của dự án (upsert).
  * Dùng cho B5 GeofenceEditor (tổ chức vẽ polygon).
  *
- * Body: { polygon: [{lat, lng}, ...], radiusMeters: number }
+ * Body strict: { polygon: [{lat, lng}, ...], radiusMeters?: number }
  */
 export async function handleUpsertGeofence(
   request: AuthenticatedRequest,
@@ -345,33 +356,15 @@ export async function handleUpsertGeofence(
     return;
   }
 
-  const { polygon, radiusMeters } = request.body as {
-    polygon?: Array<{ lat: number; lng: number }>;
-    radiusMeters?: number;
-  };
-
-  if (!Array.isArray(polygon) || polygon.length < MIN_GEOFENCE_POLYGON_POINTS) {
-    sendErrorResponse(response, 400, `Polygon phải có ít nhất ${MIN_GEOFENCE_POLYGON_POINTS} điểm.`, 'VALIDATION_ERROR');
-    return;
-  }
-
-  if (polygon.length > MAX_GEOFENCE_POLYGON_POINTS) {
-    sendErrorResponse(response, 400, `Polygon chỉ được có tối đa ${MAX_GEOFENCE_POLYGON_POINTS} điểm.`, 'VALIDATION_ERROR');
-    return;
-  }
-
-  const invalidPoint = polygon.find(
-    p => typeof p.lat !== 'number' || typeof p.lng !== 'number' ||
-         p.lat < -90 || p.lat > 90 || p.lng < -180 || p.lng > 180
-  );
-  if (invalidPoint) {
-    sendErrorResponse(response, 400, 'Tọa độ polygon không hợp lệ.', 'VALIDATION_ERROR');
-    return;
-  }
-
-  const radius = typeof radiusMeters === 'number' ? radiusMeters : 500;
-  if (radius < 100 || radius > 2000) {
-    sendErrorResponse(response, 400, 'radiusMeters phải trong khoảng 100-2000.', 'VALIDATION_ERROR');
+  const validationResult = validateGeofenceRequestBody(request.body);
+  if (!validationResult.isValid) {
+    sendErrorResponse(
+      response,
+      400,
+      'Dữ liệu geofence không hợp lệ.',
+      'VALIDATION_ERROR',
+      validationResult.errors
+    );
     return;
   }
 
@@ -387,7 +380,11 @@ export async function handleUpsertGeofence(
       return;
     }
 
-    const geofence = await upsertProjectGeofence(projectId, polygon, radius);
+    const geofence = await upsertProjectGeofence(
+      projectId,
+      validationResult.data.polygon,
+      validationResult.data.radiusMeters
+    );
     sendSuccessResponse(response, 200, 'Cập nhật geofence thành công.', geofence);
   } catch (error) {
     logger.error('Upsert geofence thất bại.', { projectId, errorMessage: (error as Error)?.message });
