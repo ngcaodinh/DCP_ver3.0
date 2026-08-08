@@ -1,89 +1,137 @@
-import type { Request, Response } from 'express';
-import { sendSuccessResponse, sendErrorFromUnknown } from '../utils/apiResponse';
+import type { Response } from 'express';
+import type { AuthenticatedRequest } from '../middleware/authenticationMiddleware';
+import { sendSuccessResponse, sendErrorFromUnknown, sendErrorResponse } from '../utils/apiResponse';
 import {
   getPendingManualReview,
   getManualReviewDetail,
   manualApprove,
   manualReject
 } from '../services/manualReviewService';
+import {
+  manualReviewParamsSchema,
+  manualReviewDetailQuerySchema,
+  manualReviewPendingQuerySchema,
+  manualReviewRejectBodySchema
+} from '../validators/manualReviewValidator';
 
 /**
  * GET /api/disbursements/pending-review
- * Mục đích: lấy danh sách disbursement đang chờ xử lý tay (payosTransferStatus = MANUAL_REVIEW).
+ * Mục đích: lấy danh sách queue manual review pending có phân trang và DTO an toàn.
  */
-export async function handleGetPendingManualReview(req: Request, res: Response): Promise<void> {
+export async function handleGetPendingManualReview(
+  request: AuthenticatedRequest,
+  response: Response
+): Promise<void> {
+  const queryResult = manualReviewPendingQuerySchema.safeParse(request.query);
+  if (!queryResult.success) {
+    sendErrorResponse(response, 400, 'Query pending-review không hợp lệ.', 'VALIDATION_ERROR');
+    return;
+  }
+
   try {
-    const items = await getPendingManualReview();
-    sendSuccessResponse(res, 200, 'Lấy danh sách pending review thành công.', { items, total: items.length });
+    const page = await getPendingManualReview(queryResult.data);
+    sendSuccessResponse(response, 200, 'Lấy danh sách pending review thành công.', page);
   } catch (error) {
-    sendErrorFromUnknown(res, error, 'Không thể lấy danh sách pending review.');
+    sendErrorFromUnknown(response, error, 'Không thể lấy danh sách pending review.');
   }
 }
 
 /**
  * GET /api/disbursements/:id/detail
- * Mục đích: chi tiết một disbursement MANUAL_REVIEW kèm transfer logs và audit logs.
+ * Mục đích: chi tiết một disbursement MANUAL_REVIEW kèm transfer logs và audit logs đã mask PII.
  */
-export async function handleGetManualReviewDetail(req: Request, res: Response): Promise<void> {
-  const { id } = req.params;
-  if (!id || !id.trim()) {
-    res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Thiếu request ID.' } });
+export async function handleGetManualReviewDetail(
+  request: AuthenticatedRequest,
+  response: Response
+): Promise<void> {
+  if (!request.authenticatedUser) {
+    sendErrorResponse(response, 401, 'Chưa xác thực.', 'UNAUTHORIZED');
     return;
   }
+
+  const paramsResult = manualReviewParamsSchema.safeParse(request.params);
+  if (!paramsResult.success) {
+    sendErrorResponse(response, 400, 'Thiếu request ID.', 'VALIDATION_ERROR');
+    return;
+  }
+
+  const queryResult = manualReviewDetailQuerySchema.safeParse(request.query);
+  if (!queryResult.success) {
+    sendErrorResponse(response, 400, 'Query detail manual review không hợp lệ.', 'VALIDATION_ERROR');
+    return;
+  }
+
   try {
-    const detail = await getManualReviewDetail(id);
-    sendSuccessResponse(res, 200, 'Lấy chi tiết manual review thành công.', detail);
+    const detail = await getManualReviewDetail(paramsResult.data.id, {
+      revealBankAccount: queryResult.data.revealBankAccount,
+      adminUserId: request.authenticatedUser?.userId
+    });
+    sendSuccessResponse(response, 200, 'Lấy chi tiết manual review thành công.', detail);
   } catch (error) {
-    sendErrorFromUnknown(res, error, 'Không thể lấy chi tiết manual review.');
+    sendErrorFromUnknown(response, error, 'Không thể lấy chi tiết manual review.');
   }
 }
 
 /**
  * POST /api/disbursements/:id/manual-approve
- * Mục đích: admin approve → re-enqueue PayOS transfer từ đầu.
- * authenticatedUser.userId đã được gắn bởi authMiddleware.
+ * Mục đích: admin chấp nhận retry PayOS; response 202 vì transfer chưa hoàn tất.
  */
-export async function handleManualApprove(req: Request, res: Response): Promise<void> {
-  const { id } = req.params;
-  if (!id || !id.trim()) {
-    res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Thiếu request ID.' } });
+export async function handleManualApprove(
+  request: AuthenticatedRequest,
+  response: Response
+): Promise<void> {
+  if (!request.authenticatedUser) {
+    sendErrorResponse(response, 401, 'Chưa xác thực.', 'UNAUTHORIZED');
     return;
   }
-  const adminUserId = (req as any).authenticatedUser?.userId as string ?? 'unknown';
+
+  const paramsResult = manualReviewParamsSchema.safeParse(request.params);
+  if (!paramsResult.success) {
+    sendErrorResponse(response, 400, 'Thiếu request ID.', 'VALIDATION_ERROR');
+    return;
+  }
+
   try {
-    await manualApprove(id, adminUserId);
-    sendSuccessResponse(res, 200, 'Manual approve thành công. Đã đẩy lại vào queue.', { requestId: id });
+    const result = await manualApprove(paramsResult.data.id, request.authenticatedUser.userId);
+    sendSuccessResponse(response, 202, 'Manual approve đã được chấp nhận và đẩy lại vào queue.', result);
   } catch (error) {
-    sendErrorFromUnknown(res, error, 'Manual approve thất bại.');
+    sendErrorFromUnknown(response, error, 'Manual approve thất bại.');
   }
 }
 
 /**
  * POST /api/disbursements/:id/manual-reject
- * Mục đích: admin reject với lý do rõ ràng → status = REJECTED.
- * Body: { reason: string } — tối thiểu 10 ký tự.
+ * Mục đích: admin từ chối thủ công với reason tối thiểu 10 ký tự.
  */
-export async function handleManualReject(req: Request, res: Response): Promise<void> {
-  const { id } = req.params;
-  if (!id || !id.trim()) {
-    res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Thiếu request ID.' } });
+export async function handleManualReject(
+  request: AuthenticatedRequest,
+  response: Response
+): Promise<void> {
+  if (!request.authenticatedUser) {
+    sendErrorResponse(response, 401, 'Chưa xác thực.', 'UNAUTHORIZED');
     return;
   }
-  const adminUserId = (req as any).authenticatedUser?.userId as string ?? 'unknown';
-  const { reason } = req.body as { reason?: string };
 
-  if (!reason || typeof reason !== 'string' || reason.trim().length < 10) {
-    res.status(400).json({
-      success: false,
-      error: { code: 'VALIDATION_ERROR', message: 'reason phải có ít nhất 10 ký tự.' }
-    });
+  const paramsResult = manualReviewParamsSchema.safeParse(request.params);
+  if (!paramsResult.success) {
+    sendErrorResponse(response, 400, 'Thiếu request ID.', 'VALIDATION_ERROR');
+    return;
+  }
+
+  const bodyResult = manualReviewRejectBodySchema.safeParse(request.body);
+  if (!bodyResult.success) {
+    sendErrorResponse(response, 400, 'reason phải dài từ 10 đến 1000 ký tự.', 'VALIDATION_ERROR');
     return;
   }
 
   try {
-    await manualReject(id, adminUserId, reason.trim());
-    sendSuccessResponse(res, 200, 'Manual reject thành công.', { requestId: id });
+    const result = await manualReject(
+      paramsResult.data.id,
+      request.authenticatedUser.userId,
+      bodyResult.data.reason
+    );
+    sendSuccessResponse(response, 200, 'Manual reject thành công.', result);
   } catch (error) {
-    sendErrorFromUnknown(res, error, 'Manual reject thất bại.');
+    sendErrorFromUnknown(response, error, 'Manual reject thất bại.');
   }
 }

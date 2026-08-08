@@ -1,35 +1,29 @@
 import { getLogger } from '../config/logger';
-import { findDisbursementsInManualReview } from '../models/disbursementModel';
+import { findUserById } from '../models/authModel';
 import { createUserNotification } from '../services/notificationService';
 import { getSocketServer } from '../config/socketServer';
+import {
+  claimManualReviewEscalationCandidates,
+  markManualReviewEscalationNotified,
+  reconcileMissingManualReviewQueues,
+  releaseManualReviewEscalation
+} from '../services/manualReviewService';
 
 const logger = getLogger();
 
-/**
- * Ngưỡng thời gian trước khi escalate (ms).
- * EMERGENCY: 24h — cần xử lý gấp, liên quan khẩn cấp.
- * NORMAL: 72h — đủ thời gian cho admin xử lý trong ngày làm việc.
- */
-const EMERGENCY_ESCALATION_THRESHOLD_MS = 24 * 60 * 60 * 1000;
-const NORMAL_ESCALATION_THRESHOLD_MS = 72 * 60 * 60 * 1000;
-
-/**
- * Poll mỗi 30 phút để không bỏ sót case timeout xảy ra giữa 2 chu kỳ.
- * Không cần dày hơn vì notification dùng deduplicationKey — idempotent.
- */
 const POLL_INTERVAL_MS = 30 * 60 * 1000;
+const ESCALATION_BATCH_LIMIT = 100;
+const RECONCILIATION_MAX_ITEMS_PER_RUN = 500;
 
 let intervalId: ReturnType<typeof setInterval> | null = null;
 
 /**
- * Khởi động background worker kiểm tra và escalate các disbursement bị timeout ở MANUAL_REVIEW.
- * Pattern giống startRankingScheduler — setInterval + run ngay lần đầu.
- * Mục đích: đảm bảo admin/super-admin được nhắc nhở trước khi bỏ lỡ SLA.
+ * Khởi động background worker kiểm tra queue manual review quá SLA.
+ * Mục đích: dùng SLA snapshot trên manual_review_queue thay vì disbursement.updatedAt.
  */
 export function startManualReviewEscalationWorker(): void {
-  if (intervalId) return; // Tránh double-start
+  if (intervalId) return;
 
-  // Run ngay khi khởi động để phát hiện item tồn đọng từ trước khi restart
   void checkAndEscalate();
 
   intervalId = setInterval(() => {
@@ -38,14 +32,12 @@ export function startManualReviewEscalationWorker(): void {
 
   logger.info('Manual Review Escalation Worker đã khởi động.', {
     context: {
-      emergencyThresholdHours: EMERGENCY_ESCALATION_THRESHOLD_MS / 3_600_000,
-      normalThresholdHours: NORMAL_ESCALATION_THRESHOLD_MS / 3_600_000,
       pollIntervalMinutes: POLL_INTERVAL_MS / 60_000
     }
   });
 }
 
-/** Dừng worker khi graceful shutdown — tránh memory leak. */
+/** Dừng worker khi graceful shutdown để tránh memory leak. */
 export function stopManualReviewEscalationWorker(): void {
   if (intervalId) {
     clearInterval(intervalId);
@@ -54,73 +46,98 @@ export function stopManualReviewEscalationWorker(): void {
 }
 
 /**
- * Kiểm tra từng disbursement MANUAL_REVIEW:
- *   - EMERGENCY + quá 24h → escalate super-admin
- *   - NORMAL + quá 72h → escalate admin
- * Dùng deduplicationKey để mỗi disbursement chỉ escalate một lần (idempotent).
+ * Kiểm tra queue quá SLA và gửi escalation đúng một lần mỗi review cycle.
  */
+/** Chạy một vòng escalation thủ công để test và job scheduler có thể tái sử dụng cùng logic. */
+export async function runManualReviewEscalationOnce(): Promise<void> {
+  await checkAndEscalate();
+}
+
+/** Kiểm tra queue quá SLA và gửi escalation đúng một lần mỗi review cycle. */
 async function checkAndEscalate(): Promise<void> {
   try {
-    const items = await findDisbursementsInManualReview();
-    if (items.length === 0) return;
+    await reconcileMissingManualReviewQueues({
+      pageSize: ESCALATION_BATCH_LIMIT,
+      maxItems: RECONCILIATION_MAX_ITEMS_PER_RUN
+    });
 
-    const now = Date.now();
+    const superAdminUserId = process.env.SUPER_ADMIN_USER_ID?.trim();
+    if (!superAdminUserId) {
+      logger.error('Thiếu SUPER_ADMIN_USER_ID cho manual review escalation.');
+      return;
+    }
+
+    const superAdminUser = await findUserById(superAdminUserId);
+    if (!superAdminUser || superAdminUser.role !== 'admin' || superAdminUser.accountStatus !== 'ACTIVE') {
+      logger.error('SUPER_ADMIN_USER_ID không trỏ tới admin ACTIVE hợp lệ.', {
+        superAdminConfigured: Boolean(superAdminUserId)
+      });
+      return;
+    }
+
+    const now = new Date();
+    const claimedItems = await claimManualReviewEscalationCandidates(now, ESCALATION_BATCH_LIMIT);
+    if (claimedItems.length === 0) {
+      return;
+    }
+
     let escalatedCount = 0;
+    for (const item of claimedItems) {
+      try {
+        const hoursOverdue = Math.max(0, Math.floor((now.getTime() - item.slaDeadline.getTime()) / 3_600_000));
 
-    for (const item of items) {
-      const ageMs = now - new Date(item.updatedAt).getTime();
-      const isEmergency = item.requestMode === 'EMERGENCY';
-      const threshold = isEmergency ? EMERGENCY_ESCALATION_THRESHOLD_MS : NORMAL_ESCALATION_THRESHOLD_MS;
+        await createUserNotification({
+          userId: superAdminUserId,
+          notificationType: 'MANUAL_REVIEW_ESCALATION',
+          title: `Manual review quá SLA: ${item.disbursementRequestId.slice(0, 12)}...`,
+          content: `Disbursement ${item.disbursementRequestId} của project ${item.projectId} đã quá SLA manual review.`,
+          deduplicationKey: `MANUAL_REVIEW_ESCALATION:${item.queueId}`,
+          priority: 'CRITICAL',
+          channels: ['IN_APP', 'EMAIL', 'PUSH'],
+          metadata: {
+            requestId: item.disbursementRequestId,
+            queueId: item.queueId,
+            reviewCycle: item.reviewCycle,
+            projectId: item.projectId,
+            organizationId: item.organizationId,
+            assignedAdminId: item.assignedAdminId,
+            slaDeadline: item.slaDeadline.toISOString(),
+            hoursOverdue
+          }
+        });
 
-      if (ageMs < threshold) continue;
-
-      const tierLabel = isEmergency ? 'EMERGENCY' : 'NORMAL';
-      const hoursOverdue = Math.floor(ageMs / 3_600_000);
-
-      // deduplicationKey chứa tier để escalate riêng từng mức nếu item leo thang qua 2 tier
-      const deduplicationKey = `ESCALATION_${tierLabel}:${item.requestId}`;
-
-      // Ưu tiên env var để dễ cấu hình theo môi trường; fallback 'admin' chỉ cho local dev
-      const superAdminUserId = process.env.SUPER_ADMIN_USER_ID ?? 'admin';
-      await createUserNotification({
-        userId: superAdminUserId,
-        notificationType: 'SYSTEM',
-        title: isEmergency
-          ? `🚨 KHẨN CẤP: Disbursement ${item.requestId.slice(0, 8)}... chờ xử lý hơn ${hoursOverdue}h`
-          : `⚠️ Cảnh báo: Disbursement ${item.requestId.slice(0, 8)}... chờ xử lý hơn ${hoursOverdue}h`,
-        content: `Disbursement requestId=${item.requestId}, amount=${new Intl.NumberFormat('vi-VN').format(item.amount)}₫, project=${item.projectId} đã ở trạng thái MANUAL_REVIEW trong ${hoursOverdue} giờ (tier ${tierLabel}). Admin cần xử lý ngay.`,
-        deduplicationKey,
-        metadata: {
-          requestId: item.requestId,
-          projectId: item.projectId,
-          organizationId: item.organizationId,
-          amount: item.amount,
-          requestMode: item.requestMode,
-          hoursOverdue,
-          tier: tierLabel
+        const marked = item.escalationClaimId
+          ? await markManualReviewEscalationNotified(item.queueId, now, item.escalationClaimId)
+          : await markManualReviewEscalationNotified(item.queueId, now);
+        if (!marked) {
+          continue;
         }
-      });
+        escalatedCount += 1;
 
-      // Emit real-time alert lên admin room
-      getSocketServer()?.to('admin').emit('transfer:escalation-alert', {
-        requestId: item.requestId,
-        requestMode: item.requestMode,
-        hoursOverdue,
-        tier: tierLabel,
-        timestamp: new Date().toISOString()
-      });
-
-      escalatedCount++;
+        getSocketServer()?.to('admin').emit('transfer:escalation-alert', {
+          requestId: item.disbursementRequestId,
+          queueId: item.queueId,
+          reviewCycle: item.reviewCycle,
+          hoursOverdue,
+          timestamp: now.toISOString()
+        });
+      } catch (error) {
+        if (item.escalationClaimId) {
+          await releaseManualReviewEscalation(item.queueId, item.escalationClaimId);
+        }
+        logger.error('Gửi escalation notification thất bại, claim đã được giải phóng.', {
+          queueId: item.queueId,
+          errorMessage: String(error)
+        });
+      }
     }
 
-    if (escalatedCount > 0) {
-      logger.warn('Manual Review Escalation: phát hiện disbursement quá hạn.', {
-        context: { escalatedCount, totalManualReview: items.length }
-      });
-    }
-  } catch (err) {
+    logger.warn('Manual Review Escalation: phát hiện queue quá hạn.', {
+      context: { escalatedCount, claimedCount: claimedItems.length }
+    });
+  } catch (error) {
     logger.error('Manual Review Escalation Worker lỗi khi kiểm tra.', {
-      errorMessage: String(err)
+      errorMessage: String(error)
     });
   }
 }

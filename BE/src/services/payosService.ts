@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { sanitizeProviderError } from '../utils/sanitizeProviderError';
 
 type CreatePaymentLinkInput = {
   orderCode: string;
@@ -12,6 +13,12 @@ type CreatePaymentLinkResult = {
   paymentUrl: string;
   orderCode: string;
 };
+
+/** Tạo lỗi PayOS chỉ giữ status và body đã sanitize, không đưa raw provider response vào log chain. */
+function createSafePayosProviderError(operation: string, statusCode: number, responseText: string): Error {
+  const safeResponseText = sanitizeProviderError(responseText);
+  return new Error(`${operation}: ${statusCode}${safeResponseText ? ` ${safeResponseText}` : ''}`);
+}
 
 export type CreatePayosTransferInput = {
   requestId: string;
@@ -317,7 +324,7 @@ export async function createPayosPaymentLink(input: CreatePaymentLinkInput): Pro
 
   if (!response.ok) {
     const responseText = await response.text();
-    throw new Error(`PayOS tạo payment link thất bại: ${response.status} ${responseText}`);
+    throw createSafePayosProviderError('PayOS tạo payment link thất bại', response.status, responseText);
   }
 
   const responsePayload = (await response.json()) as {
@@ -341,7 +348,10 @@ export async function createPayosPaymentLink(input: CreatePaymentLinkInput): Pro
       : String(input.orderCode);
 
   if (!paymentUrl) {
-    throw new Error(`PayOS trả dữ liệu payment link không hợp lệ. Payload: ${JSON.stringify(responsePayload)}`);
+    const safeResponsePayload = sanitizeProviderError(responsePayload);
+    throw new Error(
+      `PayOS trả dữ liệu payment link không hợp lệ.${safeResponsePayload ? ` ${safeResponsePayload}` : ''}`
+    );
   }
 
   return {
@@ -437,43 +447,32 @@ function normalizePayosPayoutList(rawPayouts: unknown): Record<string, unknown>[
   return [];
 }
 
-/**
- * Hàm lấy payout chính từ data response PayOS.
- * Mục đích: chuẩn hóa cấu trúc payload để truy xuất status ổn định khi polling.
- */
-function getPrimaryPayosPayoutRecord(payoutData: unknown): Record<string, unknown> | null {
+/** Chuẩn hóa toàn bộ payout trong response để reconciliation không bỏ sót payout active cùng referenceId. */
+function getPayosPayoutRecords(payoutData: unknown): Record<string, unknown>[] {
   if (!payoutData) {
-    return null;
+    return [];
   }
 
   if (typeof payoutData === 'string') {
     try {
-      const parsedPayoutData = JSON.parse(payoutData) as unknown;
-      return getPrimaryPayosPayoutRecord(parsedPayoutData);
+      return getPayosPayoutRecords(JSON.parse(payoutData) as unknown);
     } catch {
-      return null;
+      return [];
     }
   }
 
   if (Array.isArray(payoutData)) {
-    for (const payoutItem of payoutData) {
-      const primaryPayoutRecord = getPrimaryPayosPayoutRecord(payoutItem);
-      if (primaryPayoutRecord) {
-        return primaryPayoutRecord;
-      }
-    }
-
-    return null;
+    return payoutData.flatMap(payoutItem => getPayosPayoutRecords(payoutItem));
   }
 
   if (typeof payoutData !== 'object') {
-    return null;
+    return [];
   }
 
   const payoutRecord = payoutData as Record<string, unknown>;
   const payoutList = normalizePayosPayoutList(payoutRecord.payouts);
   if (payoutList.length > 0) {
-    return payoutList[0];
+    return payoutList.flatMap(payoutItem => getPayosPayoutRecords(payoutItem));
   }
 
   const looksLikePayoutRecord = Boolean(
@@ -483,12 +482,21 @@ function getPrimaryPayosPayoutRecord(payoutData: unknown): Record<string, unknow
     || payoutRecord.approvalState
     || payoutRecord.transactions
   );
-
   if (looksLikePayoutRecord) {
-    return payoutRecord;
+    return [payoutRecord];
   }
 
-  return null;
+  return payoutRecord.data === undefined
+    ? []
+    : getPayosPayoutRecords(payoutRecord.data);
+}
+
+/**
+ * Hàm lấy payout chính từ data response PayOS.
+ * Mục đích: chuẩn hóa cấu trúc payload để truy xuất status ổn định khi polling.
+ */
+function getPrimaryPayosPayoutRecord(payoutData: unknown): Record<string, unknown> | null {
+  return getPayosPayoutRecords(payoutData)[0] ?? null;
 }
 
 /**
@@ -542,7 +550,7 @@ export async function createPayosTransfer(input: CreatePayosTransferInput): Prom
     }
 
     if (!response.ok) {
-      throw new Error(`PayOS transfer thất bại: ${response.status} ${responseText}`);
+      throw createSafePayosProviderError('PayOS transfer thất bại', response.status, responseText);
     }
 
     const normalizedPayload = (responsePayload || {}) as {
@@ -630,7 +638,8 @@ export async function getPayosTransferStatusByReferenceId(
 
   const transferQueryUrl = new URL(transferEndpointUrl);
   transferQueryUrl.searchParams.set('referenceId', referenceId);
-  transferQueryUrl.searchParams.set('limit', '1');
+  // Một referenceId có thể có nhiều payout sau khi retry rotate idempotency key.
+  transferQueryUrl.searchParams.set('limit', '100');
   transferQueryUrl.searchParams.set('offset', '0');
 
   const abortController = new AbortController();
@@ -656,7 +665,7 @@ export async function getPayosTransferStatusByReferenceId(
     }
 
     if (!response.ok) {
-      throw new Error(`PayOS query transfer thất bại: ${response.status} ${responseText}`);
+      throw createSafePayosProviderError('PayOS query transfer thất bại', response.status, responseText);
     }
 
     const normalizedPayload = (responsePayload || {}) as {
@@ -672,9 +681,9 @@ export async function getPayosTransferStatusByReferenceId(
     )
       ? (normalizedPayload.data as Record<string, unknown>)
       : {};
-    const primaryPayoutRecord = getPrimaryPayosPayoutRecord(normalizedPayload.data);
+    const payoutRecords = getPayosPayoutRecords(normalizedPayload.data);
 
-    if (!primaryPayoutRecord) {
+    if (payoutRecords.length === 0) {
       return {
         found: false,
         transferId: null,
@@ -685,64 +694,75 @@ export async function getPayosTransferStatusByReferenceId(
       };
     }
 
-    const primaryTransaction = getPrimaryPayosTransferTransaction(primaryPayoutRecord);
-    const transferId = String(
-      primaryPayoutRecord.id
-      || primaryPayoutRecord.transferId
-      || primaryPayoutRecord.referenceId
-      || (primaryTransaction ? primaryTransaction.id : undefined)
-      || (primaryTransaction ? primaryTransaction.transactionId : undefined)
-      || normalizedData.id
-      || normalizedData.transferId
-      || normalizedData.referenceId
-      || referenceId
-    );
+    const payoutSnapshots = payoutRecords.map((payoutRecord) => {
+      const primaryTransaction = getPrimaryPayosTransferTransaction(payoutRecord);
+      const transferId = String(
+        payoutRecord.id
+        || payoutRecord.transferId
+        || payoutRecord.referenceId
+        || (primaryTransaction ? primaryTransaction.id : undefined)
+        || (primaryTransaction ? primaryTransaction.transactionId : undefined)
+        || normalizedData.id
+        || normalizedData.transferId
+        || normalizedData.referenceId
+        || referenceId
+      );
+      const providerTransactionId = String(
+        (primaryTransaction ? primaryTransaction.transactionId : undefined)
+        || (primaryTransaction ? primaryTransaction.id : undefined)
+        || (primaryTransaction ? primaryTransaction.bankReferenceNumber : undefined)
+        || (primaryTransaction ? primaryTransaction.referenceNumber : undefined)
+        || payoutRecord.transactionId
+        || payoutRecord.bankReferenceNumber
+        || payoutRecord.referenceNumber
+        || normalizedData.transactionId
+        || normalizedData.bankReferenceNumber
+        || normalizedData.referenceNumber
+        || transferId
+      );
+      const rawTransferStatus = String(
+        (primaryTransaction ? primaryTransaction.state : undefined)
+        || (primaryTransaction ? primaryTransaction.status : undefined)
+        || (primaryTransaction ? primaryTransaction.approvalState : undefined)
+        || payoutRecord.approvalState
+        || payoutRecord.state
+        || payoutRecord.status
+        || normalizedData.approvalState
+        || normalizedData.state
+        || normalizedData.status
+        || normalizedPayload.status
+        || ''
+      );
+      const errorMessage = String(
+        (primaryTransaction ? primaryTransaction.errorMessage : undefined)
+        || (primaryTransaction ? primaryTransaction.message : undefined)
+        || payoutRecord.errorMessage
+        || payoutRecord.message
+        || normalizedData.errorMessage
+        || normalizedData.message
+        || normalizedPayload.desc
+        || ''
+      ).trim() || null;
 
-    const providerTransactionId = String(
-      (primaryTransaction ? primaryTransaction.transactionId : undefined)
-      || (primaryTransaction ? primaryTransaction.id : undefined)
-      || (primaryTransaction ? primaryTransaction.bankReferenceNumber : undefined)
-      || (primaryTransaction ? primaryTransaction.referenceNumber : undefined)
-      || primaryPayoutRecord.transactionId
-      || primaryPayoutRecord.bankReferenceNumber
-      || primaryPayoutRecord.referenceNumber
-      || normalizedData.transactionId
-      || normalizedData.bankReferenceNumber
-      || normalizedData.referenceNumber
-      || transferId
-    );
+      return {
+        transferId,
+        providerTransactionId,
+        transferStatus: mapPayosTransferStatus(rawTransferStatus),
+        errorMessage
+      };
+    });
 
-    const rawTransferStatus = String(
-      (primaryTransaction ? primaryTransaction.state : undefined)
-      || (primaryTransaction ? primaryTransaction.status : undefined)
-      || (primaryTransaction ? primaryTransaction.approvalState : undefined)
-      || primaryPayoutRecord.approvalState
-      || primaryPayoutRecord.state
-      || primaryPayoutRecord.status
-      || normalizedData.approvalState
-      || normalizedData.state
-      || normalizedData.status
-      || normalizedPayload.status
-      || ''
-    );
-
-    const errorMessage = String(
-      (primaryTransaction ? primaryTransaction.errorMessage : undefined)
-      || (primaryTransaction ? primaryTransaction.message : undefined)
-      || primaryPayoutRecord.errorMessage
-      || primaryPayoutRecord.message
-      || normalizedData.errorMessage
-      || normalizedData.message
-      || normalizedPayload.desc
-      || ''
-    ).trim() || null;
+    // Ưu tiên SUCCESS rồi PROCESSING để mọi payout active đều chặn manual action.
+    const selectedSnapshot = payoutSnapshots.find(snapshot => snapshot.transferStatus === 'SUCCESS')
+      || payoutSnapshots.find(snapshot => snapshot.transferStatus === 'PROCESSING')
+      || payoutSnapshots[0];
 
     return {
       found: true,
-      transferId,
-      providerTransactionId,
-      transferStatus: mapPayosTransferStatus(rawTransferStatus),
-      errorMessage,
+      transferId: selectedSnapshot.transferId,
+      providerTransactionId: selectedSnapshot.providerTransactionId,
+      transferStatus: selectedSnapshot.transferStatus,
+      errorMessage: selectedSnapshot.errorMessage,
       rawPayload: responsePayload
     };
   } finally {

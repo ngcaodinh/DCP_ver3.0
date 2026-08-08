@@ -13,6 +13,7 @@ import mongoose, { Schema } from 'mongoose';
 export type AdminAuditAction =
   | 'MANUAL_APPROVE'
   | 'MANUAL_REJECT'
+  | 'MANUAL_BANK_ACCOUNT_VIEW'
   | 'OVERRIDE_VOTE_APPROVE'
   | 'OVERRIDE_VOTE_REJECT'
   | 'OVERRIDE_EXPIRED';
@@ -37,7 +38,7 @@ const adminAuditLogSchema = new Schema<AdminAuditLogRecord>({
   action: {
     type: String,
     required: true,
-    enum: ['MANUAL_APPROVE', 'MANUAL_REJECT', 'OVERRIDE_VOTE_APPROVE', 'OVERRIDE_VOTE_REJECT', 'OVERRIDE_EXPIRED'],
+    enum: ['MANUAL_APPROVE', 'MANUAL_REJECT', 'MANUAL_BANK_ACCOUNT_VIEW', 'OVERRIDE_VOTE_APPROVE', 'OVERRIDE_VOTE_REJECT', 'OVERRIDE_EXPIRED'],
     index: true
   },
   targetRequestId: { type: String, required: true, index: true },

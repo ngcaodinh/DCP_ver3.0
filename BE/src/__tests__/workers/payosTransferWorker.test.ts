@@ -44,6 +44,7 @@ vi.mock('../../queues/disbursementTransferQueue', () => ({
 vi.mock('../../models/disbursementModel', () => ({
   findDisbursementByRequestId: vi.fn(),
   updateDisbursementByRequestId: vi.fn(),
+  updateDisbursementByRequestIdWithCondition: vi.fn(),
 }));
 
 vi.mock('../../models/disbursementTransferModel', () => ({
@@ -64,11 +65,16 @@ vi.mock('../../services/disbursementService', () => ({
   processDisbursementTransferWebhook: vi.fn(),
 }));
 
+vi.mock('../../services/manualReviewService', () => ({
+  openManualReviewQueueForDisbursement: vi.fn(),
+}));
+
 import * as disbursementModel from '../../models/disbursementModel';
 import * as disbursementTransferModel from '../../models/disbursementTransferModel';
 import * as payosService from '../../services/payosService';
 import * as notificationService from '../../services/notificationService';
 import * as disbursementService from '../../services/disbursementService';
+import * as manualReviewService from '../../services/manualReviewService';
 import * as disbursementTransferQueue from '../../queues/disbursementTransferQueue';
 import type { DisbursementTransferLogRecord } from '../../models/disbursementTransferModel';
 import type { Job } from 'bull';
@@ -367,9 +373,9 @@ describe('payosTransferWorker - pollTransferUntilFinal', () => {
   it('should return SUCCESS immediately when disbursement already COMPLETED', async () => {
     const { pollTransferUntilFinal } = await import('../../workers/payosTransferWorker');
     (disbursementModel.findDisbursementByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(
-      makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'COMPLETED', payosTransferStatus: 'SUCCESS' })
+      makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'COMPLETED', payosTransferStatus: 'SUCCESS', transferIdempotencyKey: 'key-1' })
     );
-    const result = await pollTransferUntilFinal('DS-TEST-001', 'transfer-123');
+    const result = await pollTransferUntilFinal('DS-TEST-001', 'key-1');
     expect(result).toBe('SUCCESS');
     expect(payosService.getPayosTransferStatusByReferenceId).not.toHaveBeenCalled();
   });
@@ -377,9 +383,9 @@ describe('payosTransferWorker - pollTransferUntilFinal', () => {
   it('should return SUCCESS immediately when disbursement already has payosTransferStatus SUCCESS', async () => {
     const { pollTransferUntilFinal } = await import('../../workers/payosTransferWorker');
     (disbursementModel.findDisbursementByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(
-      makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'APPROVED', payosTransferStatus: 'SUCCESS' })
+      makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'APPROVED', payosTransferStatus: 'SUCCESS', transferIdempotencyKey: 'key-1' })
     );
-    const result = await pollTransferUntilFinal('DS-TEST-001', 'transfer-123');
+    const result = await pollTransferUntilFinal('DS-TEST-001', 'key-1');
     expect(result).toBe('SUCCESS');
     expect(payosService.getPayosTransferStatusByReferenceId).not.toHaveBeenCalled();
   });
@@ -387,47 +393,66 @@ describe('payosTransferWorker - pollTransferUntilFinal', () => {
   it('should return FAILED immediately when disbursement is in MANUAL_REVIEW', async () => {
     const { pollTransferUntilFinal } = await import('../../workers/payosTransferWorker');
     (disbursementModel.findDisbursementByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(
-      makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'APPROVED', payosTransferStatus: 'MANUAL_REVIEW' })
+      makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'APPROVED', payosTransferStatus: 'MANUAL_REVIEW', transferIdempotencyKey: 'key-1' })
     );
-    const result = await pollTransferUntilFinal('DS-TEST-001', 'transfer-123');
-    expect(result).toBe('FAILED');
+    const result = await pollTransferUntilFinal('DS-TEST-001', 'key-1');
+    expect(result).toBe('STALE');
+    expect(payosService.getPayosTransferStatusByReferenceId).not.toHaveBeenCalled();
+  });
+
+  it('should return STALE when idempotency key rotates during polling', async () => {
+    const { pollTransferUntilFinal } = await import('../../workers/payosTransferWorker');
+    (disbursementModel.findDisbursementByRequestId as ReturnType<typeof vi.fn>)
+      .mockResolvedValue(makeMockDisbursement({
+        requestId: 'DS-TEST-001',
+        status: 'APPROVED',
+        payosTransferStatus: 'PROCESSING',
+        transferIdempotencyKey: 'new-key'
+      }));
+
+    const result = await pollTransferUntilFinal('DS-TEST-001', 'old-key');
+
+    expect(result).toBe('STALE');
     expect(payosService.getPayosTransferStatusByReferenceId).not.toHaveBeenCalled();
   });
 
   it('should return SUCCESS when PayOS returns SUCCESS during polling', async () => {
     const { pollTransferUntilFinal } = await import('../../workers/payosTransferWorker');
     (disbursementModel.findDisbursementByRequestId as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce(makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'APPROVED', payosTransferStatus: null }))
-      .mockResolvedValueOnce(makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'APPROVED', payosTransferStatus: 'SUCCESS' }));
+      .mockResolvedValueOnce(makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'APPROVED', payosTransferStatus: 'PROCESSING', transferIdempotencyKey: 'key-1' }))
+      .mockResolvedValueOnce(makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'APPROVED', payosTransferStatus: 'PROCESSING', transferIdempotencyKey: 'key-1' }))
+      .mockResolvedValueOnce(makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'APPROVED', payosTransferStatus: 'SUCCESS', transferIdempotencyKey: 'key-1' }));
     (payosService.getPayosTransferStatusByReferenceId as ReturnType<typeof vi.fn>).mockResolvedValue({
       found: true,
       transferStatus: 'SUCCESS',
     });
-    const result = await pollTransferUntilFinal('DS-TEST-001', 'transfer-123');
+    const result = await pollTransferUntilFinal('DS-TEST-001', 'key-1');
     expect(result).toBe('SUCCESS');
+    expect(payosService.getPayosTransferStatusByReferenceId).toHaveBeenCalledWith('DS-TEST-001');
   });
 
   it('should return FAILED when PayOS returns FAILED during polling', async () => {
     const { pollTransferUntilFinal } = await import('../../workers/payosTransferWorker');
     (disbursementModel.findDisbursementByRequestId as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce(makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'APPROVED', payosTransferStatus: null }));
+      .mockResolvedValueOnce(makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'APPROVED', payosTransferStatus: 'PROCESSING', transferIdempotencyKey: 'key-1' }))
+      .mockResolvedValueOnce(makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'APPROVED', payosTransferStatus: 'PROCESSING', transferIdempotencyKey: 'key-1' }));
     (payosService.getPayosTransferStatusByReferenceId as ReturnType<typeof vi.fn>).mockResolvedValue({
       found: true,
       transferStatus: 'FAILED',
     });
-    const result = await pollTransferUntilFinal('DS-TEST-001', 'transfer-123');
+    const result = await pollTransferUntilFinal('DS-TEST-001', 'key-1');
     expect(result).toBe('FAILED');
   });
 
   it('should return PROCESSING after max polling attempts exhausted', async () => {
     const { pollTransferUntilFinal } = await import('../../workers/payosTransferWorker');
     (disbursementModel.findDisbursementByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(
-      makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'APPROVED', payosTransferStatus: null })
+      makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'APPROVED', payosTransferStatus: 'PROCESSING', transferIdempotencyKey: 'key-1' })
     );
     (payosService.getPayosTransferStatusByReferenceId as ReturnType<typeof vi.fn>).mockResolvedValue({
       found: false,
     });
-    const result = await pollTransferUntilFinal('DS-TEST-001', 'transfer-123');
+    const result = await pollTransferUntilFinal('DS-TEST-001', 'key-1');
     expect(result).toBe('PROCESSING');
     expect(payosService.getPayosTransferStatusByReferenceId).toHaveBeenCalledTimes(3);
   });
@@ -442,16 +467,21 @@ describe('payosTransferWorker - moveToManualReview', () => {
 
   it('should update disbursement to MANUAL_REVIEW and remove pending jobs', async () => {
     const { moveToManualReview } = await import('../../workers/payosTransferWorker');
-    (disbursementModel.updateDisbursementByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(
+    (disbursementModel.updateDisbursementByRequestIdWithCondition as ReturnType<typeof vi.fn>).mockResolvedValue(
       makeMockDisbursement({ requestId: 'DS-TEST-001', payosTransferStatus: 'MANUAL_REVIEW' })
     );
     (disbursementTransferQueue.removePendingJobsByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(2);
-    (notificationService.createUserNotification as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+    (manualReviewService.openManualReviewQueueForDisbursement as ReturnType<typeof vi.fn>).mockResolvedValue({});
 
-    await moveToManualReview('DS-TEST-001', 'PayOS API error', 'transfer-456');
+    await moveToManualReview('DS-TEST-001', 'PayOS API error', 'transfer-456', 'key-001');
 
-    expect(disbursementModel.updateDisbursementByRequestId).toHaveBeenCalledWith(
+    expect(disbursementModel.updateDisbursementByRequestIdWithCondition).toHaveBeenCalledWith(
       'DS-TEST-001',
+      expect.objectContaining({
+        status: { $nin: ['COMPLETED', 'REJECTED', 'CANCELLED'] },
+        payosTransferStatus: { $ne: 'SUCCESS' },
+        transferIdempotencyKey: 'key-001'
+      }),
       expect.objectContaining({
         payosTransferStatus: 'MANUAL_REVIEW',
         payosTransferLastError: 'PayOS API error',
@@ -459,40 +489,60 @@ describe('payosTransferWorker - moveToManualReview', () => {
       })
     );
     expect(disbursementTransferQueue.removePendingJobsByRequestId).toHaveBeenCalledWith('DS-TEST-001');
-    expect(notificationService.createUserNotification).toHaveBeenCalled();
+    expect(manualReviewService.openManualReviewQueueForDisbursement).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reason: 'PayOS API error',
+        source: 'payos_worker'
+      })
+    );
   });
 
   it('should be idempotent when called multiple times', async () => {
     const { moveToManualReview } = await import('../../workers/payosTransferWorker');
-    (disbursementModel.updateDisbursementByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(
+    (disbursementModel.updateDisbursementByRequestIdWithCondition as ReturnType<typeof vi.fn>).mockResolvedValue(
       makeMockDisbursement({ requestId: 'DS-TEST-001', payosTransferStatus: 'MANUAL_REVIEW' })
     );
     (disbursementTransferQueue.removePendingJobsByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(0);
-    (notificationService.createUserNotification as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+    (manualReviewService.openManualReviewQueueForDisbursement as ReturnType<typeof vi.fn>).mockResolvedValue({});
 
     await moveToManualReview('DS-TEST-001', 'Error 1');
     await moveToManualReview('DS-TEST-001', 'Error 2');
 
     // Should be called twice (idempotent, no throwing)
-    expect(disbursementModel.updateDisbursementByRequestId).toHaveBeenCalledTimes(2);
+    expect(disbursementModel.updateDisbursementByRequestIdWithCondition).toHaveBeenCalledTimes(2);
     expect(disbursementTransferQueue.removePendingJobsByRequestId).toHaveBeenCalledTimes(2);
   });
 
   it('should handle case where finalTransferId is undefined', async () => {
     const { moveToManualReview } = await import('../../workers/payosTransferWorker');
-    (disbursementModel.updateDisbursementByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(
+    (disbursementModel.updateDisbursementByRequestIdWithCondition as ReturnType<typeof vi.fn>).mockResolvedValue(
       makeMockDisbursement({ requestId: 'DS-TEST-001', payosTransferStatus: 'MANUAL_REVIEW' })
     );
     (disbursementTransferQueue.removePendingJobsByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(0);
-    (notificationService.createUserNotification as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+    (manualReviewService.openManualReviewQueueForDisbursement as ReturnType<typeof vi.fn>).mockResolvedValue({});
 
     await moveToManualReview('DS-TEST-001', 'Timeout error');
 
     // When finalTransferId is undefined, payosTransferId should not be set in the update payload
-    const updateCall = (disbursementModel.updateDisbursementByRequestId as ReturnType<typeof vi.fn>).mock.calls[0];
-    const updatePayload = updateCall[1] as Record<string, unknown>;
+    const updateCall = (disbursementModel.updateDisbursementByRequestIdWithCondition as ReturnType<typeof vi.fn>).mock.calls[0];
+    const updatePayload = updateCall[2] as Record<string, unknown>;
     expect(updatePayload.payosTransferStatus).toBe('MANUAL_REVIEW');
     expect('payosTransferId' in updatePayload && updatePayload.payosTransferId !== undefined).toBe(false);
+  });
+
+  it('should skip stale worker when idempotency key no longer matches', async () => {
+    const { moveToManualReview } = await import('../../workers/payosTransferWorker');
+    (disbursementModel.updateDisbursementByRequestIdWithCondition as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+
+    await moveToManualReview('DS-TEST-001', 'Old worker failed', 'transfer-old', 'old-key');
+
+    expect(disbursementModel.updateDisbursementByRequestIdWithCondition).toHaveBeenCalledWith(
+      'DS-TEST-001',
+      expect.objectContaining({ transferIdempotencyKey: 'old-key' }),
+      expect.objectContaining({ payosTransferStatus: 'MANUAL_REVIEW' })
+    );
+    expect(disbursementTransferQueue.removePendingJobsByRequestId).not.toHaveBeenCalled();
+    expect(manualReviewService.openManualReviewQueueForDisbursement).not.toHaveBeenCalled();
   });
 });
 
@@ -503,6 +553,10 @@ describe('payosTransferWorker - processTransferJob', () => {
     vi.clearAllMocks();
     vi.mocked(disbursementModel.findDisbursementByRequestId).mockReset();
     vi.mocked(disbursementModel.updateDisbursementByRequestId).mockReset();
+    vi.mocked(disbursementModel.updateDisbursementByRequestIdWithCondition).mockReset();
+    vi.mocked(disbursementModel.updateDisbursementByRequestIdWithCondition).mockResolvedValue(
+      makeMockDisbursement({ requestId: 'DS-TEST-001', payosTransferStatus: 'MANUAL_REVIEW' }) as never
+    );
     vi.mocked(disbursementTransferModel.createTransferLog).mockReset();
     vi.mocked(disbursementTransferModel.updateTransferLogById).mockReset();
     vi.mocked(payosService.createPayosTransfer).mockReset();
@@ -510,6 +564,7 @@ describe('payosTransferWorker - processTransferJob', () => {
     vi.mocked(disbursementService.processDisbursementTransferWebhook).mockReset();
     vi.mocked(disbursementTransferQueue.removePendingJobsByRequestId).mockReset();
     vi.mocked(notificationService.createUserNotification).mockReset();
+    vi.mocked(manualReviewService.openManualReviewQueueForDisbursement).mockReset();
   });
 
   afterEach(() => {
@@ -553,6 +608,40 @@ describe('payosTransferWorker - processTransferJob', () => {
     const mockJob = makeMockJob({ requestId: 'DS-TEST-001', attemptNumber: 1, idempotencyKey: 'key-1' });
     await processTransferJob(mockJob);
     expect(payosService.createPayosTransfer).not.toHaveBeenCalled();
+  });
+
+  it('should skip job when disbursement is already in MANUAL_REVIEW', async () => {
+    const { processTransferJob } = await import('../../workers/payosTransferWorker');
+    (disbursementModel.findDisbursementByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeMockDisbursement({
+        requestId: 'DS-TEST-001',
+        status: 'APPROVED',
+        payosTransferStatus: 'MANUAL_REVIEW',
+        transferIdempotencyKey: 'key-1'
+      })
+    );
+
+    await processTransferJob(makeMockJob({ requestId: 'DS-TEST-001', attemptNumber: 2, idempotencyKey: 'key-1' }));
+
+    expect(payosService.createPayosTransfer).not.toHaveBeenCalled();
+    expect(disbursementModel.updateDisbursementByRequestId).not.toHaveBeenCalled();
+  });
+
+  it('should skip job when its idempotency key is stale', async () => {
+    const { processTransferJob } = await import('../../workers/payosTransferWorker');
+    (disbursementModel.findDisbursementByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeMockDisbursement({
+        requestId: 'DS-TEST-001',
+        status: 'APPROVED',
+        payosTransferStatus: 'PROCESSING',
+        transferIdempotencyKey: 'new-key'
+      })
+    );
+
+    await processTransferJob(makeMockJob({ requestId: 'DS-TEST-001', attemptNumber: 2, idempotencyKey: 'old-key' }));
+
+    expect(payosService.createPayosTransfer).not.toHaveBeenCalled();
+    expect(disbursementModel.updateDisbursementByRequestId).not.toHaveBeenCalled();
   });
 
   it('should move to manual review when disbursement is timed out', async () => {
@@ -606,13 +695,102 @@ describe('payosTransferWorker - processTransferJob', () => {
     );
   });
 
+  it('should not restore PROCESSING when state changes while PayOS call is in flight', async () => {
+    const { processTransferJob } = await import('../../workers/payosTransferWorker');
+    const initialDisbursement = makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'APPROVED' });
+    const preparedDisbursement = makeMockDisbursement({
+      requestId: 'DS-TEST-001',
+      status: 'APPROVED',
+      payosTransferStatus: 'PROCESSING',
+      transferIdempotencyKey: 'key-1'
+    });
+    (disbursementModel.findDisbursementByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(initialDisbursement);
+    (disbursementModel.updateDisbursementByRequestIdWithCondition as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(preparedDisbursement)
+      .mockResolvedValueOnce(null);
+    (disbursementTransferModel.createTransferLog as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeMockTransferLog({ transferLogId: 'TRF-001' })
+    );
+    (payosService.createPayosTransfer as ReturnType<typeof vi.fn>).mockResolvedValue({
+      transferId: 'payos-123',
+      providerTransactionId: 'prov-456',
+      transferStatus: 'PROCESSING',
+      rawPayload: {}
+    });
+
+    await processTransferJob(makeMockJob({ requestId: 'DS-TEST-001', attemptNumber: 1, idempotencyKey: 'key-1' }));
+
+    expect(disbursementService.processDisbursementTransferWebhook).not.toHaveBeenCalled();
+    expect(disbursementTransferModel.updateTransferLogById).not.toHaveBeenCalled();
+  });
+
+  it('should not finalize a stale polling result after idempotency key rotation', async () => {
+    const { processTransferJob } = await import('../../workers/payosTransferWorker');
+    const initialDisbursement = makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'APPROVED' });
+    const preparedDisbursement = makeMockDisbursement({
+      requestId: 'DS-TEST-001',
+      status: 'APPROVED',
+      payosTransferStatus: 'PROCESSING',
+      transferIdempotencyKey: 'key-1'
+    });
+    const rotatedDisbursement = makeMockDisbursement({
+      requestId: 'DS-TEST-001',
+      status: 'APPROVED',
+      payosTransferStatus: 'PROCESSING',
+      transferIdempotencyKey: 'key-2'
+    });
+    (disbursementModel.findDisbursementByRequestId as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(initialDisbursement)
+      .mockResolvedValueOnce(initialDisbursement)
+      .mockResolvedValueOnce(preparedDisbursement)
+      .mockResolvedValueOnce(rotatedDisbursement);
+    (disbursementModel.updateDisbursementByRequestIdWithCondition as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(preparedDisbursement)
+      .mockResolvedValueOnce(preparedDisbursement);
+    (disbursementTransferModel.createTransferLog as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeMockTransferLog({ transferLogId: 'TRF-001' })
+    );
+    (disbursementTransferModel.updateTransferLogById as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeMockTransferLog({ transferLogId: 'TRF-001', status: 'PROCESSING' })
+    );
+    (payosService.createPayosTransfer as ReturnType<typeof vi.fn>).mockResolvedValue({
+      transferId: 'payos-old',
+      providerTransactionId: 'provider-old',
+      transferStatus: 'PROCESSING',
+      rawPayload: {}
+    });
+    (payosService.getPayosTransferStatusByReferenceId as ReturnType<typeof vi.fn>).mockResolvedValue({
+      found: true,
+      transferStatus: 'SUCCESS'
+    });
+
+    await processTransferJob(makeMockJob({ requestId: 'DS-TEST-001', attemptNumber: 1, idempotencyKey: 'key-1' }));
+
+    expect(disbursementService.processDisbursementTransferWebhook).not.toHaveBeenCalled();
+  });
+
   it('should handle PayOS FAILED - move to manual review when max attempts reached', async () => {
     const { processTransferJob } = await import('../../workers/payosTransferWorker');
+    const activeDisbursement = makeMockDisbursement({
+      requestId: 'DS-TEST-001',
+      status: 'APPROVED',
+      payosTransferStatus: 'PROCESSING',
+      transferIdempotencyKey: 'key-1'
+    });
+    const manualReviewDisbursement = makeMockDisbursement({
+      requestId: 'DS-TEST-001',
+      status: 'APPROVED',
+      payosTransferStatus: 'MANUAL_REVIEW',
+      transferIdempotencyKey: 'key-1'
+    });
     (disbursementModel.findDisbursementByRequestId as ReturnType<typeof vi.fn>)
-      .mockResolvedValue(makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'APPROVED' }));
-    (disbursementModel.updateDisbursementByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(
-      makeMockDisbursement({ requestId: 'DS-TEST-001', payosTransferStatus: 'PROCESSING' })
-    );
+      .mockResolvedValueOnce(makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'APPROVED' }))
+      .mockResolvedValueOnce(makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'APPROVED' }))
+      .mockResolvedValue(activeDisbursement);
+    (disbursementModel.updateDisbursementByRequestIdWithCondition as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(activeDisbursement)
+      .mockResolvedValueOnce(activeDisbursement)
+      .mockResolvedValueOnce(manualReviewDisbursement);
     (disbursementTransferModel.createTransferLog as ReturnType<typeof vi.fn>).mockResolvedValue(
       makeMockTransferLog({ transferLogId: 'TRF-001' })
     );
@@ -623,11 +801,8 @@ describe('payosTransferWorker - processTransferJob', () => {
       transferId: 'payos-123',
       providerTransactionId: 'prov-456',
       transferStatus: 'FAILED',
-      rawPayload: { message: 'PayOS failed' },
+      rawPayload: { message: 'accountNumber: 1234 567890; holderName: Nguyen Van A' },
     });
-    (disbursementModel.updateDisbursementByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(
-      makeMockDisbursement({ requestId: 'DS-TEST-001', payosTransferStatus: 'MANUAL_REVIEW' })
-    );
     (disbursementTransferQueue.removePendingJobsByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(0);
     (notificationService.createUserNotification as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
 
@@ -635,22 +810,32 @@ describe('payosTransferWorker - processTransferJob', () => {
     const mockJob = makeMockJob({ requestId: 'DS-TEST-001', attemptNumber: 3, idempotencyKey: 'key-1' });
     await processTransferJob(mockJob);
 
-    expect(disbursementModel.updateDisbursementByRequestId).toHaveBeenCalledWith(
+    expect(disbursementModel.updateDisbursementByRequestIdWithCondition).toHaveBeenCalledWith(
       'DS-TEST-001',
+      expect.objectContaining({ transferIdempotencyKey: 'key-1' }),
       expect.objectContaining({ payosTransferStatus: 'MANUAL_REVIEW' })
+    );
+    expect(disbursementTransferModel.updateTransferLogById).toHaveBeenCalledWith(
+      'TRF-001',
+      expect.objectContaining({ errorMessage: expect.not.stringContaining('1234 567890') })
     );
   });
 
   it('should handle PayOS PROCESSING → polling SUCCESS', async () => {
     const { processTransferJob } = await import('../../workers/payosTransferWorker');
+    const activeDisbursement = makeMockDisbursement({
+      requestId: 'DS-TEST-001',
+      status: 'APPROVED',
+      payosTransferStatus: 'PROCESSING',
+      transferIdempotencyKey: 'key-1'
+    });
     (disbursementModel.findDisbursementByRequestId as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce(makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'APPROVED' }))
-      .mockResolvedValueOnce(makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'APPROVED', payosTransferStatus: 'PROCESSING' }))
-      .mockResolvedValueOnce(makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'APPROVED', payosTransferStatus: 'SUCCESS' }))
-      .mockResolvedValueOnce(makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'COMPLETED', payosTransferStatus: 'SUCCESS' }));
-    (disbursementModel.updateDisbursementByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(
-      makeMockDisbursement({ requestId: 'DS-TEST-001', payosTransferStatus: 'PROCESSING' })
-    );
+      .mockResolvedValueOnce(makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'APPROVED' }))
+      .mockResolvedValue(activeDisbursement);
+    (disbursementModel.updateDisbursementByRequestIdWithCondition as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(activeDisbursement)
+      .mockResolvedValueOnce(activeDisbursement);
     (disbursementTransferModel.createTransferLog as ReturnType<typeof vi.fn>).mockResolvedValue(
       makeMockTransferLog({ transferLogId: 'TRF-001' })
     );
@@ -679,12 +864,26 @@ describe('payosTransferWorker - processTransferJob', () => {
 
   it('should handle PayOS PROCESSING → polling FAILED', async () => {
     const { processTransferJob } = await import('../../workers/payosTransferWorker');
+    const activeDisbursement = makeMockDisbursement({
+      requestId: 'DS-TEST-001',
+      status: 'APPROVED',
+      payosTransferStatus: 'PROCESSING',
+      transferIdempotencyKey: 'key-1'
+    });
+    const manualReviewDisbursement = makeMockDisbursement({
+      requestId: 'DS-TEST-001',
+      status: 'APPROVED',
+      payosTransferStatus: 'MANUAL_REVIEW',
+      transferIdempotencyKey: 'key-1'
+    });
     (disbursementModel.findDisbursementByRequestId as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce(makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'APPROVED' }))
-      .mockResolvedValueOnce(makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'APPROVED', payosTransferStatus: 'PROCESSING' }));
-    (disbursementModel.updateDisbursementByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(
-      makeMockDisbursement({ requestId: 'DS-TEST-001', payosTransferStatus: 'PROCESSING' })
-    );
+      .mockResolvedValueOnce(makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'APPROVED' }))
+      .mockResolvedValue(activeDisbursement);
+    (disbursementModel.updateDisbursementByRequestIdWithCondition as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(activeDisbursement)
+      .mockResolvedValueOnce(activeDisbursement)
+      .mockResolvedValueOnce(manualReviewDisbursement);
     (disbursementTransferModel.createTransferLog as ReturnType<typeof vi.fn>).mockResolvedValue(
       makeMockTransferLog({ transferLogId: 'TRF-001' })
     );
@@ -711,10 +910,129 @@ describe('payosTransferWorker - processTransferJob', () => {
     const mockJob = makeMockJob({ requestId: 'DS-TEST-001', attemptNumber: 3, idempotencyKey: 'key-1' });
     await processTransferJob(mockJob);
 
-    expect(disbursementModel.updateDisbursementByRequestId).toHaveBeenCalledWith(
+    expect(disbursementModel.updateDisbursementByRequestIdWithCondition).toHaveBeenCalledWith(
       'DS-TEST-001',
+      expect.objectContaining({ transferIdempotencyKey: 'key-1' }),
       expect.objectContaining({ payosTransferStatus: 'MANUAL_REVIEW' })
     );
+  });
+
+  it('should retry PROCESSING polling with the same key before max attempts', async () => {
+    const { processTransferJob } = await import('../../workers/payosTransferWorker');
+    const processingDisbursement = makeMockDisbursement({
+      requestId: 'DS-TEST-001',
+      status: 'APPROVED',
+      payosTransferStatus: 'PROCESSING',
+      transferIdempotencyKey: 'key-1'
+    });
+    (disbursementModel.findDisbursementByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(processingDisbursement);
+    (disbursementModel.updateDisbursementByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(processingDisbursement);
+    (disbursementTransferModel.createTransferLog as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeMockTransferLog({ transferLogId: 'TRF-001' })
+    );
+    (disbursementTransferModel.updateTransferLogById as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeMockTransferLog({ transferLogId: 'TRF-001', status: 'PROCESSING' })
+    );
+    (payosService.createPayosTransfer as ReturnType<typeof vi.fn>).mockResolvedValue({
+      transferId: 'payos-123',
+      providerTransactionId: 'prov-456',
+      transferStatus: 'PROCESSING',
+      rawPayload: {}
+    });
+    (payosService.getPayosTransferStatusByReferenceId as ReturnType<typeof vi.fn>).mockResolvedValue({ found: false });
+
+    await processTransferJob(makeMockJob({ requestId: 'DS-TEST-001', attemptNumber: 1, idempotencyKey: 'key-1' }));
+
+    expect(disbursementTransferQueue.enqueueDisbursementTransfer).toHaveBeenCalledWith(
+      'DS-TEST-001',
+      2,
+      'key-1',
+      { delay: 60_000 }
+    );
+    expect(disbursementTransferModel.updateTransferLogById).toHaveBeenCalledWith(
+      'TRF-001',
+      expect.objectContaining({ status: 'PROCESSING' })
+    );
+  });
+
+  it('should rotate idempotency key after provider confirms terminal FAILED', async () => {
+    const { processTransferJob } = await import('../../workers/payosTransferWorker');
+    const activeDisbursement = makeMockDisbursement({
+      requestId: 'DS-TEST-001',
+      status: 'APPROVED',
+      payosTransferStatus: 'PROCESSING',
+      transferIdempotencyKey: 'key-1'
+    });
+    const rotatedDisbursement = makeMockDisbursement({
+      ...activeDisbursement,
+      transferIdempotencyKey: 'auto-retry-DS-TEST-001-generated'
+    });
+    (disbursementModel.findDisbursementByRequestId as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'APPROVED' }))
+      .mockResolvedValueOnce(makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'APPROVED' }))
+      .mockResolvedValue(activeDisbursement);
+    (disbursementModel.updateDisbursementByRequestIdWithCondition as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(activeDisbursement)
+      .mockResolvedValueOnce(activeDisbursement)
+      .mockResolvedValueOnce(rotatedDisbursement);
+    (disbursementTransferModel.createTransferLog as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeMockTransferLog({ transferLogId: 'TRF-001' })
+    );
+    (disbursementTransferModel.updateTransferLogById as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeMockTransferLog({ transferLogId: 'TRF-001', status: 'FAILED' })
+    );
+    (payosService.createPayosTransfer as ReturnType<typeof vi.fn>).mockResolvedValue({
+      transferId: 'payos-123',
+      providerTransactionId: 'prov-456',
+      transferStatus: 'FAILED',
+      rawPayload: { message: 'PayOS terminal failure' }
+    });
+
+    await processTransferJob(makeMockJob({ requestId: 'DS-TEST-001', attemptNumber: 1, idempotencyKey: 'key-1' }));
+
+    expect(disbursementModel.updateDisbursementByRequestIdWithCondition).toHaveBeenLastCalledWith(
+      'DS-TEST-001',
+      expect.objectContaining({ transferIdempotencyKey: 'key-1' }),
+      expect.objectContaining({ transferIdempotencyKey: expect.stringMatching(/^auto-retry-DS-TEST-001-/) })
+    );
+    expect(disbursementTransferQueue.enqueueDisbursementTransfer).toHaveBeenCalledWith(
+      'DS-TEST-001',
+      2,
+      expect.stringMatching(/^auto-retry-DS-TEST-001-/),
+      { delay: 60_000 }
+    );
+  });
+
+  it('should not enqueue retry when the disbursement leaves the chain during failure handling', async () => {
+    const { processTransferJob } = await import('../../workers/payosTransferWorker');
+    const initialDisbursement = makeMockDisbursement({ requestId: 'DS-TEST-001', status: 'APPROVED' });
+    const manualReviewDisbursement = makeMockDisbursement({
+      requestId: 'DS-TEST-001',
+      status: 'APPROVED',
+      payosTransferStatus: 'MANUAL_REVIEW',
+      transferIdempotencyKey: 'key-1'
+    });
+    (disbursementModel.findDisbursementByRequestId as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(initialDisbursement)
+      .mockResolvedValueOnce(initialDisbursement)
+      .mockResolvedValueOnce(manualReviewDisbursement);
+    (disbursementModel.updateDisbursementByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(initialDisbursement);
+    (disbursementTransferModel.createTransferLog as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeMockTransferLog({ transferLogId: 'TRF-001' })
+    );
+    (disbursementTransferModel.updateTransferLogById as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeMockTransferLog({ transferLogId: 'TRF-001', status: 'FAILED' })
+    );
+    (payosService.createPayosTransfer as ReturnType<typeof vi.fn>).mockResolvedValue({
+      transferId: 'payos-123',
+      providerTransactionId: 'prov-456',
+      transferStatus: 'FAILED',
+      rawPayload: { message: 'PayOS failed' }
+    });
+
+    await processTransferJob(makeMockJob({ requestId: 'DS-TEST-001', attemptNumber: 1, idempotencyKey: 'key-1' }));
+
+    expect(disbursementTransferQueue.enqueueDisbursementTransfer).not.toHaveBeenCalled();
   });
 
   it('should handle exception from createPayosTransfer and move to manual review at max attempts', async () => {
@@ -741,8 +1059,9 @@ describe('payosTransferWorker - processTransferJob', () => {
     const mockJob = makeMockJob({ requestId: 'DS-TEST-001', attemptNumber: 3, idempotencyKey: 'key-1' });
     await processTransferJob(mockJob);
 
-    expect(disbursementModel.updateDisbursementByRequestId).toHaveBeenCalledWith(
+    expect(disbursementModel.updateDisbursementByRequestIdWithCondition).toHaveBeenCalledWith(
       'DS-TEST-001',
+      expect.objectContaining({ transferIdempotencyKey: 'key-1' }),
       expect.objectContaining({ payosTransferStatus: 'MANUAL_REVIEW' })
     );
     expect(disbursementTransferModel.updateTransferLogById).toHaveBeenCalledWith(

@@ -7,6 +7,7 @@ import { extractBearerToken } from '../utils/tokenExtractor';
 type JwtClaims = {
   userId: string;
   role: string;
+  authVersion?: number;
 };
 
 type AuthenticatedRequest = Request & {
@@ -36,10 +37,11 @@ export function createAuthenticationMiddleware() {
       }) as JwtClaims;
       request.authenticatedUser = {
         userId: decodedPayload.userId,
-        role: decodedPayload.role
+        role: decodedPayload.role,
+        authVersion: decodedPayload.authVersion ?? 1
       };
       next();
-    } catch (_error) {
+    } catch {
       sendErrorResponse(response, 401, 'Access token không hợp lệ hoặc đã hết hạn.', 'UNAUTHENTICATED');
     }
   };

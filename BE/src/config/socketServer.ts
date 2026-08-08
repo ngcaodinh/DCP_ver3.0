@@ -3,10 +3,10 @@ import type { Server as HttpServer } from 'http';
 import jwt from 'jsonwebtoken';
 import { getJsonWebTokenSecret, getJsonWebTokenConfig } from './jsonWebToken';
 import { getLogger } from './logger';
-import { webhookEvents } from '../events/webhookEvents';
 import { oracleEvents } from '../events/oracleEvents';
 import type { OverrideRequestedEventPayload, OverrideExecutedEventPayload } from '../events/oracleEvents';
-import { findDisbursementsInManualReview } from '../models/disbursementModel';
+import { findPendingManualReviewQueues } from '../models/manualReviewQueueModel';
+import { findDisbursementsByRequestIds } from '../models/disbursementModel';
 import { findUserById } from '../models/authModel';
 import { getRedisClientIfReady } from './redis';
 
@@ -68,8 +68,8 @@ export function disconnectUserSockets(userId: string): void {
 }
 
 let io: SocketIOServer | null = null;
-// Theo dõi các requestId đã biết để phát hiện item mới
-let knownManualReviewIds = new Set<string>();
+// Theo dõi các queueId đã biết để polling recovery không emit trùng.
+let knownManualReviewQueueIds = new Set<string>();
 let pollingIntervalId: ReturnType<typeof setInterval> | null = null;
 
 // Lưu reference listener để có thể removeListener khi hot-reload tránh tích lũy
@@ -79,7 +79,7 @@ let _overrideExecutedListener: ((p: OverrideExecutedEventPayload) => void) | nul
 /**
  * Khởi tạo Socket.io server gắn vào HTTP server.
  * Mục đích: cung cấp kênh real-time cho admin nhận thông báo MANUAL_REVIEW.
- * Pattern bridge: lắng nghe webhookEvents + polling 15s để bắt cả 2 trigger (webhook + worker).
+ * Pattern bridge: queue service emit sau persist, polling 15s chỉ dùng làm recovery fallback.
  */
 export function initSocketServer(httpServer: HttpServer): SocketIOServer {
   io = new SocketIOServer(httpServer, {
@@ -164,16 +164,6 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
     });
   });
 
-  // Bridge 1: webhookEvents → socket (near-real-time cho trường hợp webhook fail)
-  webhookEvents.on('DISBURSEMENT_TRANSFER_FAILED', (payload) => {
-    io?.to('admin').emit('transfer:manual-review-required', {
-      requestId: (payload as { requestId: string }).requestId,
-      projectId: (payload as { projectId: string }).projectId,
-      amount: (payload as { amount: number }).amount,
-      timestamp: new Date().toISOString()
-    });
-  });
-
   // Bridge 2b: oracleEvents → socket (override vote notifications cho commissioners)
   // Xoá listener cũ trước khi đăng ký mới — tránh tích lũy khi initSocketServer bị gọi lại (hot-reload)
   if (_overrideRequestedListener) oracleEvents.removeListener('override.requested', _overrideRequestedListener);
@@ -227,20 +217,19 @@ export function shutdownSocketServer(): void {
   }
   io?.close();
   io = null;
-  knownManualReviewIds.clear();
+  knownManualReviewQueueIds.clear();
 }
 
 /**
- * Polling bridge phát hiện disbursement mới vào MANUAL_REVIEW qua worker path.
- * Worker set MANUAL_REVIEW không emit event → polling là cách duy nhất không sửa code worker.
- * Seed knownManualReviewIds lần đầu để tránh flood notification khi server restart.
+ * Polling bridge phát hiện queue pending bị miss event do restart/crash giữa các process.
+ * Seed queueId lần đầu để tránh flood notification khi server restart.
  */
 function startManualReviewPollingBridge(): void {
   // Seed ngay lập tức để các item đã tồn tại trước khi khởi động không bị emit lại
   void (async () => {
     try {
-      const existing = await findDisbursementsInManualReview();
-      knownManualReviewIds = new Set(existing.map(d => d.requestId));
+      const existing = await findPendingManualReviewQueues();
+      knownManualReviewQueueIds = new Set(existing.map(item => item.queueId));
     } catch {
       // Không block startup nếu DB chưa sẵn sàng — lần poll tiếp theo sẽ seed lại
     }
@@ -249,24 +238,35 @@ function startManualReviewPollingBridge(): void {
   pollingIntervalId = setInterval(() => {
     void (async () => {
       try {
-        const items = await findDisbursementsInManualReview();
-        const currentIds = new Set(items.map(d => d.requestId));
-        const newIds = [...currentIds].filter(id => !knownManualReviewIds.has(id));
-        if (newIds.length > 0 && io) {
-          for (const requestId of newIds) {
-            const item = items.find(d => d.requestId === requestId);
+        const items = await findPendingManualReviewQueues();
+        const currentQueueIds = new Set(items.map(item => item.queueId));
+        const newQueueIds = [...currentQueueIds].filter(queueId => !knownManualReviewQueueIds.has(queueId));
+        if (newQueueIds.length > 0 && io) {
+          const newItems = items.filter(item => newQueueIds.includes(item.queueId));
+          const disbursements = await findDisbursementsByRequestIds(
+            newItems.map(item => item.disbursementRequestId)
+          );
+          const disbursementByRequestId = new Map(
+            disbursements.map(disbursement => [disbursement.requestId, disbursement])
+          );
+
+          for (const queueId of newQueueIds) {
+            const item = items.find(queueItem => queueItem.queueId === queueId);
             if (!item) continue;
+            const disbursement = disbursementByRequestId.get(item.disbursementRequestId);
+            if (!disbursement) continue;
             io.to('admin').emit('transfer:manual-review-required', {
-              requestId: item.requestId,
+              requestId: item.disbursementRequestId,
+              queueId: item.queueId,
               projectId: item.projectId,
-              amount: item.amount,
-              requestMode: item.requestMode,
+              amount: disbursement.amount,
+              requestMode: disbursement.requestMode,
               timestamp: new Date().toISOString()
             });
           }
-          logger.info('Socket.io: phát hiện MANUAL_REVIEW item mới.', { context: { count: newIds.length } });
+          logger.info('Socket.io: phát hiện MANUAL_REVIEW item mới.', { context: { count: newQueueIds.length } });
         }
-        knownManualReviewIds = currentIds;
+        knownManualReviewQueueIds = currentQueueIds;
       } catch (err) {
         logger.warn('Socket.io polling bridge lỗi.', { errorMessage: String(err) });
       }

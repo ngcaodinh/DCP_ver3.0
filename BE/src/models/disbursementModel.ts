@@ -149,7 +149,8 @@ const DisbursementMongoModel = mongoose.model<DisbursementRecord>('Disbursement'
 
 /** Chuẩn hóa payload cập nhật. Mục đích: tránh ghi trùng updatedAt gây xung đột MongoDB. */
 function buildDisbursementUpdatePayload(payload: Partial<DisbursementRecord>): Partial<DisbursementRecord> {
-  const { updatedAt: _ignoredUpdatedAt, ...safePayload } = payload;
+  const safePayload = { ...payload };
+  delete safePayload.updatedAt;
   return {
     ...safePayload,
     updatedAt: new Date()
@@ -161,7 +162,19 @@ export async function findDisbursementByRequestId(requestId: string): Promise<Di
   return DisbursementMongoModel.findOne({ requestId }).lean<DisbursementRecord>().exec();
 }
 
-/** Tìm bản ghi theo onChainRequestId. Mục đích: đồng bộ on-chain event với record off-chain. */
+/** Tìm nhiều bản ghi giải ngân theo requestId để tránh N+1 query khi render queue admin. */
+export async function findDisbursementsByRequestIds(requestIds: string[]): Promise<DisbursementRecord[]> {
+  const normalizedRequestIds = [...new Set(requestIds.map(requestId => String(requestId || '').trim()).filter(Boolean))];
+  if (normalizedRequestIds.length === 0) {
+    return [];
+  }
+
+  return DisbursementMongoModel.find({ requestId: { $in: normalizedRequestIds } })
+    .lean<DisbursementRecord[]>()
+    .exec();
+}
+
+/** Tìm bản ghi theo onChainRequestId để đồng bộ event blockchain với record off-chain. */
 export async function findDisbursementByOnChainRequestId(onChainRequestId: number): Promise<DisbursementRecord | null> {
   return DisbursementMongoModel.findOne({ onChainRequestId }).lean<DisbursementRecord>().exec();
 }
@@ -298,9 +311,25 @@ export async function countDisbursementsByStatus(status: DisbursementStatus): Pr
  * Tìm tất cả disbursements đang trong trạng thái MANUAL_REVIEW.
  * Mục đích: Socket.io polling bridge + A3 pending-review list.
  */
-export async function findDisbursementsInManualReview(): Promise<DisbursementRecord[]> {
-  return DisbursementMongoModel.find({ payosTransferStatus: 'MANUAL_REVIEW' })
-    .sort({ updatedAt: -1 })
+export async function findDisbursementsInManualReview(
+  limitCount: number = 200,
+  cursor?: { updatedAt: Date; requestId: string }
+): Promise<DisbursementRecord[]> {
+  const normalizedLimitCount = Number.isFinite(limitCount)
+    ? Math.max(1, Math.min(500, Math.floor(limitCount)))
+    : 200;
+  const filter: Record<string, unknown> = { payosTransferStatus: 'MANUAL_REVIEW' };
+
+  if (cursor) {
+    filter['$or'] = [
+      { updatedAt: { $lt: cursor.updatedAt } },
+      { updatedAt: cursor.updatedAt, requestId: { $lt: cursor.requestId } }
+    ];
+  }
+
+  return DisbursementMongoModel.find(filter)
+    .sort({ updatedAt: -1, requestId: -1 })
+    .limit(normalizedLimitCount)
     .lean<DisbursementRecord[]>()
     .exec();
 }
