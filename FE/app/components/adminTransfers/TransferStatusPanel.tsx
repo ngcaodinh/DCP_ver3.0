@@ -63,6 +63,7 @@ type TransferStatusPanelProps = {
 
 export default function TransferStatusPanel({ onPushToast }: TransferStatusPanelProps) {
   const [items, setItems] = useState<TransferItem[]>([]);
+  const [totalPending, setTotalPending] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState('');
   const [activeTab, setActiveTab] = useState<TabKey>('ALL');
@@ -82,6 +83,7 @@ export default function TransferStatusPanel({ onPushToast }: TransferStatusPanel
         { headers: { Authorization: `Bearer ${session.accessToken}` } }
       );
       setItems(response.data.items ?? []);
+      setTotalPending(response.data.total ?? response.data.items?.length ?? 0);
     } catch {
       setErrorMsg('Không thể tải danh sách transfer.');
     } finally {
@@ -122,6 +124,7 @@ export default function TransferStatusPanel({ onPushToast }: TransferStatusPanel
 
   const handleDialogSuccess = useCallback((requestId: string, mode: 'approve' | 'reject') => {
     setItems(prev => prev.filter(item => item.requestId !== requestId));
+    setTotalPending(prev => Math.max(0, prev - 1));
     onPushToast?.({
       titleText: mode === 'approve' ? 'Approve thành công' : 'Reject thành công',
       bodyText: `Disbursement ${requestId.slice(0, 12)}... đã được xử lý.`,
@@ -150,7 +153,7 @@ export default function TransferStatusPanel({ onPushToast }: TransferStatusPanel
         <div>
           <h2 className="text-lg font-bold text-slate-900">Transfer Status</h2>
           <p className="mt-0.5 text-xs text-slate-500">
-            Manual Review cần xử lý: <span className="font-semibold text-slate-700">{items.filter(i => i.payosTransferStatus === 'MANUAL_REVIEW').length}</span>
+            Manual Review cần xử lý: <span className="font-semibold text-slate-700">{totalPending}</span>
           </p>
         </div>
         <div className="flex items-center gap-2">

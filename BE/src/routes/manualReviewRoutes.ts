@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { createAuthenticationMiddleware } from '../middleware/authenticationMiddleware';
-import { createRoleAuthorizationMiddleware } from '../middleware/roleAuthorizationMiddleware';
+import { createFreshRoleAuthorizationMiddleware } from '../middleware/roleAuthorizationMiddleware';
 import { createRateLimitMiddleware } from '../middleware/rateLimitMiddleware';
 import {
   handleGetPendingManualReview,
@@ -17,7 +17,7 @@ import {
 export function createManualReviewRoutes(): Router {
   const router = Router();
   const authMiddleware = createAuthenticationMiddleware();
-  const adminRoleMiddleware = createRoleAuthorizationMiddleware(['admin']);
+  const adminRoleMiddleware = createFreshRoleAuthorizationMiddleware(['admin']);
   // Tách 2 bucket: read (refresh liên tục không ảnh hưởng) và action (approve/reject)
   const rateLimitRead = createRateLimitMiddleware(120, 60 * 1000, {
     bucketName: 'admin-manual-review-read'

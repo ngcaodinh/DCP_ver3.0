@@ -15,12 +15,13 @@ import {
 } from '../models/disbursementTransferModel';
 import {
   findDisbursementByRequestId,
-  updateDisbursementByRequestId
+  updateDisbursementByRequestIdWithCondition
 } from '../models/disbursementModel';
 import { createPayosTransfer, getPayosTransferStatusByReferenceId } from '../services/payosService';
-import { createUserNotification } from '../services/notificationService';
 import { processDisbursementTransferWebhook } from '../services/disbursementService';
+import { openManualReviewQueueForDisbursement } from '../services/manualReviewService';
 import { getPayosBankCode } from '../config/payosBankCodes';
+import { sanitizeProviderError } from '../utils/sanitizeProviderError';
 
 /**
  * Giới hạn số lần retry tối đa.
@@ -138,37 +139,141 @@ export async function isDisbursementTimedOut(requestId: string): Promise<boolean
 export async function moveToManualReview(
   requestId: string,
   errorMessage: string,
-  finalTransferId?: string
+  finalTransferId?: string,
+  expectedIdempotencyKey?: string
 ): Promise<void> {
-  await updateDisbursementByRequestId(requestId, {
+  const safeErrorMessage = sanitizeProviderError(errorMessage) || 'PayOS transfer failed.';
+  const updateCondition: Record<string, unknown> = {
+    status: { $nin: ['COMPLETED', 'REJECTED', 'CANCELLED'] },
+    payosTransferStatus: { $ne: 'SUCCESS' }
+  };
+  if (expectedIdempotencyKey) {
+    updateCondition.transferIdempotencyKey = expectedIdempotencyKey;
+  }
+
+  const updatedDisbursement = await updateDisbursementByRequestIdWithCondition(requestId, updateCondition, {
     status: 'APPROVED',
     payosTransferStatus: 'MANUAL_REVIEW',
-    payosTransferLastError: errorMessage,
+    payosTransferLastError: safeErrorMessage,
     payosTransferId: finalTransferId ?? undefined
   });
 
   // Dọn dẹp các job đang chờ để tránh duplicate transfer sau khi chuyển manual review
+  if (!updatedDisbursement) {
+    logger.warn('Bỏ qua chuyển MANUAL_REVIEW vì disbursement đã đổi trạng thái hoặc idempotency key không còn khớp.', {
+      requestId,
+      finalTransferId
+    });
+    return;
+  }
+
   await removePendingJobsByRequestId(requestId);
 
-  await createUserNotification({
-    userId: 'admin',
-    notificationType: 'SYSTEM' as const,
-    title: 'Yêu cầu giải ngân cần xử lý tay',
-    content: `Yêu cầu giải ngân ${requestId} đã fail sau ${MAX_TRANSFER_RETRY_COUNT} lần retry PayOS và cần được xử lý thủ công.`,
-    deduplicationKey: `DISBURSEMENT_MANUAL_REVIEW:${requestId}`,
-    metadata: {
-      requestId,
-      errorMessage,
-      transferId: finalTransferId,
-      reason: 'PayOS transfer thất bại sau khi retry tối đa'
-    }
+  await openManualReviewQueueForDisbursement({
+    disbursement: updatedDisbursement,
+    reason: safeErrorMessage,
+    retryCount: updatedDisbursement.payosTransferAttemptCount,
+    source: 'payos_worker'
   });
 
   logger.warn('Disbursement chuyển sang MANUAL_REVIEW sau khi retry thất bại.', {
     requestId,
-    errorMessage,
+    errorMessage: safeErrorMessage,
     finalTransferId
   });
+}
+
+/**
+ * Enqueue retry kế tiếp bằng job mới có delay rõ ràng thay vì mutate active Bull job.
+ * @param requestId ID yêu cầu giải ngân.
+ * @param attemptNumber Attempt hiện tại vừa thất bại.
+ * @param idempotencyKey Khóa idempotency hiện tại của transfer.
+ */
+async function scheduleNextTransferRetry(
+  requestId: string,
+  attemptNumber: number,
+  idempotencyKey: string,
+  rotateIdempotencyKey = false
+): Promise<void> {
+  const currentDisbursement = await findDisbursementByRequestId(requestId);
+  if (
+    !currentDisbursement
+    || currentDisbursement.payosTransferStatus !== 'PROCESSING'
+    || currentDisbursement.transferIdempotencyKey !== idempotencyKey
+  ) {
+    logger.warn('Không schedule retry vì disbursement đã rời chain hiện tại.', {
+      requestId,
+      attemptNumber,
+      expectedIdempotencyKey: idempotencyKey,
+      currentPayosTransferStatus: currentDisbursement?.payosTransferStatus,
+      currentIdempotencyKey: currentDisbursement?.transferIdempotencyKey
+    });
+    return;
+  }
+
+  const nextAttempt = attemptNumber + 1;
+  const delayIndex = Math.max(0, attemptNumber - 1);
+  const delayMs = PAYOS_TRANSFER_RETRY_DELAYS_MS[delayIndex] ?? PAYOS_TRANSFER_RETRY_DELAYS_MS[0];
+  const nextIdempotencyKey = rotateIdempotencyKey
+    ? `auto-retry-${requestId}-${randomUUID()}`
+    : idempotencyKey;
+
+  if (rotateIdempotencyKey) {
+    const rotatedDisbursement = await updateDisbursementByRequestIdWithCondition(
+      requestId,
+      {
+        status: { $in: ['APPROVED', 'EXECUTING'] },
+        payosTransferStatus: 'PROCESSING',
+        transferIdempotencyKey: idempotencyKey
+      },
+      {
+        transferIdempotencyKey: nextIdempotencyKey,
+        payosTransferStatus: 'PROCESSING'
+      }
+    );
+    if (!rotatedDisbursement) {
+      logger.warn('Không rotate key hoặc schedule retry vì disbursement đã rời chain hiện tại.', {
+        requestId,
+        attemptNumber,
+        expectedIdempotencyKey: idempotencyKey
+      });
+      return;
+    }
+  }
+
+  const { enqueued } = await enqueueDisbursementTransfer(requestId, nextAttempt, nextIdempotencyKey, {
+    delay: delayMs
+  });
+
+  if (!enqueued) {
+    logger.warn('Không thể schedule retry cho disbursement transfer job.', {
+      requestId,
+      nextAttempt,
+      delayMs,
+      idempotencyKey: nextIdempotencyKey
+    });
+    return;
+  }
+
+  logger.info('Đã schedule retry cho disbursement transfer job.', {
+    requestId,
+    attemptNumber: nextAttempt,
+    delayMs,
+    idempotencyKey: nextIdempotencyKey
+  });
+}
+
+/** Kiểm tra job còn thuộc đúng transfer chain đang PROCESSING hay đã bị rotate state/key. */
+function isActiveTransferChain(
+  disbursement: Awaited<ReturnType<typeof findDisbursementByRequestId>>,
+  idempotencyKey: string
+): boolean {
+  return Boolean(
+    disbursement
+    && disbursement.transferIdempotencyKey === idempotencyKey
+    && disbursement.payosTransferStatus === 'PROCESSING'
+    && (disbursement.status === 'APPROVED' || disbursement.status === 'EXECUTING')
+  );
 }
 
 /**
@@ -177,11 +282,14 @@ export async function moveToManualReview(
  */
 export async function pollTransferUntilFinal(
   requestId: string,
-  payosTransferId: string
-): Promise<'SUCCESS' | 'PROCESSING' | 'FAILED'> {
+  idempotencyKey: string
+): Promise<'SUCCESS' | 'PROCESSING' | 'FAILED' | 'STALE'> {
   for (let attempt = 0; attempt < TRANSFER_POLL_MAX_ATTEMPTS; attempt += 1) {
     // Kiểm tra disbursement đã được xử lý chưa (có thể webhook đến trước)
     const currentDisbursement = await findDisbursementByRequestId(requestId);
+    if (!currentDisbursement || currentDisbursement.transferIdempotencyKey !== idempotencyKey) {
+      return 'STALE';
+    }
     if (
       currentDisbursement?.payosTransferStatus === 'SUCCESS'
       || currentDisbursement?.status === 'COMPLETED'
@@ -191,15 +299,24 @@ export async function pollTransferUntilFinal(
 
     if (
       currentDisbursement?.payosTransferStatus === 'MANUAL_REVIEW'
+      || !isActiveTransferChain(currentDisbursement, idempotencyKey)
     ) {
-      return 'FAILED';
+      return 'STALE';
     }
 
     await new Promise(resolve => setTimeout(resolve, TRANSFER_POLL_INTERVAL_MS));
 
     try {
-      const status = await getPayosTransferStatusByReferenceId(payosTransferId);
+      const status = await getPayosTransferStatusByReferenceId(requestId);
       if (status.found) {
+        if (status.transferStatus === 'SUCCESS' || status.transferStatus === 'FAILED') {
+          // Đọc lại sau provider call để không dùng kết quả terminal của job cũ khi key/state vừa đổi.
+          const latestDisbursement = await findDisbursementByRequestId(requestId);
+          if (!isActiveTransferChain(latestDisbursement, idempotencyKey)) {
+            return 'STALE';
+          }
+        }
+
         if (status.transferStatus === 'SUCCESS') {
           return 'SUCCESS';
         }
@@ -254,10 +371,29 @@ export async function processTransferJob(job: Job<DisbursementTransferJobData>):
     return;
   }
 
+  if (disbursement.payosTransferStatus === 'MANUAL_REVIEW') {
+    logger.warn('Disbursement đang chờ manual review, bỏ qua job.', {
+      requestId,
+      attemptNumber
+    });
+    return;
+  }
+
+  if (
+    disbursement.transferIdempotencyKey
+    && disbursement.transferIdempotencyKey !== idempotencyKey
+  ) {
+    logger.warn('Bỏ qua job stale vì idempotency key đã được rotate.', {
+      requestId,
+      attemptNumber
+    });
+    return;
+  }
+
   // Kiểm tra timeout deadline
   const isTimedOut = await isDisbursementTimedOut(requestId);
   if (isTimedOut) {
-    await moveToManualReview(requestId, 'Disbursement đã quá deadline timeout.');
+    await moveToManualReview(requestId, 'Disbursement đã quá deadline timeout.', undefined, idempotencyKey);
     return;
   }
 
@@ -293,10 +429,30 @@ export async function processTransferJob(job: Job<DisbursementTransferJobData>):
   }
 
   // Cập nhật disbursement với attempt count
-  await updateDisbursementByRequestId(requestId, {
-    payosTransferAttemptCount: attemptNumber,
-    payosTransferStatus: 'PROCESSING'
-  });
+  const preparedDisbursement = await updateDisbursementByRequestIdWithCondition(
+    requestId,
+    {
+      status: { $in: ['APPROVED', 'EXECUTING'] },
+      payosTransferStatus: { $nin: ['SUCCESS', 'MANUAL_REVIEW'] },
+      $or: [
+        { transferIdempotencyKey: null },
+        { transferIdempotencyKey: idempotencyKey }
+      ]
+    },
+    {
+      payosTransferAttemptCount: attemptNumber,
+      payosTransferStatus: 'PROCESSING',
+      // Lưu key trước API call để lỗi mạng vẫn có thể retry đúng chain mà không tạo key khác.
+      transferIdempotencyKey: idempotencyKey
+    }
+  );
+  if (!preparedDisbursement) {
+    logger.warn('Bỏ qua job vì disbursement đã đổi state trước khi gọi PayOS.', {
+      requestId,
+      attemptNumber
+    });
+    return;
+  }
 
   try {
     // Gọi PayOS API
@@ -320,7 +476,22 @@ export async function processTransferJob(job: Job<DisbursementTransferJobData>):
       payosTransferStatus: 'PROCESSING',
       transferIdempotencyKey: idempotencyKey
     };
-    await updateDisbursementByRequestId(requestId, updatePayload);
+    const updatedDisbursement = await updateDisbursementByRequestIdWithCondition(
+      requestId,
+      {
+        status: { $in: ['APPROVED', 'EXECUTING'] },
+        payosTransferStatus: 'PROCESSING',
+        transferIdempotencyKey: idempotencyKey
+      },
+      updatePayload
+    );
+    if (!updatedDisbursement) {
+      logger.warn('Bỏ qua kết quả PayOS vì job đã stale sau khi provider trả kết quả.', {
+        requestId,
+        attemptNumber
+      });
+      return;
+    }
 
     // Cập nhật log
     await updateTransferLogById(transferLog.transferLogId, {
@@ -352,27 +523,31 @@ export async function processTransferJob(job: Job<DisbursementTransferJobData>):
         status: 'SUCCESS'
       }, {
         skipChecksumVerify: true,
-        source: 'internal_poll'
+        source: 'internal_poll',
+        expectedTransferIdempotencyKey: idempotencyKey
       });
       return;
     }
 
     // Nếu PayOS trả FAILED → xử lý retry hoặc manual review
     if (transferResult.transferStatus === 'FAILED') {
-      const errorMsg = extractErrorMessage(transferResult.rawPayload) || 'PayOS transfer returned FAILED status.';
+      const errorMsg = sanitizeProviderError(extractErrorMessage(transferResult.rawPayload))
+        || 'PayOS transfer returned FAILED status.';
       await updateTransferLogById(transferLog.transferLogId, {
         status: 'FAILED',
         errorMessage: errorMsg
       });
 
       if (attemptNumber >= MAX_TRANSFER_RETRY_COUNT) {
-        await moveToManualReview(requestId, errorMsg, transferResult.transferId);
+        await moveToManualReview(requestId, errorMsg, transferResult.transferId, idempotencyKey);
+      } else {
+        await scheduleNextTransferRetry(requestId, attemptNumber, idempotencyKey, true);
       }
       return;
     }
 
     // PayOS trả PROCESSING → polling
-    const pollResult = await pollTransferUntilFinal(requestId, transferResult.transferId);
+    const pollResult = await pollTransferUntilFinal(requestId, idempotencyKey);
 
     const finalEndTime = Date.now();
     const finalDurationMs = finalEndTime - startTime;
@@ -389,7 +564,16 @@ export async function processTransferJob(job: Job<DisbursementTransferJobData>):
         status: 'SUCCESS'
       }, {
         skipChecksumVerify: true,
-        source: 'internal_poll'
+        source: 'internal_poll',
+        expectedTransferIdempotencyKey: idempotencyKey
+      });
+      return;
+    }
+
+    if (pollResult === 'STALE') {
+      logger.warn('Bỏ qua kết quả polling vì transfer job đã stale sau khi provider trả kết quả.', {
+        requestId,
+        attemptNumber
       });
       return;
     }
@@ -405,12 +589,29 @@ export async function processTransferJob(job: Job<DisbursementTransferJobData>):
       await moveToManualReview(
         requestId,
         'Không xác định được trạng thái cuối sau khi polling. Vui lòng kiểm tra trên PayOS dashboard.',
-        transferResult.transferId
+        transferResult.transferId,
+        idempotencyKey
+      );
+    } else {
+      const pollingErrorMessage = pollResult === 'FAILED'
+        ? 'PayOS polling returned FAILED status.'
+        : 'Không xác định được trạng thái cuối sau polling, sẽ kiểm tra lại cùng idempotency key.';
+      await updateTransferLogById(transferLog.transferLogId, {
+        status: pollResult === 'FAILED' ? 'FAILED' : 'PROCESSING',
+        errorMessage: pollingErrorMessage,
+        completedAt: new Date(finalEndTime),
+        durationMs: finalDurationMs
+      });
+      await scheduleNextTransferRetry(
+        requestId,
+        attemptNumber,
+        idempotencyKey,
+        pollResult === 'FAILED'
       );
     }
   } catch (error) {
     const endTime = Date.now();
-    const errorMessage = extractErrorMessage(error);
+    const errorMessage = sanitizeProviderError(extractErrorMessage(error)) || 'PayOS transfer failed.';
 
     logger.error('PayOS transfer job thất bại.', {
       requestId,
@@ -429,7 +630,9 @@ export async function processTransferJob(job: Job<DisbursementTransferJobData>):
 
     // Nếu đã hết retry → chuyển manual review
     if (attemptNumber >= MAX_TRANSFER_RETRY_COUNT) {
-      await moveToManualReview(requestId, errorMessage);
+      await moveToManualReview(requestId, errorMessage, undefined, idempotencyKey);
+    } else {
+      await scheduleNextTransferRetry(requestId, attemptNumber, idempotencyKey);
     }
   }
 }
@@ -451,7 +654,7 @@ export function startPayosTransferWorker(): void {
       await processTransferJob(job);
     } catch (error) {
       const { requestId, attemptNumber } = job.data;
-      const errorMessage = extractErrorMessage(error);
+      const errorMessage = sanitizeProviderError(extractErrorMessage(error)) || 'PayOS transfer failed.';
 
       logger.error('PayOS transfer job thất bại trong process handler.', {
         requestId,
@@ -461,26 +664,9 @@ export function startPayosTransferWorker(): void {
       });
 
       if (attemptNumber < MAX_TRANSFER_RETRY_COUNT) {
-        const nextAttempt = attemptNumber + 1;
-        const delayIndex = attemptNumber - 1;
-        const delayMs = PAYOS_TRANSFER_RETRY_DELAYS_MS[delayIndex] ?? PAYOS_TRANSFER_RETRY_DELAYS_MS[0];
-
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        await (job as any).moveToDelayed(delayMs);
-
-        job.data = {
-          requestId,
-          attemptNumber: nextAttempt,
-          idempotencyKey: job.data.idempotencyKey
-        };
-
-        logger.info('Đã schedule retry cho disbursement transfer job.', {
-          requestId,
-          attemptNumber: nextAttempt,
-          delayMs
-        });
+        await scheduleNextTransferRetry(requestId, attemptNumber, job.data.idempotencyKey);
       } else {
-        await moveToManualReview(requestId, errorMessage);
+        await moveToManualReview(requestId, errorMessage, undefined, job.data.idempotencyKey);
       }
 
       throw error;

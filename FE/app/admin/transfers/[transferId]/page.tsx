@@ -31,7 +31,7 @@ type TransferLog = {
 type AuditLog = {
   auditId: string;
   adminUserId: string;
-  action: 'MANUAL_APPROVE' | 'MANUAL_REJECT';
+  action: 'MANUAL_APPROVE' | 'MANUAL_REJECT' | 'MANUAL_BANK_ACCOUNT_VIEW';
   reason: string | null;
   createdAt: string;
 };
@@ -81,17 +81,20 @@ export default function TransferDetailPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState('');
   const [dialog, setDialog] = useState<{ mode: 'approve' | 'reject' } | null>(null);
+  const [isBankAccountRevealed, setIsBankAccountRevealed] = useState(false);
 
-  const loadDetail = useCallback(async () => {
+  /** Tải detail manual review và chỉ gửi cờ reveal khi admin chủ động yêu cầu xem PII. */
+  const loadDetail = useCallback(async (revealBankAccount = false) => {
     setIsLoading(true);
     setErrorMsg('');
     try {
       const session = readAuthSession();
       const response = await fetchApi<DetailData>(
-        buildApiUrl(`/api/disbursements/${transferId}/detail`),
+        buildApiUrl(`/api/disbursements/${transferId}/detail${revealBankAccount ? '?revealBankAccount=true' : ''}`),
         { headers: { Authorization: `Bearer ${session.accessToken}` } }
       );
       setData(response.data);
+      setIsBankAccountRevealed(revealBankAccount);
     } catch {
       setErrorMsg('Không thể tải chi tiết transfer. Disbursement có thể không ở trạng thái MANUAL_REVIEW.');
     } finally {
@@ -199,7 +202,19 @@ export default function TransferDetailPage() {
             </div>
           )}
           <div className="mt-3 rounded-lg bg-slate-50 px-3 py-2 text-xs">
-            <p className="text-[10px] text-slate-400">Tài khoản thụ hưởng</p>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-[10px] text-slate-400">Tài khoản thụ hưởng</p>
+              {!isBankAccountRevealed && (
+                <button
+                  type="button"
+                  disabled={isLoading}
+                  onClick={() => void loadDetail(true)}
+                  className="rounded border border-amber-300 px-2 py-1 text-[10px] font-semibold text-amber-700 hover:bg-amber-50 disabled:opacity-50"
+                >
+                  Hiện số tài khoản
+                </button>
+              )}
+            </div>
             <p className="mt-0.5 font-semibold text-slate-700">{data.beneficiaryBankAccount.accountHolderName}</p>
             <p className="text-slate-500">{data.beneficiaryBankAccount.bankName} — {data.beneficiaryBankAccount.bankAccountNumber}</p>
           </div>
@@ -250,9 +265,9 @@ export default function TransferDetailPage() {
             <h2 className="text-sm font-bold text-slate-900">Admin Audit Log</h2>
             <div className="mt-3 space-y-2">
               {data.auditLogs.map((log) => (
-                <div key={log.auditId} className={`flex items-start gap-3 rounded-lg border px-3 py-2 ${log.action === 'MANUAL_APPROVE' ? 'border-emerald-200 bg-emerald-50' : 'border-red-200 bg-red-50'}`}>
-                  <span className={`mt-0.5 text-[11px] font-bold ${log.action === 'MANUAL_APPROVE' ? 'text-emerald-700' : 'text-red-700'}`}>
-                    {log.action === 'MANUAL_APPROVE' ? 'APPROVE' : 'REJECT'}
+                <div key={log.auditId} className={`flex items-start gap-3 rounded-lg border px-3 py-2 ${log.action === 'MANUAL_APPROVE' ? 'border-emerald-200 bg-emerald-50' : log.action === 'MANUAL_BANK_ACCOUNT_VIEW' ? 'border-amber-200 bg-amber-50' : 'border-red-200 bg-red-50'}`}>
+                  <span className={`mt-0.5 text-[11px] font-bold ${log.action === 'MANUAL_APPROVE' ? 'text-emerald-700' : log.action === 'MANUAL_BANK_ACCOUNT_VIEW' ? 'text-amber-700' : 'text-red-700'}`}>
+                    {log.action === 'MANUAL_APPROVE' ? 'APPROVE' : log.action === 'MANUAL_BANK_ACCOUNT_VIEW' ? 'VIEW BANK ACCOUNT' : 'REJECT'}
                   </span>
                   <div className="flex-1 text-xs">
                     <p className="text-slate-600">Admin: <span className="font-semibold text-slate-800">{log.adminUserId.slice(0, 16)}...</span></p>

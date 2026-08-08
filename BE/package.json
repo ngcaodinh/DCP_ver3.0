@@ -10,9 +10,11 @@
     "start": "node dist/server.js",
     "test": "vitest run",
     "lint": "eslint .",
+    "backfill:manual-review-queue": "node dist/scripts/backfillManualReviewQueue.js",
     "backfill:organization-project-manager-role": "node scripts/backfillProjectManagerRoleForOrganizations.js",
     "migrate:legal-registration-index": "node scripts/migrateLegalRegistrationNumberIndex.js",
     "migrate:bank-account-compound-index": "node scripts/migrateBankAccountCompoundIndex.js",
+    "migrate:manual-review-queue-index": "node scripts/migrateManualReviewQueueIndexes.js",
     "grant:project-manager-role": "node scripts/grantProjectManagerRole.js"
   },
   "dependencies": {
