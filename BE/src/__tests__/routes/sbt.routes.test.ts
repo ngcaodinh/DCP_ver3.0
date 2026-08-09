@@ -4,7 +4,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import express, { type Express, type Request, type Response, type NextFunction } from 'express';
-import type { AuthenticatedRequest } from '../../middleware/authenticationMiddleware';
+import supertest from 'supertest';
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -21,6 +21,18 @@ vi.mock('../../config/logger', () => ({
 
 vi.mock('../../services/sbtMintService', () => ({
   rerunSbtMintJob: vi.fn()
+}));
+
+const metadataMocks = vi.hoisted(() => ({
+  getList: vi.fn(),
+  getDetail: vi.fn(),
+  updateStatus: vi.fn()
+}));
+
+vi.mock('../../services/sbt-metadata.service', () => ({
+  getSbtListByProject: metadataMocks.getList,
+  getSbtTokenDetail: metadataMocks.getDetail,
+  updateSbtStatus: metadataMocks.updateStatus
 }));
 
 vi.mock('../../models/sbtMintDlqModel', () => ({
@@ -68,12 +80,27 @@ vi.mock('../../middleware/roleAuthorizationMiddleware', () => ({
       }
       next();
     };
+  },
+  createFreshRoleAuthorizationMiddleware: (allowedRoles: string[]) => {
+    return (req: Request, res: Response, next: NextFunction): void => {
+      const user = (req as unknown as { authenticatedUser?: { userId: string; role: string } }).authenticatedUser;
+      if (!user) {
+        res.status(401).json({ error: 'Không có quyền truy cập.' });
+        return;
+      }
+      if (!allowedRoles.includes(user.role)) {
+        res.status(403).json({ error: 'Không có quyền thực hiện hành động này.' });
+        return;
+      }
+      next();
+    };
   }
 }));
 
 // Import sau mock để đảm bảo mocks được áp dụng
 import { createSbtRoutes } from '../../routes/sbt.routes';
 import { rerunSbtMintJob } from '../../services/sbtMintService';
+import { ApplicationError } from '../../utils/applicationError';
 
 // ─── App Setup ────────────────────────────────────────────────────────────────
 
@@ -230,6 +257,34 @@ describe('sbt routes - POST /api/sbt/retry-job/:mintRequestId', () => {
     expect(res.status).toBe(200);
     expect(rerunSbtMintJob).toHaveBeenCalledWith('SBT-MINT-123', 'admin-1');
   });
+
+  it('service NOT_FOUND → 404 với errorCode chuẩn', async () => {
+    (rerunSbtMintJob as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new ApplicationError('Không tìm thấy mint request.', 404, 'NOT_FOUND')
+    );
+
+    const app = createTestApp();
+    const res = await request(app, 'post', '/api/sbt/retry-job/SBT-MINT-404', {
+      headers: { authorization: 'Bearer test-token-admin' }
+    });
+
+    expect(res.status).toBe(404);
+    expect(res.body).toMatchObject({ success: false, errorCode: 'NOT_FOUND' });
+  });
+
+  it('service CONFLICT → 409 với errorCode chuẩn', async () => {
+    (rerunSbtMintJob as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new ApplicationError('Mint request đang được xử lý.', 409, 'CONFLICT')
+    );
+
+    const app = createTestApp();
+    const res = await request(app, 'post', '/api/sbt/retry-job/SBT-MINT-409', {
+      headers: { authorization: 'Bearer test-token-admin' }
+    });
+
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ success: false, errorCode: 'CONFLICT' });
+  });
 });
 
 // ─── Tests: POST /api/sbt/admin-mint ─────────────────────────────────────────
@@ -251,8 +306,23 @@ describe('sbt routes - POST /api/sbt/admin-mint', () => {
       headers: { authorization: 'Bearer test-token-admin' }
     });
     expect(res.status).toBe(403);
-    const body = res.body as { error?: string };
-    expect(body.error).toContain('bị cấm');
+    const body = res.body as { message?: string };
+    expect(body.message).toContain('bị cấm');
+  });
+});
+
+describe('sbt routes - C4 metadata mounting', () => {
+  it('mounts metadata routes through the aggregate /api/sbt router', async () => {
+    metadataMocks.getList.mockResolvedValue({
+      entries: [],
+      pagination: { page: 1, limit: 20, total: 0, totalPages: 0 }
+    });
+
+    const response = await supertest(createTestApp()).get('/api/sbt/project/project-1');
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.pagination.limit).toBe(20);
+    expect(metadataMocks.getList).toHaveBeenCalledWith('project-1', 1, 20);
   });
 });
 

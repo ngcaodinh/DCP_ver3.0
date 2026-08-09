@@ -34,9 +34,11 @@
  */
 import { randomUUID } from 'crypto';
 import { ethers } from 'ethers';
+import { SBT_MINT_CONFIRMATION_BLOCKS } from '../constants/sbtMint';
 import { getLogger } from '../config/logger';
 import { ApplicationError } from '../utils/applicationError';
 import { extractErrorMessage } from '../utils/extractErrorMessage';
+import { sanitizeProviderError } from '../utils/sanitizeProviderError';
 
 // Re-export để giữ backward compatibility cho tests và các module đang import
 export { extractErrorMessage };
@@ -74,15 +76,8 @@ import {
 import { findImpactSbtNeedingRecovery } from '../models/impactSbtMetadataModel';
 
 /**
- * Environment variable cho số block confirmations khi chờ mint transaction.
- * Giá trị mặc định: 2 confirmations (khoảng 12 giây trên Autonomys Network).
- * Tăng lên nếu cần security cao hơn cho transaction tài chính.
+ * Số block confirmations dùng chung được đọc từ constants để mint và status update có cùng semantics.
  */
-const SBT_MINT_CONFIRMATION_BLOCKS = parseInt(process.env.SBT_MINT_CONFIRMATION_BLOCKS ?? '2', 10);
-if (SBT_MINT_CONFIRMATION_BLOCKS < 1) {
-  throw new Error('SBT_MINT_CONFIRMATION_BLOCKS phải >= 1.');
-}
-
 const logger = getLogger();
 
 // Cache ethers.Interface cho SBTMinted event — tránh tạo mới mỗi lần parse logs.
@@ -446,7 +441,10 @@ export async function executeSbtMint(
   // Fire-and-forget: kiểm tra DLQ sau khi mint confirm mà không block response.
   // Nếu DLQ check fail, cron job 15 phút sẽ cover.
   setImmediate(() => {
-    checkSbtMintDlqStatus(mintRequestId).catch((e: Error) => logger.warn('DLQ status check thất bại sau mint.', { mintRequestId, errorMessage: e.message }));
+    checkSbtMintDlqStatus(mintRequestId).catch((error: unknown) => logger.warn('DLQ status check thất bại sau mint.', {
+      mintRequestId,
+      errorMessage: sanitizeProviderError(error) ?? 'UNKNOWN_ERROR'
+    }));
   });
 
   logger.info('Mint SBT thành công.', {
@@ -532,6 +530,7 @@ export async function handleSbtMintFailure(
   attemptNumber: number,
   errorMessage: string
 ): Promise<{ willRetry: boolean; movedToDlq: boolean; nextDelayMs: number | null }> {
+  const safeErrorMessage = sanitizeProviderError(errorMessage) ?? 'UNKNOWN_ERROR';
   const record = await findImpactSbtMetadataByMintRequestId(mintRequestId);
   if (!record) {
     logger.warn('handleSbtMintFailure: không tìm thấy record, bỏ qua.', { mintRequestId });
@@ -541,7 +540,7 @@ export async function handleSbtMintFailure(
   // Đánh dấu FAILED trong DB
   await markImpactSbtAsFailed(mintRequestId, {
     attemptNumber,
-    errorMessage
+    errorMessage: safeErrorMessage
   });
 
   // Emit sbt.mint-failed event cho notification service (không bắt buộc — chỉ alert nếu nhiều fail liên tiếp)
@@ -551,7 +550,7 @@ export async function handleSbtMintFailure(
     projectId: record.projectId,
     organizationId: record.organizationId,
     attemptNumber,
-    errorMessage,
+    errorMessage: safeErrorMessage,
     failedAt: new Date()
   } satisfies SbtMintFailedEventPayload);
 
@@ -562,7 +561,7 @@ export async function handleSbtMintFailure(
 
     await markImpactSbtAsDlq(mintRequestId, {
       dlqAt,
-      errorMessage,
+      errorMessage: safeErrorMessage,
       attemptNumber
     });
 
@@ -574,7 +573,7 @@ export async function handleSbtMintFailure(
       organizationId: record.organizationId,
       beneficiaryAddress: record.beneficiaryAddress,
       attemptNumber,
-      lastErrorMessage: errorMessage,
+      lastErrorMessage: safeErrorMessage,
       firstAttemptedAt,
       dlqAt
     });
@@ -586,7 +585,7 @@ export async function handleSbtMintFailure(
       organizationId: record.organizationId,
       beneficiaryAddress: record.beneficiaryAddress,
       attemptNumber,
-      lastErrorMessage: errorMessage,
+      lastErrorMessage: safeErrorMessage,
       dlqAt
     } satisfies SbtMintDlqEventPayload);
 
@@ -595,7 +594,7 @@ export async function handleSbtMintFailure(
       sbtId: record.sbtId,
       attemptNumber,
       dlqEntryCreated: dlqEntry !== null,
-      errorMessage
+      errorMessage: safeErrorMessage
     });
 
     return { willRetry: false, movedToDlq: true, nextDelayMs: null };
@@ -653,7 +652,7 @@ export async function rerunSbtMintJob(
 ): Promise<{ record: ImpactSbtMetadataRecord; jobId: string | number | undefined; enqueued: boolean }> {
   const record = await findImpactSbtMetadataByMintRequestId(mintRequestId);
   if (!record) {
-    throw new Error(`Không tìm thấy mint request: ${mintRequestId}`);
+    throw new ApplicationError(`Không tìm thấy mint request: ${mintRequestId}`, 404, 'NOT_FOUND');
   }
 
   if (record.status === 'CONFIRMED') {
@@ -689,7 +688,11 @@ export async function rerunSbtMintJob(
   });
 
   if (!updatedRecord) {
-    throw new Error(`Không thể reset mint request (có thể đã chuyển CONFIRMED).`);
+    throw new ApplicationError(
+      'Không thể reset mint request (có thể đã chuyển CONFIRMED).',
+      409,
+      'CONFLICT'
+    );
   }
 
   // Xóa pending jobs cũ trước khi enqueue mới — tránh duplicate retry job

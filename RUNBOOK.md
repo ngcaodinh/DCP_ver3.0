@@ -69,3 +69,29 @@ docker compose -f docker-compose.ghcr.yml run --rm --no-deps backend npm run bac
 7. Chỉ sau khi backfill hoàn tất mới start backend/worker, frontend và route traffic; sau đó kiểm tra `/health` và dashboard `/admin/transfers`.
 8. Sau rollout có thay đổi `authVersion`, admin đang giữ JWT phát hành trước rollout có thể nhận `401` ở manual-review API; yêu cầu đăng nhập lại trước khi xác nhận dashboard hoạt động.
 9. Nếu Redis không khả dụng, reconciliation chỉ quét bounded batch từ các item mới nhất vì không thể lưu cursor; backfill script vẫn là đường authoritative để hoàn tất dữ liệu thiếu trước khi mở traffic.
+
+## 7) Dọn index Impact SBT sau rollout C4
+
+`ImpactSbtMetadata` dùng index gallery mới `{ projectId: 1, status: 1, confirmedAt: -1 }`. Mongoose không tự xóa index cũ `{ projectId: 1, status: 1, createdAt: -1 }`, vì vậy sau khi rollout và kiểm tra query plan ổn định, có thể drop index cũ thủ công từ MongoDB:
+
+```javascript
+db.impact_sbt_metadata.dropIndex({ projectId: 1, status: 1, createdAt: -1 })
+```
+
+Index `{ onChainTokenId: 1 }` phải là unique partial index để bảo đảm mỗi token on-chain chỉ map tới một record, đồng thời bỏ qua các record chưa mint:
+
+```javascript
+// Kết quả phải rỗng; nếu có duplicate, dừng rollout và reconcile dữ liệu trước.
+db.impact_sbt_metadata.aggregate([
+  { $match: { onChainTokenId: { $type: 'number' } } },
+  { $group: { _id: '$onChainTokenId', count: { $sum: 1 } } },
+  { $match: { count: { $gt: 1 } } }
+])
+
+// Chỉ chạy các lệnh tạo index sau khi kiểm tra duplicate không trả về kết quả.
+db.impact_sbt_metadata.dropIndex({ onChainTokenId: 1 })
+db.impact_sbt_metadata.createIndex(
+  { onChainTokenId: 1 },
+  { unique: true, partialFilterExpression: { onChainTokenId: { $type: 'number' } } }
+)
+```

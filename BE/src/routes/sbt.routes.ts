@@ -12,6 +12,7 @@ import {
   paginationQuerySchema,
   mintRequestIdParamSchema
 } from '../validators/sbtValidator';
+import { createSbtMetadataRoutes } from './sbt-metadata.routes';
 
 /**
  * Rate limiter cho admin retry endpoint.
@@ -70,6 +71,9 @@ export function createSbtRoutes(): Router {
     createRoleAuthorizationMiddleware(['admin']),
     handleAdminMintSbt
   );
+
+  // C4: metadata APIs dùng chung prefix /api/sbt nhưng có middleware public/action riêng.
+  router.use('/', createSbtMetadataRoutes());
 
   return router;
 }

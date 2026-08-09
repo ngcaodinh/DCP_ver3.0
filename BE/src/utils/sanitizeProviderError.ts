@@ -8,6 +8,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** Che dữ liệu nhạy cảm trong message dạng text, kể cả key có quote kiểu JSON chưa parse được. */
 function maskProviderErrorText(errorMessage: string): string {
   return errorMessage
+    .replace(/https?:\/\/[^\s"'<>]+/gi, '[REDACTED_URL]')
+    .replace(/(https?:\/\/)([^/\s:@]+):([^@\s/]+)@/gi, '$1[REDACTED]@')
+    .replace(/([?&](?:api[-_]?key|access[-_]?token|authorization|key|password|secret|token)=)[^&#\s]+/gi, '$1[REDACTED]')
+    .replace(/(Bearer\s+)[A-Za-z0-9._~-]+/gi, '$1[REDACTED]')
+    .replace(/\b0x[a-f0-9]{40}\b/gi, '0x[REDACTED]')
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[REDACTED]')
     .replace(
       /((?:["']?)(?:to)?(?:account|bank|recipient|holder|phone|mobile|name)[A-Za-z0-9_-]*(?:["']?\s*[:=]\s*))("[^"]*"|'[^']*'|[^,;|}\n]+)/gi,
       '$1[REDACTED]'
@@ -29,7 +35,12 @@ function sanitizeProviderValue(value: unknown, depth: number = 0): unknown {
 
   if (isRecord(value)) {
     return Object.fromEntries(Object.entries(value).map(([key, nestedValue]) => {
-      if (/(account|bank|recipient|holder|phone|mobile|name)/i.test(key)) {
+      const normalizedKey = key.replace(/[-_]/g, '').toLowerCase();
+      if (
+        /(account|bank|recipient|holder|phone|mobile|name)/i.test(key)
+        || ['accesstoken', 'apikey', 'authorization', 'password', 'secret', 'token']
+          .includes(normalizedKey)
+      ) {
         return [key, '[REDACTED]'];
       }
       return [key, sanitizeProviderValue(nestedValue, depth + 1)];
