@@ -1,12 +1,12 @@
 import { Request, Response } from 'express';
 import { getLogger } from '../config/logger';
-import { ApplicationError } from '../utils/applicationError';
 import { rerunSbtMintJob } from '../services/sbtMintService';
+import { sendErrorFromUnknown, sendErrorResponse, sendSuccessResponse } from '../utils/apiResponse';
+import { sanitizeProviderError } from '../utils/sanitizeProviderError';
 import {
   findSbtMintDlqByStatus,
   countSbtMintDlqByStatus
 } from '../models/sbtMintDlqModel';
-import type { SbtMintDlqRecord } from '../models/sbtMintDlqModel';
 const logger = getLogger();
 
 // ============ DLQ LIST ============
@@ -33,24 +33,21 @@ export async function handleGetSbtDlqList(req: Request, res: Response): Promise<
       countSbtMintDlqByStatus('OPEN')
     ]);
 
-    res.status(200).json({
-      success: true,
-      data: {
-        entries,
-        pagination: {
-          page,
-          limit,
-          total: totalCount,
-          totalPages: Math.ceil(totalCount / limit)
-        },
-        openCount
-      }
+    sendSuccessResponse(res, 200, 'Lấy danh sách DLQ SBT thành công.', {
+      entries,
+      pagination: {
+        page,
+        limit,
+        total: totalCount,
+        totalPages: Math.ceil(totalCount / limit)
+      },
+      openCount
     });
   } catch (error) {
     logger.error('handleGetSbtDlqList thất bại.', {
-      errorMessage: (error as Error).message
+      errorMessage: sanitizeProviderError(error) ?? 'UNKNOWN_ERROR'
     });
-    res.status(500).json({ error: 'Lỗi server khi lấy danh sách DLQ.' });
+    sendErrorFromUnknown(res, error, 'Lỗi server khi lấy danh sách DLQ.');
   }
 }
 
@@ -70,13 +67,13 @@ export async function handleRetrySbtMintJob(req: Request, res: Response): Promis
   try {
     const userId = (req as unknown as { authenticatedUser?: { userId?: string } }).authenticatedUser?.userId;
     if (!userId) {
-      res.status(401).json({ error: 'Không có quyền truy cập.' });
+      sendErrorResponse(res, 401, 'Không có quyền truy cập.', 'UNAUTHENTICATED');
       return;
     }
 
     const { mintRequestId } = req.params;
     if (!mintRequestId || mintRequestId.trim().length === 0) {
-      res.status(400).json({ error: 'mintRequestId là bắt buộc.' });
+      sendErrorResponse(res, 400, 'mintRequestId là bắt buộc.', 'VALIDATION_ERROR');
       return;
     }
 
@@ -88,40 +85,20 @@ export async function handleRetrySbtMintJob(req: Request, res: Response): Promis
       reRunBy: userId
     });
 
-    res.status(200).json({
-      success: true,
-      data: {
-        mintRequestId: result.record.mintRequestId,
-        sbtId: result.record.sbtId,
-        status: result.record.status,
-        attemptNumber: result.record.attemptNumber,
-        enqueued: result.enqueued,
-        jobId: result.jobId
-      },
-      message: 'Job đã được reset và enqueued. Worker sẽ tự động xử lý mint.'
+    sendSuccessResponse(res, 200, 'Job đã được reset và enqueued. Worker sẽ tự động xử lý mint.', {
+      mintRequestId: result.record.mintRequestId,
+      sbtId: result.record.sbtId,
+      status: result.record.status,
+      attemptNumber: result.record.attemptNumber,
+      enqueued: result.enqueued,
+      jobId: result.jobId
     });
   } catch (error) {
-    if (error instanceof ApplicationError) {
-      res.status(error.statusCode).json({ error: error.message });
-      return;
-    }
-    const errorMessage = (error as Error).message || 'Lỗi không xác định.';
-
-    if (errorMessage.includes('Không tìm thấy mint request')) {
-      res.status(404).json({ error: errorMessage });
-      return;
-    }
-
-    if (errorMessage.includes('Không thể reset mint request')) {
-      res.status(409).json({ error: errorMessage });
-      return;
-    }
-
     logger.error('handleRetrySbtMintJob thất bại.', {
       mintRequestId: req.params.mintRequestId,
-      errorMessage
+      errorMessage: sanitizeProviderError(error) ?? 'UNKNOWN_ERROR'
     });
-    res.status(500).json({ error: 'Lỗi server khi retry job.' });
+    sendErrorFromUnknown(res, error, 'Lỗi server khi retry job.');
   }
 }
 
@@ -138,7 +115,7 @@ export async function handleRetrySbtMintJob(req: Request, res: Response): Promis
 export async function handleAdminMintSbt(req: Request, res: Response): Promise<void> {
   const userId = (req as unknown as { authenticatedUser?: { userId?: string } }).authenticatedUser?.userId;
   if (!userId) {
-    res.status(401).json({ error: 'Không có quyền truy cập.' });
+    sendErrorResponse(res, 401, 'Không có quyền truy cập.', 'UNAUTHENTICATED');
     return;
   }
 
@@ -148,7 +125,10 @@ export async function handleAdminMintSbt(req: Request, res: Response): Promise<v
     userId
   });
 
-  res.status(403).json({
-    error: 'Hành động này bị cấm. Không cho phép mint SBT thủ công. Vui lòng đợi Oracle verify tự động hoặc retry job từ DLQ.'
-  });
+  sendErrorResponse(
+    res,
+    403,
+    'Hành động này bị cấm. Không cho phép mint SBT thủ công. Vui lòng đợi Oracle verify tự động hoặc retry job từ DLQ.',
+    'FORBIDDEN'
+  );
 }

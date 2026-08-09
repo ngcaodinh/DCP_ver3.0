@@ -1,5 +1,6 @@
 import { ethers } from 'ethers';
 import { getLogger } from './logger';
+import { sanitizeProviderError } from '../utils/sanitizeProviderError';
 
 const logger = getLogger();
 
@@ -28,7 +29,14 @@ const impactSbtEthersAbi = [
   'function mint(address to, uint256 projectId, uint256 milestone, uint256 beneficiaryCount, string gpsCoordinates, string imageCID, string tokenURI_) external returns (uint256 tokenId)',
   'function ownerOf(uint256 tokenId) external view returns (address)',
   'function tokenURI(uint256 tokenId) external view returns (string)',
-  'event SBTMinted(address indexed to, uint256 indexed tokenId, string tokenURI_)'
+  'function getTokenMetadata(uint256 tokenId) external view returns (uint256 projectId, uint256 milestone, uint256 beneficiaryCount, string gpsCoordinates, string imageCID, uint256 mintedAt)',
+  'function getTokenStatus(uint256 tokenId) external view returns (uint8)',
+  'function updateTokenStatus(uint256 tokenId, uint8 newStatus, string reason) external',
+  'event SBTMinted(address indexed to, uint256 indexed tokenId, string tokenURI_)',
+  'event TokenStatusUpdated(uint256 indexed tokenId, uint8 newStatus, string reason)',
+  'error TokenNotExists()',
+  'error InvalidStatus()',
+  'error InvalidTransition()'
 ] as const;
 
 /**
@@ -159,6 +167,8 @@ export async function logOracleSignerAddressOnce(): Promise<void> {
       } as Record<string, unknown>);
     }
   } catch (error) {
-    logger.warn('ImpactSBT Oracle signer chưa sẵn sàng.', { errorMessage: (error as Error).message });
+    logger.warn('ImpactSBT Oracle signer chưa sẵn sàng.', {
+      errorMessage: sanitizeProviderError(error) ?? 'UNKNOWN_ERROR'
+    });
   }
 }

@@ -1,6 +1,11 @@
 import { randomUUID } from 'crypto';
 import mongoose, { Schema } from 'mongoose';
 import { ethers } from 'ethers';
+import {
+  SBT_HIDDEN_FROM_GALLERY_STATUSES,
+  SBT_TOKEN_STATUS_NAMES,
+  type SbtTokenStatusName
+} from '../constants/sbtTokenStatus';
 
 /**
  * Trạng thái vòng đời của một mint request.
@@ -51,6 +56,10 @@ export type ImpactSbtMetadataRecord = {
   transactionHash: string | null;         // Tx hash gửi mint (set khi SUBMITTED)
   blockNumber: number | null;             // Block number confirm
   confirmedAt: Date | null;               // Thời điểm CONFIRMED
+  onChainTokenStatus?: SbtTokenStatusName | null;
+  tokenStatusReason?: string | null;
+  tokenStatusUpdatedAt?: Date | null;
+  tokenStatusUpdatedBy?: string | null;
   submittedAt: Date | null;               // Thời điểm submit tx
   dlqAt: Date | null;                     // Thời điểm chuyển DLQ
   reRunCount: number;                     // Số lần admin đã trigger re-run job
@@ -59,6 +68,10 @@ export type ImpactSbtMetadataRecord = {
   createdAt: Date;
   updatedAt: Date;
 };
+
+export interface ImpactSbtProjectQueryOptions {
+  includeHidden?: boolean;
+}
 
 const impactSbtMetadataSchema = new Schema<ImpactSbtMetadataRecord>(
   {
@@ -87,6 +100,14 @@ const impactSbtMetadataSchema = new Schema<ImpactSbtMetadataRecord>(
     transactionHash: { type: String, default: null },
     blockNumber: { type: Number, default: null },
     confirmedAt: { type: Date, default: null },
+    onChainTokenStatus: {
+      type: String,
+      enum: [...SBT_TOKEN_STATUS_NAMES, null],
+      default: null
+    },
+    tokenStatusReason: { type: String, default: null },
+    tokenStatusUpdatedAt: { type: Date, default: null },
+    tokenStatusUpdatedBy: { type: String, default: null },
     submittedAt: { type: Date, default: null },
     dlqAt: { type: Date, default: null },
     reRunCount: { type: Number, required: true, default: 0 },
@@ -100,8 +121,13 @@ const impactSbtMetadataSchema = new Schema<ImpactSbtMetadataRecord>(
 impactSbtMetadataSchema.index({ status: 1, updatedAt: 1 });
 // Index phục vụ admin UI DLQ: sort theo thời điểm DLQ
 impactSbtMetadataSchema.index({ status: 1, dlqAt: -1 });
-// Index phục vụ query theo project cho impact-gallery
-impactSbtMetadataSchema.index({ projectId: 1, status: 1, createdAt: -1 });
+// Index phục vụ query theo project cho impact-gallery và đúng thứ tự sort confirmedAt.
+impactSbtMetadataSchema.index({ projectId: 1, status: 1, confirmedAt: -1 });
+// TokenId là định danh duy nhất trên chain; partial unique index vẫn cho phép nhiều record chưa mint có giá trị null.
+impactSbtMetadataSchema.index(
+  { onChainTokenId: 1 },
+  { unique: true, partialFilterExpression: { onChainTokenId: { $type: 'number' } } }
+);
 // Tối ưu truy vấn findImpactSbtMetadataByBeneficiary — sắp xếp theo confirmedAt desc
 impactSbtMetadataSchema.index({ beneficiaryAddress: 1, status: 1, confirmedAt: -1 });
 
@@ -110,6 +136,21 @@ const ImpactSbtMetadataMongoModel = mongoose.model<ImpactSbtMetadataRecord>(
   impactSbtMetadataSchema,
   'impact_sbt_metadata'
 );
+
+/** Dựng query project dùng chung để find và count luôn áp dụng cùng chính sách ẩn gallery. */
+function buildProjectSbtQuery(
+  projectId: string,
+  options: ImpactSbtProjectQueryOptions
+): Record<string, unknown> {
+  const query: Record<string, unknown> = {
+    projectId,
+    status: 'CONFIRMED'
+  };
+  if (!options.includeHidden) {
+    query.onChainTokenStatus = { $nin: SBT_HIDDEN_FROM_GALLERY_STATUSES };
+  }
+  return query;
+}
 
 /**
  * Tạo mới bản ghi metadata khi Oracle verified APPROVED.
@@ -222,9 +263,10 @@ export async function findImpactSbtMetadataByTokenId(
 export async function findImpactSbtMetadataByProjectId(
   projectId: string,
   limit = 20,
-  skip = 0
+  skip = 0,
+  options: ImpactSbtProjectQueryOptions = {}
 ): Promise<ImpactSbtMetadataRecord[]> {
-  return ImpactSbtMetadataMongoModel.find({ projectId, status: 'CONFIRMED' })
+  return ImpactSbtMetadataMongoModel.find(buildProjectSbtQuery(projectId, options))
     .sort({ confirmedAt: -1 })
     .skip(skip)
     .limit(limit)
@@ -253,8 +295,35 @@ export async function findImpactSbtMetadataByBeneficiary(
  * Đếm số SBT CONFIRMED của một project.
  * Mục đích: hiển thị badge "X certificates" trên project page.
  */
-export async function countImpactSbtByProjectId(projectId: string): Promise<number> {
-  return ImpactSbtMetadataMongoModel.countDocuments({ projectId, status: 'CONFIRMED' }).exec();
+export async function countImpactSbtByProjectId(
+  projectId: string,
+  options: ImpactSbtProjectQueryOptions = {}
+): Promise<number> {
+  return ImpactSbtMetadataMongoModel.countDocuments(buildProjectSbtQuery(projectId, options)).exec();
+}
+
+/** Đồng bộ trạng thái on-chain vào metadata mà không làm thay đổi lifecycle mint off-chain. */
+export async function updateImpactSbtOnChainStatus(
+  onChainTokenId: number,
+  payload: {
+    onChainTokenStatus: SbtTokenStatusName;
+    reason: string;
+    updatedBy: string;
+    updatedAt: Date;
+  }
+): Promise<ImpactSbtMetadataRecord | null> {
+  return ImpactSbtMetadataMongoModel.findOneAndUpdate(
+    { onChainTokenId, status: 'CONFIRMED' },
+    {
+      $set: {
+        onChainTokenStatus: payload.onChainTokenStatus,
+        tokenStatusReason: payload.reason,
+        tokenStatusUpdatedAt: payload.updatedAt,
+        tokenStatusUpdatedBy: payload.updatedBy
+      }
+    },
+    { returnDocument: 'after' }
+  ).lean().exec();
 }
 
 /**
