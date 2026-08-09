@@ -4,6 +4,7 @@ import { createFreshRoleAuthorizationMiddleware } from '../middleware/roleAuthor
 import { createRateLimitMiddleware } from '../middleware/rateLimitMiddleware';
 import {
   handleGetPendingManualReview,
+  handleGetPendingManualReviewCounts,
   handleGetManualReviewDetail,
   handleManualApprove,
   handleManualReject
@@ -25,6 +26,15 @@ export function createManualReviewRoutes(): Router {
   const rateLimitAction = createRateLimitMiddleware(20, 60 * 1000, {
     bucketName: 'admin-manual-review-action'
   });
+
+  // GET /api/disbursements/pending-review/counts — tổng hợp count cho dashboard.
+  router.get(
+    '/pending-review/counts',
+    authMiddleware,
+    adminRoleMiddleware,
+    rateLimitRead,
+    handleGetPendingManualReviewCounts
+  );
 
   // GET  /api/disbursements/pending-review — danh sách chờ xử lý tay
   router.get(

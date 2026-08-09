@@ -2,10 +2,12 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { DisbursementRecord } from '../../models/disbursementModel';
 import type { ManualReviewQueueRecord } from '../../models/manualReviewQueueModel';
 
+const loggerWarnMock = vi.hoisted(() => vi.fn());
+
 vi.mock('../../config/logger', () => ({
   getLogger: () => ({
     info: vi.fn(),
-    warn: vi.fn(),
+    warn: loggerWarnMock,
     error: vi.fn()
   })
 }));
@@ -46,6 +48,8 @@ vi.mock('../../models/manualReviewQueueModel', () => ({
   findPendingManualReviewQueueByRequestId: vi.fn(),
   findPendingManualReviewQueuesByProject: vi.fn(),
   findPendingManualReviewQueuesPaginated: vi.fn(),
+  countPendingManualReviewQueuesByTab: vi.fn(),
+  countPendingManualReviewQueuesMissingRequestMode: vi.fn(),
   findManualReviewEscalationCandidates: vi.fn(),
   claimManualReviewEscalationCandidates: vi.fn(),
   markManualReviewQueueEscalated: vi.fn(),
@@ -90,6 +94,7 @@ import {
   claimManualReviewEscalationCandidates,
   getManualReviewDetail,
   getPendingManualReview,
+  getPendingManualReviewCounts,
   manualApprove,
   manualReject,
   markManualReviewEscalationNotified,
@@ -150,6 +155,7 @@ function makeQueue(overrides: Partial<ManualReviewQueueRecord> = {}): ManualRevi
     reviewCycle: 1,
     assignedAdminId: 'admin-001',
     assignmentMethod: 'LEAST_LOADED',
+    requestMode: 'NORMAL',
     status: 'PENDING',
     assignedAt: now,
     resolvedAt: null,
@@ -176,6 +182,7 @@ describe('manualReviewService', () => {
       { id: 'admin-001', role: 'admin', accountStatus: 'ACTIVE' } as never
     ]);
     vi.mocked(queueModel.findPendingManualReviewQueuesByProject).mockResolvedValue([]);
+    vi.mocked(queueModel.countPendingManualReviewQueuesMissingRequestMode).mockResolvedValue(0);
     vi.mocked(queueModel.countPendingManualReviewByAdminIds).mockResolvedValue(new Map([['admin-001', 0]]));
     vi.mocked(notificationService.createUserNotification).mockResolvedValue(null);
     vi.mocked(donationModel.findDonationsByProjectId).mockResolvedValue([]);
@@ -238,6 +245,29 @@ describe('manualReviewService', () => {
     expect(socketEmitMock).toHaveBeenCalledWith(
       'transfer:manual-review-required',
       expect.objectContaining({ requestId: 'DS-001', queueId: 'MRQ-001' })
+    );
+    expect(queueModel.upsertManualReviewQueue).toHaveBeenCalledWith(
+      expect.objectContaining({ requestMode: 'NORMAL' })
+    );
+  });
+
+  it('ưu tiên requestMode snapshot của queue khi emit và fallback về disbursement cho row tiền-migration', async () => {
+    const disbursement = makeDisbursement({ requestMode: 'EMERGENCY' });
+    const queue = makeQueue({ requestMode: undefined });
+    vi.mocked(queueModel.findLatestManualReviewQueueByRequestId).mockResolvedValue(null);
+    vi.mocked(queueModel.upsertManualReviewQueue).mockResolvedValue({ queue, created: true });
+
+    const result = await openManualReviewQueueForDisbursement({
+      disbursement,
+      reason: 'PayOS failed',
+      retryCount: 3,
+      source: 'payos_worker'
+    });
+
+    expect(result.requestMode).toBeUndefined();
+    expect(socketEmitMock).toHaveBeenCalledWith(
+      'transfer:manual-review-required',
+      expect.objectContaining({ requestMode: 'EMERGENCY' })
     );
   });
 
@@ -367,6 +397,7 @@ describe('manualReviewService', () => {
     expect(queueModel.countPendingManualReviewByAdminIds).not.toHaveBeenCalled();
     expect(queueModel.upsertManualReviewQueue).toHaveBeenCalledWith(
       expect.objectContaining({
+        requestMode: 'NORMAL',
         assignedAdminId: 'admin-002',
         assignmentMethod: 'PROJECT_AFFINITY'
       })
@@ -422,6 +453,7 @@ describe('manualReviewService', () => {
     expect(notificationService.createUserNotification).not.toHaveBeenCalled();
     expect(queueModel.upsertManualReviewQueue).toHaveBeenCalledWith(
       expect.objectContaining({
+        requestMode: 'NORMAL',
         assignedAdminId: null,
         assignmentMethod: 'UNASSIGNED',
         assignedAt: null
@@ -442,6 +474,73 @@ describe('manualReviewService', () => {
     expect(result.items[0]?.requestId).toBe('DS-001');
     expect(result.items[0]).not.toHaveProperty('beneficiaryBankAccount');
     expect(disbursementModel.findDisbursementsByRequestIds).toHaveBeenCalledWith(['DS-001']);
+    expect(queueModel.findPendingManualReviewQueuesPaginated).toHaveBeenCalledWith({
+      page: 1,
+      limit: 50,
+      overdueOnly: undefined,
+      requestMode: undefined
+    });
+  });
+
+  it('fallback requestMode của DTO về disbursement khi queue cũ chưa được backfill', async () => {
+    vi.mocked(queueModel.findPendingManualReviewQueuesPaginated).mockResolvedValue({
+      items: [makeQueue({ requestMode: undefined })],
+      total: 1
+    });
+    vi.mocked(disbursementModel.findDisbursementsByRequestIds).mockResolvedValue([
+      makeDisbursement({ requestMode: 'EMERGENCY' })
+    ]);
+
+    const result = await getPendingManualReview({ page: 1, limit: 50 });
+
+    expect(result.items[0]?.requestMode).toBe('EMERGENCY');
+  });
+
+  it('returns aggregate counts for all dashboard tabs', async () => {
+    vi.mocked(queueModel.countPendingManualReviewQueuesByTab).mockResolvedValue({
+      all: 12,
+      emergency: 3,
+      normal: 9,
+      overdue: 2
+    });
+
+    await expect(getPendingManualReviewCounts()).resolves.toEqual({
+      all: 12,
+      emergency: 3,
+      normal: 9,
+      overdue: 2
+    });
+    expect(queueModel.countPendingManualReviewQueuesByTab).toHaveBeenCalledTimes(1);
+  });
+
+  it('cảnh báo runtime khi còn queue PENDING thiếu snapshot requestMode', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2030-01-01T00:00:00.000Z'));
+    vi.mocked(queueModel.countPendingManualReviewQueuesMissingRequestMode).mockResolvedValue(2);
+    vi.mocked(queueModel.findPendingManualReviewQueuesPaginated).mockResolvedValue({ items: [], total: 0 });
+    vi.mocked(disbursementModel.findDisbursementsByRequestIds).mockResolvedValue([]);
+
+    await getPendingManualReview({ page: 1, limit: 50 });
+    await Promise.resolve();
+
+    expect(loggerWarnMock).toHaveBeenCalledWith(
+      expect.stringContaining('thiếu snapshot requestMode'),
+      { missingCount: 2 }
+    );
+  });
+
+  it('passes overdueOnly and requestMode filters to the durable queue query', async () => {
+    vi.mocked(queueModel.findPendingManualReviewQueuesPaginated).mockResolvedValue({ items: [], total: 0 });
+    vi.mocked(disbursementModel.findDisbursementsByRequestIds).mockResolvedValue([]);
+
+    await getPendingManualReview({ page: 1, limit: 50, overdueOnly: true, requestMode: 'EMERGENCY' });
+
+    expect(queueModel.findPendingManualReviewQueuesPaginated).toHaveBeenCalledWith({
+      page: 1,
+      limit: 50,
+      overdueOnly: true,
+      requestMode: 'EMERGENCY'
+    });
   });
 
   it('masks beneficiary bank account on detail DTO', async () => {
@@ -462,7 +561,17 @@ describe('manualReviewService', () => {
     vi.mocked(disbursementModel.findDisbursementByRequestId).mockResolvedValue(makeDisbursement());
     const transferLogModel = await import('../../models/disbursementTransferModel');
     vi.mocked(transferLogModel.findTransferLogsByRequestId).mockResolvedValue([]);
-    vi.mocked(auditLogModel.findAuditLogsByRequestId).mockResolvedValue([]);
+    vi.mocked(auditLogModel.findAuditLogsByRequestId)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{
+        auditId: 'AUD-REVEAL',
+        adminUserId: 'admin-001',
+        action: 'MANUAL_BANK_ACCOUNT_VIEW',
+        targetRequestId: 'DS-001',
+        reason: null,
+        metadata: { accessMode: 'REVEAL_ON_DEMAND' },
+        createdAt: new Date('2026-08-08T00:00:00.000Z')
+      }]);
     vi.mocked(auditLogModel.createAdminAuditLog).mockResolvedValue({} as never);
 
     const detail = await getManualReviewDetail('DS-001', {
@@ -478,6 +587,10 @@ describe('manualReviewService', () => {
       targetRequestId: 'DS-001',
       metadata: expect.objectContaining({ accessMode: 'REVEAL_ON_DEMAND' })
     }));
+    expect(detail.auditLogs).toEqual([expect.objectContaining({
+      auditId: 'AUD-REVEAL',
+      action: 'MANUAL_BANK_ACCOUNT_VIEW'
+    })]);
   });
 
   it('fails closed when bank account reveal cannot be audited', async () => {

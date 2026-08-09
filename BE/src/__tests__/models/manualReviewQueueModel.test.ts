@@ -1,10 +1,13 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
   acquireManualReviewActionLease,
+  countPendingManualReviewQueuesByTab,
+  countPendingManualReviewQueuesMissingRequestMode,
   ManualReviewQueueMongoModel,
   resolveManualReviewQueue,
   upsertManualReviewQueue
 } from '../../models/manualReviewQueueModel';
+import type { ManualReviewQueueRecord } from '../../models/manualReviewQueueModel';
 
 type QueueIndexEntry = [
   Record<string, 1 | -1>,
@@ -21,6 +24,18 @@ function createLeanExecChain<T>(value: T) {
       exec: vi.fn().mockResolvedValue(value)
     })
   };
+}
+
+/** Tạo query chain cho phép kiểm tra filter được dùng đồng nhất ở find/count. */
+function createPaginationExecChain<T>(value: T) {
+  const chain = {
+    sort: vi.fn().mockReturnThis(),
+    skip: vi.fn().mockReturnThis(),
+    limit: vi.fn().mockReturnThis(),
+    lean: vi.fn().mockReturnThis(),
+    exec: vi.fn().mockResolvedValue(value)
+  };
+  return chain;
 }
 
 describe('manualReviewQueueModel', () => {
@@ -41,6 +56,11 @@ describe('manualReviewQueueModel', () => {
       && fields.createdAt === 1
     ));
     const hasSlaIndex = indexes.some(([fields]) => fields.status === 1 && fields.slaDeadline === 1);
+    const hasRequestModeIndex = indexes.some(([fields]) => (
+      fields.status === 1
+      && fields.requestMode === 1
+      && fields.createdAt === -1
+    ));
     const hasRetentionTtl = indexes.some(([fields, options]) => (
       fields.retentionExpiresAt === 1
       && options?.expireAfterSeconds === 0
@@ -49,6 +69,7 @@ describe('manualReviewQueueModel', () => {
     expect(hasUniqueCycleIndex).toBe(true);
     expect(hasWorkloadIndex).toBe(true);
     expect(hasSlaIndex).toBe(true);
+    expect(hasRequestModeIndex).toBe(true);
     expect(hasRetentionTtl).toBe(true);
     expect(ManualReviewQueueMongoModel.schema.path('bankAccountNumber')).toBeUndefined();
     expect(ManualReviewQueueMongoModel.schema.path('accountHolderName')).toBeUndefined();
@@ -70,6 +91,7 @@ describe('manualReviewQueueModel', () => {
       reason: 'PayOS failed',
       retryCount: 3,
       reviewCycle: 1,
+      requestMode: 'NORMAL',
       assignedAdminId: 'admin-001',
       assignmentMethod: 'LEAST_LOADED',
       assignedAt: new Date('2026-08-01T00:00:00.000Z'),
@@ -118,6 +140,7 @@ describe('manualReviewQueueModel', () => {
       reason: 'PayOS failed replay',
       retryCount: 4,
       reviewCycle: 1,
+      requestMode: 'NORMAL',
       assignedAdminId: 'admin-002',
       assignmentMethod: 'LEAST_LOADED',
       assignedAt: new Date('2026-08-01T00:00:00.000Z'),
@@ -170,6 +193,7 @@ describe('manualReviewQueueModel', () => {
       reason: 'PayOS failed',
       retryCount: 3,
       reviewCycle: 1,
+      requestMode: 'NORMAL',
       assignedAdminId: 'admin-001',
       assignmentMethod: 'LEAST_LOADED',
       assignedAt: new Date('2026-08-01T00:00:00.000Z'),
@@ -238,5 +262,78 @@ describe('manualReviewQueueModel', () => {
     );
     expect(update.$set.retentionExpiresAt).toEqual(new Date('2031-08-01T00:00:00.000Z'));
     expect(update.$set.actionLockId).toBeNull();
+  });
+
+  it('uses the same server filter for overdue mode and requestMode pagination', async () => {
+    const findChain = createPaginationExecChain<ManualReviewQueueRecord[]>([]);
+    const countChain = { exec: vi.fn().mockResolvedValue(0) };
+    const findSpy = vi.spyOn(ManualReviewQueueMongoModel, 'find').mockReturnValue(findChain as never);
+    const countSpy = vi.spyOn(ManualReviewQueueMongoModel, 'countDocuments').mockReturnValue(countChain as never);
+
+    await import('../../models/manualReviewQueueModel').then(({ findPendingManualReviewQueuesPaginated }) => (
+      findPendingManualReviewQueuesPaginated({ page: 1, limit: 50, requestMode: 'EMERGENCY', overdueOnly: true })
+    ));
+
+    const filter = findSpy.mock.calls[0]?.[0] as unknown as { status: string; requestMode: string; slaDeadline: { $lte: Date } };
+    expect(filter).toEqual(expect.objectContaining({ status: 'PENDING', requestMode: 'EMERGENCY' }));
+    expect(filter.slaDeadline.$lte).toBeInstanceOf(Date);
+    expect(countSpy).toHaveBeenCalledWith(filter);
+  });
+
+  it('không thêm filter optional khi dashboard gọi endpoint mặc định', async () => {
+    const findChain = createPaginationExecChain<ManualReviewQueueRecord[]>([]);
+    const countChain = { exec: vi.fn().mockResolvedValue(0) };
+    const findSpy = vi.spyOn(ManualReviewQueueMongoModel, 'find').mockReturnValue(findChain as never);
+    const countSpy = vi.spyOn(ManualReviewQueueMongoModel, 'countDocuments').mockReturnValue(countChain as never);
+
+    const { findPendingManualReviewQueuesPaginated } = await import('../../models/manualReviewQueueModel');
+    await findPendingManualReviewQueuesPaginated({ page: 2, limit: 10 });
+
+    expect(findSpy).toHaveBeenCalledWith({ status: 'PENDING' });
+    expect(countSpy).toHaveBeenCalledWith({ status: 'PENDING' });
+  });
+
+  it('đếm đúng bốn tab bằng một aggregate facet và trả zero khi facet rỗng', async () => {
+    const aggregateExec = vi.fn().mockResolvedValue([{
+      all: [{ count: 12 }],
+      emergency: [{ count: 3 }],
+      normal: [{ count: 9 }],
+      overdue: []
+    }]);
+    const aggregateSpy = vi.spyOn(ManualReviewQueueMongoModel, 'aggregate').mockReturnValue({ exec: aggregateExec } as never);
+
+    await expect(countPendingManualReviewQueuesByTab()).resolves.toEqual({
+      all: 12,
+      emergency: 3,
+      normal: 9,
+      overdue: 0
+    });
+
+    const pipeline = aggregateSpy.mock.calls[0]?.[0] as unknown as Array<Record<string, unknown>>;
+    expect(pipeline[0]).toEqual({ $match: { status: 'PENDING' } });
+    expect(pipeline[1]).toHaveProperty('$facet');
+    const facets = pipeline[1]?.$facet as Record<string, unknown[]>;
+    expect(Object.keys(facets)).toEqual(['all', 'emergency', 'normal', 'overdue']);
+    expect(facets.emergency).toEqual([
+      { $match: { requestMode: 'EMERGENCY' } },
+      { $count: 'count' }
+    ]);
+    expect(facets.normal).toEqual([
+      { $match: { requestMode: 'NORMAL' } },
+      { $count: 'count' }
+    ]);
+    expect(facets.overdue?.[0]).toEqual({ $match: { slaDeadline: { $lte: expect.any(Date) } } });
+    expect(aggregateExec).toHaveBeenCalledTimes(1);
+  });
+
+  it('counts pending queue items missing the requestMode snapshot', async () => {
+    const countChain = { exec: vi.fn().mockResolvedValue(3) };
+    const countSpy = vi.spyOn(ManualReviewQueueMongoModel, 'countDocuments').mockReturnValue(countChain as never);
+
+    await expect(countPendingManualReviewQueuesMissingRequestMode()).resolves.toBe(3);
+    expect(countSpy).toHaveBeenCalledWith({
+      status: 'PENDING',
+      requestMode: { $exists: false }
+    });
   });
 });

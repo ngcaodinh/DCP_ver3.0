@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto';
 import mongoose, { Schema } from 'mongoose';
+import type { DisbursementRequestMode } from './disbursementModel';
 
 export type ManualReviewQueueStatus = 'PENDING' | 'APPROVED' | 'REJECTED';
 
@@ -20,6 +21,8 @@ export type ManualReviewQueueRecord = {
   reviewCycle: number;
   assignedAdminId: string | null;
   assignmentMethod: ManualReviewAssignmentMethod;
+  /** Snapshot phục vụ routing/UI; disbursement mới là nguồn sự thật tài chính. */
+  requestMode?: DisbursementRequestMode;
   status: ManualReviewQueueStatus;
   assignedAt: Date | null;
   resolvedAt: Date | null;
@@ -46,6 +49,7 @@ export type ManualReviewQueueOpenInput = {
   reviewCycle: number;
   assignedAdminId: string | null;
   assignmentMethod: ManualReviewAssignmentMethod;
+  requestMode: DisbursementRequestMode;
   assignedAt: Date | null;
   slaDeadline: Date;
 };
@@ -58,6 +62,15 @@ export type ManualReviewQueueUpsertResult = {
 export type ManualReviewQueuePaginationInput = {
   page: number;
   limit: number;
+  requestMode?: DisbursementRequestMode;
+  overdueOnly?: boolean;
+};
+
+export type ManualReviewQueueCounts = {
+  all: number;
+  emergency: number;
+  normal: number;
+  overdue: number;
 };
 
 const RETENTION_YEARS = 5;
@@ -78,6 +91,8 @@ const manualReviewQueueSchema = new Schema<ManualReviewQueueRecord>(
       required: true,
       enum: ['PROJECT_AFFINITY', 'ROUND_ROBIN', 'LEAST_LOADED', 'UNASSIGNED']
     },
+    // Đây là snapshot phục vụ filter/UI; disbursement vẫn là nguồn sự thật tài chính.
+    requestMode: { type: String, enum: ['NORMAL', 'EMERGENCY'], default: undefined },
     status: {
       type: String,
       required: true,
@@ -104,6 +119,7 @@ manualReviewQueueSchema.index({ disbursementRequestId: 1, reviewCycle: 1 }, { un
 manualReviewQueueSchema.index({ assignedAdminId: 1, status: 1, createdAt: 1 });
 manualReviewQueueSchema.index({ projectId: 1, status: 1 });
 manualReviewQueueSchema.index({ status: 1, slaDeadline: 1 });
+manualReviewQueueSchema.index({ status: 1, requestMode: 1, createdAt: -1 });
 manualReviewQueueSchema.index({ retentionExpiresAt: 1 }, { expireAfterSeconds: 0 });
 
 export const ManualReviewQueueMongoModel = mongoose.model<ManualReviewQueueRecord>(
@@ -198,6 +214,7 @@ export async function upsertManualReviewQueue(
       reviewCycle: input.reviewCycle,
       assignedAdminId: input.assignedAdminId,
       assignmentMethod: input.assignmentMethod,
+      requestMode: input.requestMode,
       status: 'PENDING',
       assignedAt: input.assignedAt,
       resolvedAt: null,
@@ -247,17 +264,61 @@ export async function findPendingManualReviewQueuesPaginated(
   input: ManualReviewQueuePaginationInput
 ): Promise<{ items: ManualReviewQueueRecord[]; total: number }> {
   const skip = (input.page - 1) * input.limit;
+  const filter: Record<string, unknown> = { status: 'PENDING' };
+  if (input.requestMode) {
+    filter.requestMode = input.requestMode;
+  }
+  if (input.overdueOnly) {
+    filter.slaDeadline = { $lte: new Date() };
+  }
+
   const [items, total] = await Promise.all([
-    ManualReviewQueueMongoModel.find({ status: 'PENDING' })
+    ManualReviewQueueMongoModel.find(filter)
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(input.limit)
       .lean<ManualReviewQueueRecord[]>()
       .exec(),
-    ManualReviewQueueMongoModel.countDocuments({ status: 'PENDING' }).exec()
+    ManualReviewQueueMongoModel.countDocuments(filter).exec()
   ]);
 
   return { items, total };
+}
+
+/** Đếm queue PENDING theo các tab dashboard bằng một aggregate `$facet` duy nhất. */
+export async function countPendingManualReviewQueuesByTab(): Promise<ManualReviewQueueCounts> {
+  const now = new Date();
+  const [result] = await ManualReviewQueueMongoModel.aggregate<{
+    all: Array<{ count: number }>;
+    emergency: Array<{ count: number }>;
+    normal: Array<{ count: number }>;
+    overdue: Array<{ count: number }>;
+  }>([
+    { $match: { status: 'PENDING' } },
+    {
+      $facet: {
+        all: [{ $count: 'count' }],
+        emergency: [{ $match: { requestMode: 'EMERGENCY' } }, { $count: 'count' }],
+        normal: [{ $match: { requestMode: 'NORMAL' } }, { $count: 'count' }],
+        overdue: [{ $match: { slaDeadline: { $lte: now } } }, { $count: 'count' }]
+      }
+    }
+  ]).exec();
+
+  return {
+    all: result?.all[0]?.count ?? 0,
+    emergency: result?.emergency[0]?.count ?? 0,
+    normal: result?.normal[0]?.count ?? 0,
+    overdue: result?.overdue[0]?.count ?? 0
+  };
+}
+
+/** Đếm queue PENDING thiếu snapshot requestMode để cảnh báo migration chưa hoàn tất. */
+export async function countPendingManualReviewQueuesMissingRequestMode(): Promise<number> {
+  return ManualReviewQueueMongoModel.countDocuments({
+    status: 'PENDING',
+    requestMode: { $exists: false }
+  }).exec();
 }
 
 /** Lấy các queue pending mới nhất để Socket polling bridge khôi phục missed event sau restart. */

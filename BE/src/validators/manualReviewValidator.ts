@@ -12,7 +12,9 @@ export const manualReviewDetailQuerySchema = z.object({
 
 export const manualReviewPendingQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
-  limit: z.coerce.number().int().min(1).transform(value => Math.min(value, 50)).default(50)
+  limit: z.coerce.number().int().min(1).transform(value => Math.min(value, 50)).default(50),
+  overdueOnly: z.enum(['true', 'false']).default('false').transform(value => value === 'true'),
+  requestMode: z.enum(['NORMAL', 'EMERGENCY']).optional()
 });
 
 export const manualReviewRejectBodySchema = z.object({

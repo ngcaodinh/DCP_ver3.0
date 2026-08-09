@@ -47,19 +47,25 @@ Thực hiện theo đúng thứ tự này khi deploy image BE có thay đổi A3
 docker compose -f docker-compose.ghcr.yml run --rm --no-deps backend npm run migrate:manual-review-queue-index
 ```
 
-3. Dùng container BE mới chưa nhận traffic để chạy dry-run:
+3. Đồng bộ snapshot `requestMode` cho queue pending trước khi mở traffic. Script idempotent, có thể chạy lại an toàn:
+
+```bash
+docker compose -f docker-compose.ghcr.yml run --rm --no-deps backend npm run migrate:manual-review-queue-request-mode
+```
+
+4. Dùng container BE mới chưa nhận traffic để chạy dry-run:
 
 ```bash
 docker compose -f docker-compose.ghcr.yml run --rm --no-deps backend npm run backfill:manual-review-queue -- --dry-run --batch-size=500 --max-items=10000
 ```
 
-4. Đối chiếu `scanned`, `opened`, `skipped`, `failed`, `hasMore` trong JSON và so sánh số disbursement `MANUAL_REVIEW` với số queue `PENDING`.
-5. Chạy write mode với cùng `--batch-size` và `--max-items`; lặp lại khi `hasMore=true` cho đến khi `hasMore=false` và `failed=0`.
+5. Đối chiếu `scanned`, `opened`, `skipped`, `failed`, `hasMore` trong JSON và so sánh số disbursement `MANUAL_REVIEW` với số queue `PENDING`.
+6. Chạy write mode với cùng `--batch-size` và `--max-items`; lặp lại khi `hasMore=true` cho đến khi `hasMore=false` và `failed=0`.
 
 ```bash
 docker compose -f docker-compose.ghcr.yml run --rm --no-deps backend npm run backfill:manual-review-queue -- --batch-size=500 --max-items=10000
 ```
 
-6. Chỉ sau khi backfill hoàn tất mới start backend/worker, frontend và route traffic; sau đó kiểm tra `/health` và dashboard `/admin/transfers`.
-7. Sau rollout có thay đổi `authVersion`, admin đang giữ JWT phát hành trước rollout có thể nhận `401` ở manual-review API; yêu cầu đăng nhập lại trước khi xác nhận dashboard hoạt động.
-8. Nếu Redis không khả dụng, reconciliation chỉ quét bounded batch từ các item mới nhất vì không thể lưu cursor; backfill script vẫn là đường authoritative để hoàn tất dữ liệu thiếu trước khi mở traffic.
+7. Chỉ sau khi backfill hoàn tất mới start backend/worker, frontend và route traffic; sau đó kiểm tra `/health` và dashboard `/admin/transfers`.
+8. Sau rollout có thay đổi `authVersion`, admin đang giữ JWT phát hành trước rollout có thể nhận `401` ở manual-review API; yêu cầu đăng nhập lại trước khi xác nhận dashboard hoạt động.
+9. Nếu Redis không khả dụng, reconciliation chỉ quét bounded batch từ các item mới nhất vì không thể lưu cursor; backfill script vẫn là đường authoritative để hoàn tất dữ liệu thiếu trước khi mở traffic.
