@@ -3,6 +3,7 @@ import type { AuthenticatedRequest } from '../middleware/authenticationMiddlewar
 import { sendSuccessResponse, sendErrorFromUnknown, sendErrorResponse } from '../utils/apiResponse';
 import {
   getPendingManualReview,
+  getPendingManualReviewCounts,
   getManualReviewDetail,
   manualApprove,
   manualReject
@@ -33,6 +34,22 @@ export async function handleGetPendingManualReview(
     sendSuccessResponse(response, 200, 'Lấy danh sách pending review thành công.', page);
   } catch (error) {
     sendErrorFromUnknown(response, error, 'Không thể lấy danh sách pending review.');
+  }
+}
+
+/**
+ * GET /api/disbursements/pending-review/counts
+ * Mục đích: lấy toàn bộ count của dashboard bằng một aggregate server-side.
+ */
+export async function handleGetPendingManualReviewCounts(
+  _request: AuthenticatedRequest,
+  response: Response
+): Promise<void> {
+  try {
+    const counts = await getPendingManualReviewCounts();
+    sendSuccessResponse(response, 200, 'Lấy tổng pending review thành công.', counts);
+  } catch (error) {
+    sendErrorFromUnknown(response, error, 'Không thể lấy tổng pending review.');
   }
 }
 

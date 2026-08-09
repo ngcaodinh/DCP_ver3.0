@@ -24,19 +24,23 @@ import {
 import {
   acquireManualReviewActionLease,
   countPendingManualReviewByAdminIds,
+  countPendingManualReviewQueuesByTab,
   findLatestManualReviewQueueByRequestId,
   claimManualReviewEscalationCandidates as claimManualReviewQueueEscalationCandidates,
   findPendingManualReviewQueueByRequestId,
   findPendingManualReviewQueuesByProject,
   findPendingManualReviewQueuesPaginated,
+  countPendingManualReviewQueuesMissingRequestMode,
   markManualReviewQueueEscalated,
   ManualReviewAssignmentMethod,
+  ManualReviewQueueCounts,
   ManualReviewQueueRecord,
   releaseManualReviewActionLease,
   releaseManualReviewEscalationClaim,
   resolveManualReviewQueue,
   upsertManualReviewQueue
 } from '../models/manualReviewQueueModel';
+import type { DisbursementRequestMode } from '../models/disbursementModel';
 import { createUserNotification } from './notificationService';
 import {
   enqueueDisbursementTransfer,
@@ -60,6 +64,8 @@ const MANUAL_REVIEW_RECONCILIATION_CURSOR_TTL_SECONDS = 7 * 24 * 60 * 60;
 const DEFAULT_MANUAL_REVIEW_RECONCILIATION_PAGE_SIZE = 100;
 const DEFAULT_MANUAL_REVIEW_RECONCILIATION_MAX_ITEMS = 500;
 const MANUAL_REVIEW_QUEUE_OPEN_MAX_ATTEMPTS = 5;
+const MANUAL_REVIEW_REQUEST_MODE_WARNING_INTERVAL_MS = 60_000;
+let lastRequestModeWarningAt = 0;
 
 // ============ TYPES ============
 
@@ -83,7 +89,7 @@ export type PendingReviewItem = {
   projectId: string;
   organizationId: string;
   amount: number;
-  requestMode: string;
+  requestMode: DisbursementRequestMode;
   emergencyReason: string | null;
   payosTransferStatus: string | null;
   payosTransferAttemptCount: number;
@@ -105,6 +111,8 @@ export type PendingManualReviewPage = {
   limit: number;
   totalPages: number;
 };
+
+export type PendingManualReviewCounts = ManualReviewQueueCounts;
 
 export type ManualReviewTransferLogItem = Pick<
   DisbursementTransferLogRecord,
@@ -211,6 +219,7 @@ export async function openManualReviewQueueForDisbursement(
       reason: sanitizedReason,
       retryCount: input.retryCount ?? input.disbursement.payosTransferAttemptCount ?? 0,
       reviewCycle,
+      requestMode: input.disbursement.requestMode,
       assignedAdminId: assignment.assignedAdminId,
       assignmentMethod: assignment.assignmentMethod,
       assignedAt: assignment.assignedAt,
@@ -245,15 +254,50 @@ export async function openManualReviewQueueForDisbursement(
   );
 }
 
+/** Cảnh báo bounded khi queue PENDING còn row thiếu snapshot requestMode sau migration. */
+async function warnIfPendingManualReviewRequestModeBackfillIncomplete(): Promise<void> {
+  const now = Date.now();
+  if (lastRequestModeWarningAt > 0 && now - lastRequestModeWarningAt < MANUAL_REVIEW_REQUEST_MODE_WARNING_INTERVAL_MS) {
+    return;
+  }
+  lastRequestModeWarningAt = now;
+
+  try {
+    const missingCount = await countPendingManualReviewQueuesMissingRequestMode();
+    if (missingCount > 0) {
+      logger.warn('Manual review queue còn PENDING thiếu snapshot requestMode; migration/backfill chưa hoàn tất.', {
+        missingCount
+      });
+    }
+  } catch (error) {
+    logger.warn('Không thể kiểm tra queue PENDING thiếu snapshot requestMode.', {
+      errorName: error instanceof Error ? error.name : 'UNKNOWN_ERROR'
+    });
+  }
+}
+
 /**
  * Lấy danh sách manual review pending từ queue durable với phân trang và DTO không chứa bank PII thô.
  */
 export async function getPendingManualReview(
-  options?: Partial<{ page: number; limit: number }>
+  options?: Partial<{
+    page: number;
+    limit: number;
+    overdueOnly: boolean;
+    requestMode: DisbursementRequestMode;
+  }>
 ): Promise<PendingManualReviewPage> {
   const page = normalizePage(options?.page);
   const limit = normalizeLimit(options?.limit);
-  const { items: queueItems, total } = await findPendingManualReviewQueuesPaginated({ page, limit });
+  if (page === 1 && limit > 1 && !options?.overdueOnly && !options?.requestMode) {
+    void warnIfPendingManualReviewRequestModeBackfillIncomplete();
+  }
+  const { items: queueItems, total } = await findPendingManualReviewQueuesPaginated({
+    page,
+    limit,
+    overdueOnly: options?.overdueOnly,
+    requestMode: options?.requestMode
+  });
 
   const disbursements = await findDisbursementsByRequestIds(
     queueItems.map(queueItem => queueItem.disbursementRequestId)
@@ -273,6 +317,11 @@ export async function getPendingManualReview(
     limit,
     totalPages: Math.ceil(total / limit)
   };
+}
+
+/** Lấy tổng queue cho dashboard bằng aggregate đã gom theo các tab trong một lần đọc. */
+export async function getPendingManualReviewCounts(): Promise<PendingManualReviewCounts> {
+  return countPendingManualReviewQueuesByTab();
 }
 
 /**
@@ -298,10 +347,11 @@ export async function getManualReviewDetail(
     );
   }
 
-  const [transferLogs, auditLogs] = await Promise.all([
+  const [transferLogs, initialAuditLogs] = await Promise.all([
     findTransferLogsByRequestId(requestId),
     findAuditLogsByRequestId(requestId)
   ]);
+  let auditLogs = initialAuditLogs;
   const shouldRevealBankAccount = Boolean(options.revealBankAccount && options.adminUserId);
 
   if (shouldRevealBankAccount) {
@@ -312,6 +362,8 @@ export async function getManualReviewDetail(
       null,
       { accessMode: 'REVEAL_ON_DEMAND' }
     );
+    // Audit phải được ghi xong trước khi đọc lại để response phản ánh đầy đủ lần reveal hiện tại.
+    auditLogs = await findAuditLogsByRequestId(requestId);
   }
 
   return {
@@ -872,7 +924,8 @@ function emitManualReviewRequired(queueItem: ManualReviewQueueRecord, disburseme
     queueId: queueItem.queueId,
     projectId: disbursement.projectId,
     amount: disbursement.amount,
-    requestMode: disbursement.requestMode,
+    // Queue lưu snapshot để filter/UI ổn định; disbursement vẫn là nguồn sự thật tài chính.
+    requestMode: queueItem.requestMode ?? disbursement.requestMode,
     timestamp: new Date().toISOString()
   });
 }
@@ -900,7 +953,8 @@ function formatToPendingReviewItem(
     projectId: disbursement.projectId,
     organizationId: disbursement.organizationId,
     amount: disbursement.amount,
-    requestMode: disbursement.requestMode,
+    // Queue lưu snapshot để filter/UI ổn định; disbursement vẫn là nguồn sự thật tài chính.
+    requestMode: queueItem.requestMode ?? disbursement.requestMode,
     emergencyReason: disbursement.emergencyReason,
     payosTransferStatus: disbursement.payosTransferStatus,
     payosTransferAttemptCount: disbursement.payosTransferAttemptCount,

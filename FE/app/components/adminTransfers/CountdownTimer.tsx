@@ -1,72 +1,79 @@
 'use client';
 
-// =============================================================================
-// CountdownTimer — A4: hiển thị đếm ngược đến lần retry tiếp theo
-// Tính từ updatedAt + delay theo attemptCount (1m / 5m / 30m)
-// =============================================================================
-
-import { useState, useEffect, useRef } from 'react';
-
-// Phản ánh PAYOS_TRANSFER_RETRY_DELAYS_MS trong BE (ms)
-const RETRY_DELAYS_MS = [60_000, 300_000, 1_800_000] as const;
+import { useEffect, useRef, useState } from 'react';
 
 type CountdownTimerProps = {
-  /** Thời điểm cập nhật lần cuối (ISO string) */
-  updatedAt: string;
-  /** Số lần đã retry — dùng để tính delay tiếp theo */
-  attemptCount: number;
+  /** SLA snapshot do backend cấp, không suy ra từ updatedAt ở client. */
+  deadline: string;
+  /** Thời điểm escalation đã được worker ghi nhận, nếu có. */
+  escalatedAt: string | null;
+  /** Chỗ cắm cho follow-up persist nextRetryAt; A4 chưa dùng field này. */
+  nextRetryAt?: string | null;
 };
 
-function formatDuration(ms: number): string {
-  if (ms <= 0) return 'Sắp retry...';
-  const totalSecs = Math.floor(ms / 1000);
-  const mins = Math.floor(totalSecs / 60);
-  const secs = totalSecs % 60;
-  if (mins > 0) return `${mins}p ${secs}s`;
-  return `${secs}s`;
+/** Định dạng số mili-giây còn lại theo ngôn ngữ hiển thị của dashboard. */
+function formatDuration(remainingMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(remainingMs / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return `${hours}g ${minutes}p ${seconds}s`;
 }
 
-/**
- * Đếm ngược real-time đến lần retry tiếp theo dựa trên attemptCount + updatedAt.
- * Mục đích: cho admin biết khi nào transfer sẽ được retry tự động (nếu chưa MANUAL_REVIEW).
- */
-export default function CountdownTimer({ updatedAt, attemptCount }: CountdownTimerProps) {
-  const delayMs = RETRY_DELAYS_MS[Math.min(attemptCount, RETRY_DELAYS_MS.length - 1)] ?? RETRY_DELAYS_MS[RETRY_DELAYS_MS.length - 1];
-  const nextRetryAt = new Date(updatedAt).getTime() + delayMs;
-
-  const [remaining, setRemaining] = useState(() => nextRetryAt - Date.now());
+/** Hiển thị SLA realtime từ deadline server và dọn interval đầy đủ khi hết hạn/unmount. */
+export default function CountdownTimer({ deadline, escalatedAt }: CountdownTimerProps) {
+  const deadlineTimestamp = new Date(deadline).getTime();
+  const hasValidDeadline = Number.isFinite(deadlineTimestamp);
+  const [remainingMs, setRemainingMs] = useState(() => hasValidDeadline ? deadlineTimestamp - Date.now() : 0);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
-    if (nextRetryAt - Date.now() <= 0) return; // Đã hết giờ, không cần interval
-    intervalRef.current = setInterval(() => {
-      const rem = nextRetryAt - Date.now();
-      setRemaining(rem);
-      if (rem <= 0 && intervalRef.current) {
+    const updateRemaining = () => {
+      const nextRemainingMs = hasValidDeadline ? deadlineTimestamp - Date.now() : 0;
+      setRemainingMs(nextRemainingMs);
+      if (nextRemainingMs <= 0 && intervalRef.current) {
         clearInterval(intervalRef.current);
         intervalRef.current = null;
       }
-    }, 1000);
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
     };
-  }, [nextRetryAt]);
 
-  if (remaining <= 0) {
+    updateRemaining();
+    if (hasValidDeadline && deadlineTimestamp > Date.now()) {
+      intervalRef.current = setInterval(updateRemaining, 1000);
+    }
+
+    return () => {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+    };
+  }, [deadlineTimestamp, hasValidDeadline]);
+
+  if (escalatedAt) {
     return (
-      <span className="inline-flex items-center gap-1 text-xs font-semibold text-amber-600">
-        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500" />
-        Sắp retry...
+      <span className="inline-flex items-center gap-1 text-xs font-semibold text-red-700">
+        <span className="h-1.5 w-1.5 rounded-full bg-red-500" />
+        Đã escalate lúc {new Date(escalatedAt).toLocaleString('vi-VN')}
       </span>
     );
   }
 
+  if (!hasValidDeadline) {
+    return <span className="text-xs font-semibold text-amber-700">SLA không hợp lệ</span>;
+  }
+
+  if (remainingMs <= 0) {
+    return <span className="text-xs font-semibold text-red-700">Quá hạn SLA</span>;
+  }
+
+  const isUrgent = remainingMs < 2 * 60 * 60 * 1000;
   return (
-    <span className="inline-flex items-center gap-1 font-mono text-xs text-slate-600">
-      <svg width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+    <span className={`inline-flex items-center gap-1 font-mono text-xs ${isUrgent ? 'font-semibold text-red-600' : 'text-slate-600'}`}>
+      <svg width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" aria-hidden="true">
         <circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" strokeLinecap="round" />
       </svg>
-      {formatDuration(remaining)}
+      {formatDuration(remainingMs)}
     </span>
   );
 }

@@ -23,6 +23,10 @@ const indexDefinitions = [
     key: { status: 1, slaDeadline: 1 }
   },
   {
+    name: 'status_1_requestMode_1_createdAt_-1',
+    key: { status: 1, requestMode: 1, createdAt: -1 }
+  },
+  {
     name: 'retentionExpiresAt_1',
     key: { retentionExpiresAt: 1 },
     expireAfterSeconds: 0
@@ -86,7 +90,7 @@ runMigration()
     console.log('\nMigration manual review queue indexes thanh cong.');
   })
   .catch((error) => {
-    console.error('\nMigration manual review queue indexes that bai:', error.message);
+    console.error('\nMigration manual review queue indexes that bai:', error instanceof Error ? error.name : 'UNKNOWN_ERROR');
     process.exitCode = 1;
   })
   .finally(async () => {

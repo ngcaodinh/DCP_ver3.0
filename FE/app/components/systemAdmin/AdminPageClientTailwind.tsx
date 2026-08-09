@@ -455,8 +455,12 @@ export default function AdminPageClientTailwind() {
   // =============================================================================
 
   const handleNavigate = useCallback((key: PageKey) => {
+    if (key === 'transferQueue') {
+      router.push('/admin/transfers');
+      return;
+    }
     setActivePage(key);
-  }, []);
+  }, [router]);
 
   // =============================================================================
   // RENDER: LOADING

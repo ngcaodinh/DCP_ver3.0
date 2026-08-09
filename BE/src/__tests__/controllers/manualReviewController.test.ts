@@ -5,6 +5,7 @@ import { ApplicationError } from '../../utils/applicationError';
 
 vi.mock('../../services/manualReviewService', () => ({
   getPendingManualReview: vi.fn(),
+  getPendingManualReviewCounts: vi.fn(),
   getManualReviewDetail: vi.fn(),
   manualApprove: vi.fn(),
   manualReject: vi.fn()
@@ -13,6 +14,7 @@ vi.mock('../../services/manualReviewService', () => ({
 import * as manualReviewService from '../../services/manualReviewService';
 import {
   handleGetPendingManualReview,
+  handleGetPendingManualReviewCounts,
   handleGetManualReviewDetail,
   handleManualApprove,
   handleManualReject
@@ -55,7 +57,11 @@ describe('manualReviewController', () => {
     const response = createMockResponse();
     await handleGetPendingManualReview(createMockRequest({ query: { page: '2', limit: '10' } }), response);
 
-    expect(manualReviewService.getPendingManualReview).toHaveBeenCalledWith({ page: 2, limit: 10 });
+    expect(manualReviewService.getPendingManualReview).toHaveBeenCalledWith({
+      page: 2,
+      limit: 10,
+      overdueOnly: false
+    });
     expect(response.status).toHaveBeenCalledWith(200);
     expect(response.json).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -69,8 +75,65 @@ describe('manualReviewController', () => {
     const response = createMockResponse();
     await handleGetPendingManualReview(createMockRequest({ query: { limit: '51' } }), response);
 
-    expect(manualReviewService.getPendingManualReview).toHaveBeenCalledWith({ page: 1, limit: 50 });
+    expect(manualReviewService.getPendingManualReview).toHaveBeenCalledWith({
+      page: 1,
+      limit: 50,
+      overdueOnly: false
+    });
     expect(response.status).toHaveBeenCalledWith(200);
+  });
+
+  it('returns aggregate dashboard counts with the standard envelope', async () => {
+    vi.mocked(manualReviewService.getPendingManualReviewCounts).mockResolvedValue({
+      all: 12,
+      emergency: 3,
+      normal: 9,
+      overdue: 2
+    });
+
+    const response = createMockResponse();
+    await handleGetPendingManualReviewCounts(createMockRequest(), response);
+
+    expect(manualReviewService.getPendingManualReviewCounts).toHaveBeenCalledTimes(1);
+    expect(response.status).toHaveBeenCalledWith(200);
+    expect(response.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: true,
+        data: { all: 12, emergency: 3, normal: 9, overdue: 2 }
+      })
+    );
+  });
+
+  it('passes optional overdue and requestMode filters through the standard envelope', async () => {
+    vi.mocked(manualReviewService.getPendingManualReview).mockResolvedValue({
+      items: [],
+      total: 0,
+      page: 1,
+      limit: 50,
+      totalPages: 0
+    });
+
+    const response = createMockResponse();
+    await handleGetPendingManualReview(createMockRequest({ query: { overdueOnly: 'true', requestMode: 'EMERGENCY' } }), response);
+
+    expect(manualReviewService.getPendingManualReview).toHaveBeenCalledWith({
+      page: 1,
+      limit: 50,
+      overdueOnly: true,
+      requestMode: 'EMERGENCY'
+    });
+    expect(response.status).toHaveBeenCalledWith(200);
+  });
+
+  it('returns validation envelope for invalid filter values before service call', async () => {
+    const response = createMockResponse();
+    await handleGetPendingManualReview(createMockRequest({ query: { overdueOnly: 'yes', requestMode: 'URGENT' } }), response);
+
+    expect(manualReviewService.getPendingManualReview).not.toHaveBeenCalled();
+    expect(response.status).toHaveBeenCalledWith(400);
+    expect(response.json).toHaveBeenCalledWith(
+      expect.objectContaining({ success: false, errorCode: 'VALIDATION_ERROR' })
+    );
   });
 
   it('returns detail DTO by requestId and preserves route contract', async () => {
