@@ -167,7 +167,7 @@ const mongodbDesign = {
         { name: 'updatedAt', type: 'Date', description: 'Thời điểm cập nhật.' }
       ],
       indexes: [
-        { keys: { projectId: 1, status: 1 }, reason: 'Tối ưu theo dự án và trạng thái.' },
+        { keys: { projectId: 1, status: 1, createdAt: -1 }, reason: 'Tối ưu summary COMPLETED theo dự án và thứ tự gần nhất.' },
         { keys: { organizationId: 1, status: 1 }, reason: 'Tối ưu theo tổ chức.' },
         { keys: { onChainRequestId: 1 }, unique: true, reason: 'Idempotency on-chain.' },
         { keys: { idempotencyKey: 1 }, unique: true, reason: 'Ngăn xử lý trùng khi gọi PayOS.' },

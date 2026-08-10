@@ -55,6 +55,9 @@ export function parseProjectSummary(rawResponse: unknown): ProjectSummary {
     transactionCount: toFiniteNumber(source.transactionCount),
     disbursementCount: toFiniteNumber(source.disbursementCount),
     disbursedAmounts,
+    excludedReorgedVnd: toFiniteNumber(source.excludedReorgedVnd),
+    excludedReorgedCount: toFiniteNumber(source.excludedReorgedCount),
+    overDisbursed: source.overDisbursed === true,
     cached: source.cached === true,
     fallbackMode: source.fallbackMode === true
   };

@@ -9,7 +9,7 @@
  * 5. Cache invalidation: Set cache voi projectId:undefined → verify xoa pattern (F10)
  */
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import crypto from 'crypto';
+import { signCachePayload } from '../../utils/cacheIntegrity';
 
 vi.mock('../../config/logger', () => ({
   getLogger: vi.fn(() => ({
@@ -55,7 +55,8 @@ import {
   getUnifiedTimeline,
   invalidateUnifiedTimelineCache
 } from '../../services/unified-timeline.service';
-import { findUnifiedTimeline } from '../../repositories/unifiedTransactionRepository';
+import { encodeCursor, findUnifiedTimeline } from '../../repositories/unifiedTransactionRepository';
+import { findDonationsByProjectIdWithDateFilter } from '../../repositories/donationRepository';
 
 describe('B4 Review - Service fixes', () => {
   beforeEach(() => {
@@ -180,9 +181,10 @@ describe('B4 Review - Service fixes', () => {
         count: 1
       });
 
-      const hmacKey = process.env.CACHE_HMAC_KEY || process.env.JWT_SECRET || 'dcp-cache-hmac-default-rotate-me';
-      const signature = crypto.createHmac('sha256', hmacKey).update(json).digest('hex');
-      const signedPayload = `${json}.${signature}`;
+      const signedPayload = signCachePayload(
+        json,
+        'transparency:unified:p1:all:none:none:10'
+      );
 
       redisMockApi.mockRedisGet.mockResolvedValueOnce(signedPayload);
 
@@ -374,33 +376,40 @@ describe('B4 Review - Service fixes', () => {
 
   // ===== F10: cache invalidation pattern =====
   describe('F10: cache invalidation pattern', () => {
-    it('invalidateUnifiedTimelineCache luon xoa toan bo namespace (transparency:unified:*)', async () => {
+    it('invalidateUnifiedTimelineCache theo projectId chỉ xóa namespace của project đó', async () => {
       // F10 fix: luon xoa tat ca key co prefix `transparency:unified:*`,
       // khong phan biet projectId de tranh bo sot wallet-only / date-range key.
-      const fakeKeys = [
+      const projectKeys = [
         'transparency:unified:p1:0xabc:2024-01-01:2024-12-31:50',
-        'transparency:unified:p2:all:none:none:50',
+      ];
+      const aggregateKeys = [
         'transparency:unified:all:0xdef:2024-06-01:2024-06-30:50',
-        'transparency:unified::0xghi:::10'
       ];
 
-      async function* fakeIterator() {
-        yield fakeKeys;
+      async function* projectIterator() {
+        yield projectKeys;
       }
-      redisMockApi.mockRedisScanIterator.mockReturnValueOnce(fakeIterator());
-      redisMockApi.mockRedisDel.mockResolvedValueOnce(fakeKeys.length);
+      async function* aggregateIterator() {
+        yield aggregateKeys;
+      }
+      redisMockApi.mockRedisScanIterator
+        .mockReturnValueOnce(projectIterator())
+        .mockReturnValueOnce(aggregateIterator());
+      redisMockApi.mockRedisDel.mockResolvedValueOnce(projectKeys.length + aggregateKeys.length);
 
-      // Caller truyen projectId cu the - van phai xoa het
+      // Caller truyền projectId cụ thể - chỉ xóa các key của project đó.
       await invalidateUnifiedTimelineCache('p1');
 
-      // Pattern phai la `transparency:unified:*` (khong phai `transparency:unified:p1:*`)
-      expect(redisMockApi.mockRedisScanIterator).toHaveBeenCalledWith({
-        MATCH: 'transparency:unified:*',
+      expect(redisMockApi.mockRedisScanIterator).toHaveBeenNthCalledWith(1, {
+        MATCH: 'transparency:unified:p1:*',
+        COUNT: 100
+      });
+      expect(redisMockApi.mockRedisScanIterator).toHaveBeenNthCalledWith(2, {
+        MATCH: 'transparency:unified:all:*',
         COUNT: 100
       });
 
-      // Phai del tat ca keys (khong chi key cua p1)
-      expect(redisMockApi.mockRedisDel).toHaveBeenCalledWith(...fakeKeys);
+      expect(redisMockApi.mockRedisDel).toHaveBeenCalledWith(...projectKeys, ...aggregateKeys);
     });
 
     it('invalidateUnifiedTimelineCache khong co projectId → van xoa het namespace', async () => {
@@ -422,7 +431,9 @@ describe('B4 Review - Service fixes', () => {
       async function* fakeIterator() {
         // Khong yield gi
       }
-      redisMockApi.mockRedisScanIterator.mockReturnValueOnce(fakeIterator());
+      redisMockApi.mockRedisScanIterator
+        .mockReturnValueOnce(fakeIterator())
+        .mockReturnValueOnce(fakeIterator());
 
       await invalidateUnifiedTimelineCache('p1');
 
@@ -436,24 +447,18 @@ describe('B4 Review - Service fixes', () => {
       // cu phai xoa (vi gio pattern la transparency:unified:*).
 
       // Step 1: Set cache (HMAC signed)
-      const walletOnlyJson = JSON.stringify({
-        timeline: [],
-        nextCursor: null,
-        cached: false,
-        count: 0,
-        fallbackMode: false
-      });
-      const hmacKey = process.env.CACHE_HMAC_KEY || process.env.JWT_SECRET || 'dcp-cache-hmac-default-rotate-me';
-      const walletSig = crypto.createHmac('sha256', hmacKey).update(walletOnlyJson).digest('hex');
-      const signedWalletJson = `${walletOnlyJson}.${walletSig}`;
-
       const walletOnlyKey = 'transparency:unified:all:0xabc:::50';
 
       // Mock Redis scan iterator tra ve key can xoa
       async function* fakeIterator() {
         yield [walletOnlyKey];
       }
-      redisMockApi.mockRedisScanIterator.mockReturnValueOnce(fakeIterator());
+      async function* emptyProjectIterator() {
+        yield [];
+      }
+      redisMockApi.mockRedisScanIterator
+        .mockReturnValueOnce(emptyProjectIterator())
+        .mockReturnValueOnce(fakeIterator());
       redisMockApi.mockRedisDel.mockResolvedValueOnce(1);
 
       await invalidateUnifiedTimelineCache('p1');
@@ -461,5 +466,56 @@ describe('B4 Review - Service fixes', () => {
       // Verify key duoc xoa (vi pattern gio la transparency:unified:*)
       expect(redisMockApi.mockRedisDel).toHaveBeenCalledWith(walletOnlyKey);
     });
+
+    it('không xóa trùng key khi projectId là all', async () => {
+      async function* aggregateIterator() {
+        yield ['transparency:unified:all:all:none:none:50'];
+      }
+      redisMockApi.mockRedisScanIterator.mockReturnValueOnce(aggregateIterator());
+
+      await invalidateUnifiedTimelineCache('all');
+
+      expect(redisMockApi.mockRedisScanIterator).toHaveBeenCalledOnce();
+      expect(redisMockApi.mockRedisDel).toHaveBeenCalledOnce();
+    });
+  });
+
+  it('fallback cursor không bỏ sót donation có cùng timestamp', async () => {
+    vi.mocked(findUnifiedTimeline).mockResolvedValue({
+      items: [],
+      nextCursor: null,
+      totalCount: 0
+    });
+
+    const sameTimestamp = new Date('2024-06-15T10:30:00.000Z');
+    vi.mocked(findDonationsByProjectIdWithDateFilter).mockResolvedValue([
+      {
+        _id: 'doc-a',
+        amount: 100,
+        timestamp: sameTimestamp,
+        walletAddress: '0x742d35cc6634c0532925a3b844bc9e7595f5c21a',
+        txHash: '0x01',
+        projectId: 'p1'
+      },
+      {
+        _id: 'doc-b',
+        amount: 200,
+        timestamp: sameTimestamp,
+        walletAddress: '0x742d35cc6634c0532925a3b844bc9e7595f5c21a',
+        txHash: '0x02',
+        projectId: 'p1'
+      }
+    ]);
+
+    const firstPage = await getUnifiedTimeline({ projectId: 'p1' }, 1);
+    const secondPage = await getUnifiedTimeline(
+      { projectId: 'p1' },
+      1,
+      firstPage.nextCursor || encodeCursor(sameTimestamp, firstPage.timeline[0].eventId)
+    );
+
+    expect(firstPage.timeline).toHaveLength(1);
+    expect(secondPage.timeline).toHaveLength(1);
+    expect(secondPage.timeline[0].eventId).not.toBe(firstPage.timeline[0].eventId);
   });
 });

@@ -7,11 +7,10 @@
  * Pagination: cursor-based, cursor = base64(timestampISO + "_" + id)
  * Cache: Redis TTL 2 phút, key = `transparency:unified:{projectId}`
  */
-import crypto from 'crypto';
 import { getLogger } from '../config/logger';
 import { getRedisClientIfReady } from '../config/redis';
 import { createInMemoryCache } from '../utils/inMemoryCache';
-import { DonationRecord } from '../models/donationModel';
+import { signCachePayload, verifyCachePayload } from '../utils/cacheIntegrity';
 import {
   encodeCursor,
   decodeCursor,
@@ -23,52 +22,6 @@ import { findDonationsByProjectIdWithDateFilter } from '../repositories/donation
 const WALLET_REGEX = /^0x[a-fA-F0-9]{40}$/;
 
 const logger = getLogger();
-
-/**
- * HMAC secret cho cache payload integrity.
- * Lấy từ env CACHE_HMAC_KEY để có thể rotate mà không cần deploy.
- * Trong production, secret được lưu trong secret manager (Vault/KMS).
- *
- * F2 fix: HMAC đảm bảo payload không bị tamper khi Redis bị truy cập trái phép
- * hoặc in-memory cache bị dump qua heap inspection.
- */
-function getCacheHmacKey(): string {
-  return String(process.env.CACHE_HMAC_KEY || '').trim()
-    || String(process.env.JWT_SECRET || '').trim()
-    || 'dcp-cache-hmac-default-rotate-me';
-}
-
-/**
- * Tạo HMAC signature cho payload cache.
- * Format: base64(payload) + "." + HMAC-SHA256(payload)
- * @param payload Chuỗi JSON cần ký
- * @returns Chuỗi đã ký
- */
-function signCachePayload(payload: string): string {
-  const signature = crypto.createHmac('sha256', getCacheHmacKey()).update(payload).digest('hex');
-  return `${payload}.${signature}`;
-}
-
-/**
- * Verify HMAC signature cho payload cache. Trả về payload gốc nếu hợp lệ, null nếu không.
- * Constant-time comparison để tránh timing attack.
- * @param signedPayload Chuỗi payload đã ký
- * @returns Payload gốc nếu signature hợp lệ, null nếu không
- */
-function verifyCachePayload(signedPayload: string): string | null {
-  const separatorIndex = signedPayload.lastIndexOf('.');
-  if (separatorIndex === -1) return null;
-  const payload = signedPayload.slice(0, separatorIndex);
-  const providedSignature = signedPayload.slice(separatorIndex + 1);
-  if (!payload || !providedSignature) return null;
-
-  const expectedSignature = crypto.createHmac('sha256', getCacheHmacKey()).update(payload).digest('hex');
-  const providedBuffer = Buffer.from(providedSignature, 'utf-8');
-  const expectedBuffer = Buffer.from(expectedSignature, 'utf-8');
-  if (providedBuffer.length !== expectedBuffer.length) return null;
-  if (!crypto.timingSafeEqual(providedBuffer, expectedBuffer)) return null;
-  return payload;
-}
 
 /**
  * CẢNH BÁO PII & BẢO MẬT CACHE:
@@ -97,6 +50,11 @@ const unifiedCachePrefix = 'transparency:unified:';
 const unifiedCacheTimeToLiveSeconds = 120;
 const unifiedCacheFallback = createInMemoryCache<string>({ maxEntries: 500 });
 const MAX_PAGE_SIZE = 50;
+
+/** Escape ký tự glob của Redis để projectId không thể mở rộng phạm vi SCAN. */
+function escapeRedisScanPattern(value: string): string {
+  return value.replace(/[\\*?\[\]]/g, '\\$&');
+}
 
 export type TimelineEvent = {
   eventId: string;
@@ -171,7 +129,7 @@ async function getCache(cacheKey: string): Promise<string | null> {
   }
   if (!signed) return null;
 
-  const verifiedPayload = verifyCachePayload(signed);
+  const verifiedPayload = verifyCachePayload(signed, cacheKey);
   if (verifiedPayload === null) {
     // Payload bị tamper hoặc ký không hợp lệ — xóa khỏi cache để tránh retry liên tục
     logger.warn('Unified timeline cache HMAC verification failed, dropping entry.', { cacheKey });
@@ -191,7 +149,7 @@ async function getCache(cacheKey: string): Promise<string | null> {
  * Signature được tính trên payload JSON, sau đó lưu dạng "payload.signature".
  */
 async function setCache(cacheKey: string, json: string): Promise<void> {
-  const signed = signCachePayload(json);
+  const signed = signCachePayload(json, cacheKey);
   const redisClient = getRedisClientIfReady();
   if (redisClient) {
     try {
@@ -269,7 +227,7 @@ async function fallbackFromBlockchain(query: UnifiedTimelineQuery, limit: number
     limit: limit * 3
   });
 
-  let events: TimelineEvent[] = donations
+  const events: TimelineEvent[] = donations
     .map(d => blockchainDonationToEventFromRepo(d));
 
   events.sort((a, b) => {
@@ -284,7 +242,12 @@ async function fallbackFromBlockchain(query: UnifiedTimelineQuery, limit: number
     const decoded = decodeCursor(query.cursor);
     if (decoded) {
       const cursorTime = decoded.timestamp.getTime();
-      const found = events.findIndex(e => new Date(e.timestamp).getTime() > cursorTime);
+      // Dùng đủ hai phần của keyset cursor để không bỏ sót event trùng timestamp.
+      const found = events.findIndex(event => {
+        const eventTime = new Date(event.timestamp).getTime();
+        return eventTime > cursorTime
+          || (eventTime === cursorTime && event.eventId > decoded.documentId);
+      });
       startIndex = found === -1 ? events.length : found;
     }
   }
@@ -440,12 +403,8 @@ export async function buildUnifiedTimeline(
 /**
  * Xóa cache khi có transaction mới được sync.
  *
- * F10 fix: sử dụng pattern `transparency:unified:*` để xóa TẤT CẢ cache key
- * (cả walletAddress-only và date-range). Lý do: cache key có nhiều dạng
- * (`{projectId}:{wallet}:{startDate}:{endDate}:{limit}`) nên không thể sử
- * dụng pattern theo projectId để xóa chính xác (sẽ bỏ sót key có projectId rỗng
- * như deposit). Cách an toàn: xóa toàn bộ namespace khi invalidation là
- * low-frequency event (chỉ khi sync transaction mới, mỗi 5 phút).
+ * Khi biết projectId, chỉ xóa các key thuộc project đó; khi không biết phạm vi,
+ * mới xóa toàn bộ namespace để bảo đảm không giữ dữ liệu cũ.
  *
  * LƯU Ý: Hạn chế sử dụng SCAN thay vì KEYS trong production.
  * - KEYS pattern là O(N) và BLOCK Redis trong quá trình scan - NGUY HIỂM cho production.
@@ -453,30 +412,38 @@ export async function buildUnifiedTimeline(
  * - Tradeoff: SCAN có thể miss keys nếu có write race nhưng nhanh chóng hơn
  *   trong trường hợp bình thường.
  * - In production, nếu Redis có nhiều keys (>10k), bắt buộc phải dùng SCAN.
+ * Khi có projectId, xóa các key của project đó và namespace `all` cùng lúc.
  */
 export async function invalidateUnifiedTimelineCache(projectId?: string): Promise<void> {
-  // F10 fix: luôn sử dụng `transparency:unified:*` để xóa toàn bộ namespace,
-  // bỏ qua tham số projectId để tránh bỏ sót cache key dạng khác.
-  // Tham số projectId vẫn giữ để tương thích ngược và log, nhưng không sử dụng trong pattern.
   const redisClient = getRedisClientIfReady();
+  const normalizedProjectId = projectId?.trim();
+  // Query không có projectId dùng namespace `all`, nên phải xóa cùng lúc với
+  // namespace project cụ thể để timeline tổng hợp không giữ dữ liệu cũ.
+  const patternList = normalizedProjectId
+    ? Array.from(new Set([
+        `${unifiedCachePrefix}${escapeRedisScanPattern(normalizedProjectId)}:*`,
+        `${unifiedCachePrefix}all:*`
+      ]))
+    : [`${unifiedCachePrefix}*`];
 
   if (redisClient) {
     try {
-      const pattern = `${unifiedCachePrefix}*`;
-
       // Sử dụng SCAN iterator thay vì scanStream (đã bị loại bỏ khỏi redis@5.12.0)
       // COUNT = 100 nghĩa là lấy 100 keys mỗi vòng lặp, balance giữa tốc độ và performance
-      const keyList: string[] = [];
-      for await (const batch of redisClient.scanIterator({ MATCH: pattern, COUNT: 100 })) {
-        keyList.push(...batch);
+      const keySet = new Set<string>();
+      for (const pattern of patternList) {
+        for await (const batch of redisClient.scanIterator({ MATCH: pattern, COUNT: 100 })) {
+          for (const key of batch) keySet.add(String(key));
+        }
       }
+      const keyList = [...keySet];
 
       if (keyList.length > 0) {
         // redis@5 del accepts multiple keys but types don't reflect this - use spread assertion
         const delCommand = redisClient.del as (...keys: string[]) => Promise<number>;
         await delCommand(...keyList);
         logger.info('Unified timeline cache invalidated via Redis SCAN.', {
-          projectId,
+          projectId: normalizedProjectId,
           keysDeleted: keyList.length
         });
       }
@@ -487,7 +454,12 @@ export async function invalidateUnifiedTimelineCache(projectId?: string): Promis
     }
   }
 
-  unifiedCacheFallback.clearAll();
+  if (normalizedProjectId) {
+    unifiedCacheFallback.deleteByPrefix(`${unifiedCachePrefix}${normalizedProjectId}:`);
+    unifiedCacheFallback.deleteByPrefix(`${unifiedCachePrefix}all:`);
+  } else {
+    unifiedCacheFallback.clearAll();
+  }
 }
 
 /** Alias cho tên function được dùng bởi controller */

@@ -14,7 +14,8 @@
  * 2. Du lieu tra ve (wallet addresses, PayOS order codes, amounts) KHONG phai PII
  *    - Blockchain transactions la PUBLIC by design
  *    - PayOS order codes va amounts la transaction metadata
- * 3. Rate limiting 100 req/min da duoc ap dung de ngan chan abuse
+ * 3. Rate limiting 100 req/phút — dùng CHUNG cho cả hai endpoint (một bucket), tính theo IP,
+ *    mỗi instance đếm riêng bằng in-memory Map.
  * 4. Khong co du lieu ca nhan nhay cam (email, ten, so dien thoai) duoc expose
  * ---------------------------------------------------------------------------
  */
@@ -29,7 +30,8 @@ import { createRateLimitMiddleware } from '../middleware/rateLimitMiddleware';
 export function createVerificationRoutes(): Router {
   const router = Router();
 
-  // Rate limit: 100 requests per minute cho tat ca verification endpoints
+  // QĐ-8: dùng chung một bucket là chủ đích; tách bucket sẽ làm quota thực tế tăng gấp đôi.
+  // Rate limit: 100 requests per minute cho cả hai verification endpoints.
   const verificationRateLimit = createRateLimitMiddleware(100, 60 * 1000, {
     bucketName: 'transparency:verification'
   });

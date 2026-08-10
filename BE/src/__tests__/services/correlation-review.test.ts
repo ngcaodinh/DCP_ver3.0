@@ -65,7 +65,10 @@ describe('B4 Review - Aggregate fixes', () => {
       const pipeline = vi.mocked(UnifiedTransactionModel.aggregate).mock.calls[0][0];
       // Pipeline[0] phai la $match voi ca $eq va $ne: ''
       expect(pipeline[0]).toEqual({
-        $match: { projectId: { $eq: 'p1', $ne: '' } }
+        $match: {
+          projectId: { $eq: 'p1', $ne: '' },
+          eventType: 'DONATION'
+        }
       });
     });
 

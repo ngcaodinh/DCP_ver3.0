@@ -60,6 +60,15 @@ export function createInMemoryCache<TValue>(options: InMemoryCacheOptions = {}) 
     cacheStore.delete(cacheKey);
   };
 
+  /** Xóa các entry cùng namespace để invalidate theo project mà không ảnh hưởng cache khác. */
+  const deleteByPrefix = (prefix: string): void => {
+    for (const cacheKey of cacheStore.keys()) {
+      if (cacheKey.startsWith(prefix)) {
+        cacheStore.delete(cacheKey);
+      }
+    }
+  };
+
   /** Hàm xóa toàn bộ cache. Mục đích: hỗ trợ dọn dẹp trong test hoặc maintenance. */
   const clearAll = (): void => {
     cacheStore.clear();
@@ -69,6 +78,7 @@ export function createInMemoryCache<TValue>(options: InMemoryCacheOptions = {}) 
     get,
     set,
     deleteByKey,
+    deleteByPrefix,
     clearAll
   };
 }

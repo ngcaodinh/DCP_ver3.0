@@ -60,6 +60,20 @@ describe('createInMemoryCache', () => {
     expect(result).toBeNull();
   });
 
+  it('deleteByPrefix() chi xoa cac entry cung namespace', () => {
+    const cache = createInMemoryCache<string>();
+
+    cache.set('transparency:project-a:summary', 'a', 60);
+    cache.set('transparency:project-a:timeline', 'a', 60);
+    cache.set('transparency:project-b:summary', 'b', 60);
+
+    cache.deleteByPrefix('transparency:project-a:');
+
+    expect(cache.get('transparency:project-a:summary')).toBeNull();
+    expect(cache.get('transparency:project-a:timeline')).toBeNull();
+    expect(cache.get('transparency:project-b:summary')).toBe('b');
+  });
+
   // ===== 5. clearAll() xoa tat ca =====
   it('clearAll() xoa tat ca entries', () => {
     const cache = createInMemoryCache<string>();

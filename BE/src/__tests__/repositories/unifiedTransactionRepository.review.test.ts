@@ -164,7 +164,43 @@ describe('B4 Review - Repository fixes', () => {
       expect(UnifiedTransactionModel.aggregate).toHaveBeenCalled();
       const pipeline = vi.mocked(UnifiedTransactionModel.aggregate).mock.calls[0][0];
       expect(pipeline[0]).toEqual({
-        $match: { projectId: { $eq: 'p1', $ne: '' } }
+        $match: { projectId: { $eq: 'p1', $ne: '' }, eventType: 'DONATION' }
+      });
+    });
+
+    it('lọc tiền hợp lệ theo chainStatus và thu thập phần bị loại để kiểm toán', async () => {
+      vi.mocked(UnifiedTransactionModel.aggregate).mockReturnValue({
+        hint: vi.fn().mockReturnThis(),
+        exec: vi.fn().mockResolvedValue([])
+      } as unknown as ReturnType<typeof UnifiedTransactionModel.aggregate>);
+
+      await aggregateSummaryByProjectId('p1');
+
+      const pipeline = vi.mocked(UnifiedTransactionModel.aggregate).mock.calls[0][0];
+      const groupStage = pipeline[1] as { $group: Record<string, unknown> };
+      expect(groupStage.$group).toHaveProperty('excludedReorgedVnd');
+      expect(groupStage.$group).toHaveProperty('excludedReorgedCount');
+      expect(groupStage.$group).toHaveProperty('uniqueDonors');
+
+      const uniqueDonors = groupStage.$group.uniqueDonors as {
+        $addToSet: { $cond: [unknown, unknown, unknown] }
+      };
+      expect(uniqueDonors.$addToSet.$cond[1]).toEqual({
+        $toLower: { $ifNull: ['$walletAddress', ''] }
+      });
+
+      const totalRaised = groupStage.$group.totalRaisedVnd as {
+        $sum: { $cond: [unknown, unknown, unknown] }
+      };
+      expect(totalRaised.$sum.$cond[0]).toEqual({
+        $not: [{ $in: ['$chainStatus', ['REORGED', 'FAILED']] }]
+      });
+
+      const excludedReorged = groupStage.$group.excludedReorgedVnd as {
+        $sum: { $cond: [unknown, unknown, unknown] }
+      };
+      expect(excludedReorged.$sum.$cond[0]).toEqual({
+        $eq: ['$chainStatus', 'REORGED']
       });
     });
   });

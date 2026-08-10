@@ -55,7 +55,7 @@ export interface UnifiedTimelineResponse {
 /**
  * Response của GET /api/transparency/summary/:projectId.
  * Luôn trả 200; project rỗng → tất cả giá trị số = 0.
- * Lưu ý: `donorCount` thực chất đếm số transaction (BE F6), không phải số ví duy nhất.
+ * `donorCount` đếm số ví duy nhất; `transactionCount` đếm số giao dịch.
  */
 export interface ProjectSummary {
   projectId: string;
@@ -66,6 +66,9 @@ export interface ProjectSummary {
   transactionCount: number;
   disbursementCount: number;
   disbursedAmounts: number[];
+  excludedReorgedVnd: number;
+  excludedReorgedCount: number;
+  overDisbursed: boolean;
   cached: boolean;
   fallbackMode: boolean;
 }

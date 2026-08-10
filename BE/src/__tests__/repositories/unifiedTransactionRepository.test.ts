@@ -153,7 +153,7 @@ describe('unifiedTransactionRepository', () => {
   // ===== 3. findUnifiedTimeline — empty results =====
   describe('findUnifiedTimeline', () => {
     it('empty results tra ve mang rong', async () => {
-      const mockFind = vi.mocked(UnifiedTransactionModel.find).mockReturnValue({
+      vi.mocked(UnifiedTransactionModel.find).mockReturnValue({
         sort: vi.fn().mockReturnThis(),
         limit: vi.fn().mockReturnThis(),
         lean: vi.fn().mockReturnThis(),
@@ -328,7 +328,10 @@ describe('unifiedTransactionRepository', () => {
 
       expect(result).toEqual({
         totalRaisedVnd: 1000000,
-        totalTransactions: 50
+        totalTransactions: 50,
+        uniqueDonorCount: 0,
+        excludedReorgedVnd: 0,
+        excludedReorgedCount: 0
       });
     });
 
@@ -343,7 +346,10 @@ describe('unifiedTransactionRepository', () => {
 
       expect(result).toEqual({
         totalRaisedVnd: 0,
-        totalTransactions: 0
+        totalTransactions: 0,
+        uniqueDonorCount: 0,
+        excludedReorgedVnd: 0,
+        excludedReorgedCount: 0
       });
     });
 

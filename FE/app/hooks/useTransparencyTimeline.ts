@@ -13,6 +13,8 @@ import { parseUnifiedTimeline } from '@/app/components/transparency/parseRespons
 
 /** Số sự kiện tối đa mỗi trang — khớp giới hạn MAX_PAGE_SIZE=50 của backend. */
 const TIMELINE_PAGE_SIZE = 50;
+/** Chu kỳ đọc lại dashboard để timeline và summary không lệch nhau sau khi sync. */
+const TRANSPARENCY_REFRESH_INTERVAL_MS = 30_000;
 
 /**
  * Gọi GET /api/transparency/unified-timeline cho một trang.
@@ -57,6 +59,13 @@ export function useTransparencyTimeline(projectId: string | undefined) {
     getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
     enabled: Boolean(projectId),
     staleTime: 2 * 60 * 1000,
+    // InfiniteQuery refetch tuần tự mọi page đã tải; sau "Xem thêm" dừng polling
+    // để chi phí không tăng tuyến tính theo độ dài lịch sử người dùng đang xem.
+    refetchInterval: (query) => {
+      const pageCount = query.state.data?.pages.length ?? 0;
+      return pageCount <= 1 ? TRANSPARENCY_REFRESH_INTERVAL_MS : false;
+    },
+    refetchIntervalInBackground: false,
     retry: (failureCount, error) => {
       // Không retry lỗi client 4xx (vd 400 do projectId sai) — chỉ retry lỗi tạm thời
       if (error?.statusCode && error.statusCode >= 400 && error.statusCode < 500) return false;

@@ -26,6 +26,7 @@ import { validateGuestJwtConfig } from './config/guestJsonWebToken';
 import { applySeoAndCacheHeaders } from './middleware/seoCacheMiddleware';
 import { API_GUEST_PREFIX } from './config/apiPrefixes';
 import { getLogger } from './config/logger';
+import { getCacheHmacKey } from './utils/cacheIntegrity';
 
 const application = express();
 
@@ -33,6 +34,26 @@ const application = express();
 // Nếu thiếu hoặc quá ngắn → crash ngay lập tức thay vì đợi request đầu tiên.
 // Giúp dev phát hiện thiếu .env sớm nhất có thể.
 validateGuestJwtConfig();
+
+/**
+ * Kiểm tra cấu hình HMAC cache ngay khi process khởi động trong production.
+ * Fail-fast giúp health check không báo xanh trong khi các endpoint transparency
+ * chỉ có thể trả lỗi 500 khi bắt đầu đọc hoặc ghi cache.
+ */
+function validateCacheHmacConfig(): void {
+  if (process.env.NODE_ENV !== 'production') return;
+
+  try {
+    getCacheHmacKey();
+  } catch (error) {
+    getLogger().error('[Bootstrap] Cache HMAC key chưa được cấu hình.', {
+      errorMessage: error instanceof Error ? error.message : String(error)
+    });
+    throw error;
+  }
+}
+
+validateCacheHmacConfig();
 
 /** Hàm cấu hình middleware chính cho ứng dụng. Mục đích: áp dụng bảo mật, tối ưu hiệu năng và parse request body cho toàn hệ thống. */
 function configureMiddlewares(): void {
@@ -134,6 +155,7 @@ registerRoutes();
  * sẽ crash process mà không trả về response cho client.
  */
 application.use((err: Error, _req: Request, res: Response, _next: NextFunction): void => {
+  void _next;
   const logger = getLogger();
   logger.error('Unhandled error in request', {
     errorMessage: err.message,

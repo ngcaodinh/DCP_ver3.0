@@ -11,6 +11,9 @@ import { buildApiUrl, fetchApi, type ApiErrorResponse } from '@/app/utils/apiCli
 import type { ProjectSummary } from '@/app/components/transparency/types';
 import { parseProjectSummary } from '@/app/components/transparency/parseResponse';
 
+/** Chu kỳ đọc lại dashboard để phản ánh dữ liệu sau mỗi lần data mapper sync. */
+const TRANSPARENCY_REFRESH_INTERVAL_MS = 30_000;
+
 /**
  * Gọi GET /api/transparency/summary/:projectId.
  * Backend trả raw object (KHÔNG bọc {success, data}) nên validate + chuẩn hóa res
@@ -41,6 +44,8 @@ export function useTransparencySummary(projectId: string | undefined) {
     queryFn: () => fetchProjectSummary(projectId as string),
     enabled: Boolean(projectId),
     staleTime: 5 * 60 * 1000,
+    refetchInterval: TRANSPARENCY_REFRESH_INTERVAL_MS,
+    refetchIntervalInBackground: false,
     retry: (failureCount, error) => {
       if (error?.statusCode && error.statusCode >= 400 && error.statusCode < 500) return false;
       return failureCount < 1;

@@ -25,7 +25,7 @@ function renderWithClient(
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={client}>{children}</QueryClientProvider>
   );
-  return renderHook(hook, { wrapper });
+  return { client, ...renderHook(hook, { wrapper }) };
 }
 
 /** Envelope summary mẫu (raw object, KHÔNG bọc {success, data}). */
@@ -39,9 +39,23 @@ function makeSummaryEnvelope() {
     transactionCount: 12,
     disbursementCount: 2,
     disbursedAmounts: [300000, 100000],
+    excludedReorgedVnd: 0,
+    excludedReorgedCount: 0,
+    overDisbursed: false,
     cached: false,
     fallbackMode: false,
   };
+}
+
+type TransparencyPollingOptions = {
+  refetchInterval?: unknown;
+  refetchIntervalInBackground?: unknown;
+};
+
+/** Đọc cấu hình polling runtime mà public QueryOptions không khai báo trong kiểu TypeScript. */
+function getPollingOptions(client: QueryClient): TransparencyPollingOptions {
+  const query = client.getQueryCache().find({ queryKey: ['transparencySummary', 'project-1'] });
+  return (query?.options ?? {}) as TransparencyPollingOptions;
 }
 
 describe('useTransparencySummary', () => {
@@ -73,6 +87,23 @@ describe('useTransparencySummary', () => {
     });
     expect(result.current.data?.totalRaised).toBe(1000000);
     expect(result.current.data?.remaining).toBe(600000);
+  });
+
+  it('cấu hình polling để dashboard đang mở nhận số liệu sau chu kỳ sync', async () => {
+    vi.mocked(fetchApi).mockResolvedValue(makeSummaryEnvelope() as never);
+
+    const { result, client } = renderWithClient(
+      () => useTransparencySummary('project-1'),
+      new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    );
+
+    await waitFor(() => {
+      expect(result.current.data).toBeDefined();
+    });
+
+    const pollingOptions = getPollingOptions(client);
+    expect(pollingOptions.refetchInterval).toBe(30_000);
+    expect(pollingOptions.refetchIntervalInBackground).toBe(false);
   });
 
   it('lỗi 4xx (vd 404) → KHÔNG retry, chỉ gọi fetchApi 1 lần', async () => {

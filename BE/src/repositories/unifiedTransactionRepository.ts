@@ -356,21 +356,87 @@ export async function markChainTransactionReorged(
  */
 export async function aggregateSummaryByProjectId(
   projectId: string
-): Promise<{ totalRaisedVnd: number; totalTransactions: number }> {
+): Promise<{
+  totalRaisedVnd: number;
+  totalTransactions: number;
+  uniqueDonorCount: number;
+  excludedReorgedVnd: number;
+  excludedReorgedCount: number;
+}> {
   // F4 fix: chỉ tính các record có projectId thật (không phải deposit chưa correlate)
   // Deposit có projectId='' sẽ không được tính vào tổng tiền của dự án.
   // Sau khi correlation với blockchain donation, record deposit được cập nhật
   // thành source='MIXED' nhưng projectId vẫn giữ rỗng (chỉ blockchain donation mới có projectId).
+  // Giao dịch bị revert trên blockchain không phải tiền thật, nhưng vẫn phải đếm được
+  // để kiểm toán đối chiếu phần chênh lệch giữa dữ liệu gốc và tổng công khai.
   const aggregateResult = await UnifiedTransactionModel.aggregate<{
     totalRaisedVnd: number;
     totalTransactions: number;
+    uniqueDonorCount: number;
+    excludedReorgedVnd: number;
+    excludedReorgedCount: number;
   }>([
-    { $match: { projectId: { $eq: projectId, $ne: '' } } },
+    { $match: { projectId: { $eq: projectId, $ne: '' }, eventType: 'DONATION' } },
     {
       $group: {
         _id: null,
-        totalRaisedVnd: { $sum: '$amountVnd' },
-        totalTransactions: { $sum: 1 }
+        totalRaisedVnd: {
+          $sum: {
+            $cond: [
+              { $not: [{ $in: ['$chainStatus', ['REORGED', 'FAILED']] }] },
+              '$amountVnd',
+              0
+            ]
+          }
+        },
+        totalTransactions: {
+          $sum: {
+            $cond: [
+              { $not: [{ $in: ['$chainStatus', ['REORGED', 'FAILED']] }] },
+              1,
+              0
+            ]
+          }
+        },
+        uniqueDonors: {
+          $addToSet: {
+            $cond: [
+              { $not: [{ $in: ['$chainStatus', ['REORGED', 'FAILED']] }] },
+              { $toLower: { $ifNull: ['$walletAddress', ''] } },
+              ''
+            ]
+          }
+        },
+        excludedReorgedVnd: {
+          $sum: {
+            $cond: [
+              { $eq: ['$chainStatus', 'REORGED'] },
+              '$amountVnd',
+              0
+            ]
+          }
+        },
+        excludedReorgedCount: {
+          $sum: {
+            $cond: [
+              { $eq: ['$chainStatus', 'REORGED'] },
+              1,
+              0
+            ]
+          }
+        }
+      }
+    },
+    {
+      $project: {
+        _id: 0,
+        totalRaisedVnd: 1,
+        totalTransactions: 1,
+        uniqueDonorCount: {
+          $size: { $setDifference: ['$uniqueDonors', ['']] }
+        },
+        excludedReorgedVnd: 1,
+        excludedReorgedCount: 1
       }
     }
   ])
@@ -378,11 +444,20 @@ export async function aggregateSummaryByProjectId(
     .exec();
 
   if (!aggregateResult.length) {
-    return { totalRaisedVnd: 0, totalTransactions: 0 };
+    return {
+      totalRaisedVnd: 0,
+      totalTransactions: 0,
+      uniqueDonorCount: 0,
+      excludedReorgedVnd: 0,
+      excludedReorgedCount: 0
+    };
   }
 
   return {
     totalRaisedVnd: aggregateResult[0]?.totalRaisedVnd ?? 0,
-    totalTransactions: aggregateResult[0]?.totalTransactions ?? 0
+    totalTransactions: aggregateResult[0]?.totalTransactions ?? 0,
+    uniqueDonorCount: aggregateResult[0]?.uniqueDonorCount ?? 0,
+    excludedReorgedVnd: aggregateResult[0]?.excludedReorgedVnd ?? 0,
+    excludedReorgedCount: aggregateResult[0]?.excludedReorgedCount ?? 0
   };
 }

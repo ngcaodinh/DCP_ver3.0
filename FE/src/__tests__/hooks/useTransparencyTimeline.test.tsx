@@ -5,7 +5,7 @@
  * khi chưa chọn dự án.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 
@@ -22,7 +22,7 @@ function renderWithQuery(hook: () => ReturnType<typeof useTransparencyTimeline>)
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={client}>{children}</QueryClientProvider>
   );
-  return renderHook(hook, { wrapper });
+  return { client, ...renderHook(hook, { wrapper }) };
 }
 
 /** Envelope timeline mẫu (raw object, KHÔNG bọc {success, data}). */
@@ -72,6 +72,35 @@ describe('useTransparencyTimeline', () => {
       expect(result.current.data).toBeDefined();
     });
     expect(result.current.hasNextPage).toBe(false);
+  });
+
+  it('chỉ polling trang đầu và dừng sau khi người dùng xem thêm trang lịch sử', async () => {
+    vi.mocked(fetchApi)
+      .mockResolvedValueOnce(makeTimelineEnvelope('cursor-2') as never)
+      .mockResolvedValueOnce(makeTimelineEnvelope(null) as never);
+
+    const { client, result } = renderWithQuery(() => useTransparencyTimeline('project-1'));
+
+    await waitFor(() => {
+      expect(result.current.data?.pages).toHaveLength(1);
+    });
+
+    const query = client.getQueryCache().find({ queryKey: ['transparencyTimeline', 'project-1'] });
+    if (!query) throw new Error('Thiếu transparency timeline query trong cache test.');
+
+    const refetchInterval = (query.options as {
+      refetchInterval?: (currentQuery: typeof query) => number | false;
+    }).refetchInterval;
+    expect(refetchInterval?.(query)).toBe(30_000);
+
+    await act(async () => {
+      await result.current.fetchNextPage();
+    });
+    await waitFor(() => {
+      expect(result.current.data?.pages).toHaveLength(2);
+    });
+
+    expect(refetchInterval?.(query)).toBe(false);
   });
 
   it('lỗi 4xx (vd 400) → KHÔNG retry, chỉ gọi fetchApi 1 lần', async () => {

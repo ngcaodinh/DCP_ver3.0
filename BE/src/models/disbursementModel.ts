@@ -137,8 +137,12 @@ const disbursementSchema = new Schema<DisbursementRecord>({
   completedAt: { type: Date, default: null }
 });
 
+/** Giới hạn số amount COMPLETED trả về trong summary để payload luôn được bounded. */
+export const MAX_COMPLETED_DISBURSEMENT_AMOUNTS = 100;
+
 // Index phục vụ query nhanh theo org và project
 disbursementSchema.index({ organizationId: 1, projectId: 1 });
+disbursementSchema.index({ projectId: 1, status: 1, createdAt: -1 });
 disbursementSchema.index({ beneficiaryWalletAddress: 1 });
 disbursementSchema.index({ status: 1, createdAt: -1 });
 disbursementSchema.index({ payosTransferId: 1 }, { sparse: true });
@@ -222,6 +226,25 @@ export async function findDisbursementsByProjectId(
     .exec();
 }
 
+/** Lấy tối đa các khoản giải ngân COMPLETED gần nhất để giới hạn payload summary. */
+export async function findCompletedDisbursementAmountsByProjectId(
+  projectId: string,
+  limitCount: number
+): Promise<number[]> {
+  const normalizedLimitCount = Number.isFinite(limitCount)
+    ? Math.max(1, Math.min(MAX_COMPLETED_DISBURSEMENT_AMOUNTS, Math.floor(limitCount)))
+    : MAX_COMPLETED_DISBURSEMENT_AMOUNTS;
+
+  const records = await DisbursementMongoModel.find({ projectId, status: 'COMPLETED' })
+    .sort({ createdAt: -1 })
+    .limit(normalizedLimitCount)
+    .select('amount')
+    .lean<Array<Pick<DisbursementRecord, 'amount'>>>()
+    .exec();
+
+  return records.map(record => record.amount);
+}
+
 /** Tìm các yêu cầu giải ngân theo organizationId. Mục đích: trang quản lý của tổ chức. */
 export async function findDisbursementsByOrganizationId(organizationId: string): Promise<DisbursementRecord[]> {
   return DisbursementMongoModel.find({ organizationId }).sort({ createdAt: -1 }).lean<DisbursementRecord[]>().exec();
@@ -232,22 +255,18 @@ export async function findDisbursementsByOrganizationId(organizationId: string):
  * Mục đích: thay thế findDisbursementsByProjectId + filter trong verification.service
  * để tránh fetch toàn bộ disbursement records khi chỉ cần total và count.
  */
-export async function aggregateDisbursementsByProjectId(
+export async function getCompletedDisbursementSummaryByProjectId(
   projectId: string
 ): Promise<{ totalCompletedAmount: number; completedCount: number }> {
   const result = await DisbursementMongoModel.aggregate<{
     totalCompletedAmount: number;
     completedCount: number;
   }>([
-    { $match: { projectId } },
+    { $match: { projectId, status: 'COMPLETED' } },
     { $group: {
       _id: null,
-      totalCompletedAmount: {
-        $sum: { $cond: [{ $eq: ['$status', 'COMPLETED'] }, '$amount', 0] }
-      },
-      completedCount: {
-        $sum: { $cond: [{ $eq: ['$status', 'COMPLETED'] }, 1, 0] }
-      }
+      totalCompletedAmount: { $sum: '$amount' },
+      completedCount: { $sum: 1 }
     }}
   ]).exec();
 

@@ -24,6 +24,9 @@ describe('parseProjectSummary', () => {
     expect(result.totalRaised).toBe(0);
     expect(result.remaining).toBe(0);
     expect(result.disbursedAmounts).toEqual([]);
+    expect(result.excludedReorgedVnd).toBe(0);
+    expect(result.excludedReorgedCount).toBe(0);
+    expect(result.overDisbursed).toBe(false);
     expect(result.projectId).toBe('p1');
   });
 
@@ -37,12 +40,18 @@ describe('parseProjectSummary', () => {
       transactionCount: 12,
       disbursementCount: 2,
       disbursedAmounts: [300000, 100000],
+      excludedReorgedVnd: 50000,
+      excludedReorgedCount: 1,
+      overDisbursed: true,
       cached: true,
       fallbackMode: false
     });
     expect(result.totalRaised).toBe(1000000);
     expect(result.disbursedAmounts).toEqual([300000, 100000]);
     expect(result.cached).toBe(true);
+    expect(result.excludedReorgedVnd).toBe(50000);
+    expect(result.excludedReorgedCount).toBe(1);
+    expect(result.overDisbursed).toBe(true);
   });
 
   it('NaN/Infinity trong trường số → fallback 0 (chống vỡ dasharray donut)', () => {

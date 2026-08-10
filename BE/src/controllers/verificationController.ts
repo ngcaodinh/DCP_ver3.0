@@ -14,28 +14,33 @@ import { Request, Response } from 'express';
 import { z } from 'zod';
 import { getLogger } from '../config/logger';
 import { verifyTransaction, getProjectSummary } from '../services/verification.service';
+import { sendErrorResponse } from '../utils/apiResponse';
 
 const logger = getLogger();
+
+const MAX_PUBLIC_VERIFICATION_PARAM_LENGTH = 256;
 
 /**
  * Schema Zod cho params của verify endpoint.
  * correlationId là string bắt buộc — kiểm tra format hợp lệ.
  */
 const verifyParamsSchema = z.object({
-  correlationId: z.string().min(1, 'correlationId is required')
+  correlationId: z.string()
+    .trim()
+    .min(1, 'correlationId is required')
+    .max(MAX_PUBLIC_VERIFICATION_PARAM_LENGTH, 'correlationId is too long')
 });
-
-type VerifyParamsInput = z.infer<typeof verifyParamsSchema>;
 
 /**
  * Schema Zod cho params của summary endpoint.
  * projectId là string bắt buộc.
  */
 const summaryParamsSchema = z.object({
-  projectId: z.string().min(1, 'projectId is required')
+  projectId: z.string()
+    .trim()
+    .min(1, 'projectId is required')
+    .max(MAX_PUBLIC_VERIFICATION_PARAM_LENGTH, 'projectId is too long')
 });
-
-type SummaryParamsInput = z.infer<typeof summaryParamsSchema>;
 
 /**
  * Xử lý GET /api/transparency/verify/:correlationId.
@@ -61,10 +66,7 @@ export async function handleVerifyTransaction(
       field: err.path.join('.'),
       message: err.message
     }));
-    response.status(400).json({
-      error: 'Validation failed',
-      details: errors
-    });
+    sendErrorResponse(response, 400, 'Tham số không hợp lệ.', 'VALIDATION_ERROR', errors);
     return;
   }
 
@@ -74,11 +76,15 @@ export async function handleVerifyTransaction(
   try {
     const result = await verifyTransaction(normalizedCorrelationId);
 
-    if (!result || !result.found) {
-      response.status(404).json({
-        error: 'Transaction not found',
-        correlationId: normalizedCorrelationId
-      });
+    if (!result.found) {
+      sendErrorResponse(
+        response,
+        404,
+        'Không tìm thấy giao dịch với mã đối chiếu này.',
+        'TRANSACTION_NOT_FOUND',
+        [],
+        normalizedCorrelationId
+      );
       return;
     }
 
@@ -88,9 +94,14 @@ export async function handleVerifyTransaction(
       correlationId: normalizedCorrelationId,
       errorMessage: error instanceof Error ? error.message : String(error)
     });
-    response.status(500).json({
-      error: 'Internal server error'
-    });
+    sendErrorResponse(
+      response,
+      500,
+      'Không thể xử lý yêu cầu. Vui lòng thử lại.',
+      'INTERNAL_ERROR',
+      [],
+      normalizedCorrelationId
+    );
   }
 }
 
@@ -121,10 +132,7 @@ export async function handleGetProjectSummary(
       field: err.path.join('.'),
       message: err.message
     }));
-    response.status(400).json({
-      error: 'Validation failed',
-      details: errors
-    });
+    sendErrorResponse(response, 400, 'Tham số không hợp lệ.', 'VALIDATION_ERROR', errors);
     return;
   }
 
@@ -140,8 +148,12 @@ export async function handleGetProjectSummary(
       projectId: normalizedProjectId,
       errorMessage: error instanceof Error ? error.message : String(error)
     });
-    response.status(500).json({
-      error: 'Internal server error'
-    });
+    sendErrorResponse(
+      response,
+      500,
+      'Không thể xử lý yêu cầu. Vui lòng thử lại.',
+      'INTERNAL_ERROR',
+      []
+    );
   }
 }
