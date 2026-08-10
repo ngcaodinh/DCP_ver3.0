@@ -37,9 +37,26 @@ vi.mock('../../services/sbt-metadata.service', () => ({
   updateSbtStatus: metadataMocks.updateStatus
 }));
 
+const dlqMocks = vi.hoisted(() => ({
+  findByStatus: vi.fn(),
+  countByStatus: vi.fn()
+}));
+
+const roleMocks = vi.hoisted(() => ({
+  freshRoleAllowed: true
+}));
+
 vi.mock('../../models/sbtMintDlqModel', () => ({
-  findSbtMintDlqByStatus: vi.fn().mockResolvedValue([]),
-  countSbtMintDlqByStatus: vi.fn().mockResolvedValue(0)
+  findSbtMintDlqByStatus: dlqMocks.findByStatus,
+  countSbtMintDlqByStatus: dlqMocks.countByStatus
+}));
+
+const projectMocks = vi.hoisted(() => ({
+  findProjectNames: vi.fn()
+}));
+
+vi.mock('../../models/projectModel', () => ({
+  findProjectNamesByProjectIdList: projectMocks.findProjectNames
 }));
 
 vi.mock('../../middleware/authenticationMiddleware', () => ({
@@ -84,6 +101,11 @@ vi.mock('../../middleware/roleAuthorizationMiddleware', () => ({
     };
   },
   createFreshRoleAuthorizationMiddleware: (allowedRoles: string[]) => {
+    if (!roleMocks.freshRoleAllowed) {
+      return (_req: Request, res: Response, _next: NextFunction): void => {
+        res.status(401).json({ error: 'Fresh role rejected.' });
+      };
+    }
     return (req: Request, res: Response, next: NextFunction): void => {
       const user = (req as unknown as { authenticatedUser?: { userId: string; role: string } }).authenticatedUser;
       if (!user) {
@@ -182,6 +204,10 @@ async function request(app: Express, method: 'get' | 'post', path: string, optio
 describe('sbt routes - GET /api/sbt/dlq', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    roleMocks.freshRoleAllowed = true;
+    dlqMocks.findByStatus.mockResolvedValue([]);
+    dlqMocks.countByStatus.mockResolvedValue(0);
+    projectMocks.findProjectNames.mockResolvedValue([]);
   });
 
   it('unauthorized (no token) → 401', async () => {
@@ -213,6 +239,126 @@ describe('sbt routes - GET /api/sbt/dlq', () => {
     });
     expect(res.status).toBe(200);
   });
+
+  it('rejects invalid pagination before querying DLQ data', async () => {
+    const response = await supertest(createTestApp())
+      .get('/api/sbt/dlq?page=0&limit=20')
+      .set('Authorization', 'Bearer test-token-admin');
+
+    expect(response.status).toBe(400);
+    expect(dlqMocks.findByStatus).not.toHaveBeenCalled();
+  });
+
+  it('forwards validated pagination and status to the DLQ model', async () => {
+    const response = await supertest(createTestApp())
+      .get('/api/sbt/dlq?page=2&limit=50&status=ABANDONED')
+      .set('Authorization', 'Bearer test-token-admin');
+
+    expect(response.status).toBe(200);
+    expect(dlqMocks.findByStatus).toHaveBeenCalledWith('ABANDONED', 50, 50);
+  });
+
+  it('admin → bổ sung projectName theo projectId nhưng giữ nguyên thứ tự và field cũ', async () => {
+    const entries = [
+      { mintRequestId: 'MINT-1', projectId: 'PROJECT-1', status: 'OPEN' },
+      { mintRequestId: 'MINT-2', projectId: 'PROJECT-2', status: 'OPEN' }
+    ];
+    dlqMocks.findByStatus.mockResolvedValue(entries);
+    projectMocks.findProjectNames.mockResolvedValue([
+      { projectId: 'PROJECT-1', name: 'Project One', status: 'CLOSED', deadline: '2025-01-01T00:00:00.000Z' },
+      { projectId: 'PROJECT-2', name: 'Project Two' }
+    ]);
+
+    const app = createTestApp();
+    const res = await request(app, 'get', '/api/sbt/dlq', {
+      headers: { authorization: 'Bearer test-token-admin' }
+    });
+
+    expect(res.status).toBe(200);
+    expect((res.body as { data: { entries: Array<{ projectName: string }> } }).data.entries).toEqual([
+      { ...entries[0], projectName: 'Project One' },
+      { ...entries[1], projectName: 'Project Two' }
+    ]);
+    expect(projectMocks.findProjectNames).toHaveBeenCalledWith(['PROJECT-1', 'PROJECT-2']);
+  });
+
+  it('admin → gọi project lookup đúng một lần cho các project bị trùng', async () => {
+    const entries = Array.from({ length: 20 }, (_, index) => ({
+      mintRequestId: `MINT-${index + 1}`,
+      projectId: `PROJECT-${index % 5}`,
+      status: 'OPEN'
+    }));
+    dlqMocks.findByStatus.mockResolvedValue(entries);
+
+    const app = createTestApp();
+    await request(app, 'get', '/api/sbt/dlq', {
+      headers: { authorization: 'Bearer test-token-admin' }
+    });
+
+    expect(projectMocks.findProjectNames).toHaveBeenCalledTimes(1);
+    expect(projectMocks.findProjectNames).toHaveBeenCalledWith([
+      'PROJECT-0', 'PROJECT-1', 'PROJECT-2', 'PROJECT-3', 'PROJECT-4'
+    ]);
+  });
+
+  it('admin → project không tồn tại hoặc lookup lỗi vẫn trả projectName null', async () => {
+    const entries = [
+      { mintRequestId: 'MINT-1', projectId: 'PROJECT-MISSING', status: 'OPEN' }
+    ];
+    dlqMocks.findByStatus.mockResolvedValue(entries);
+    projectMocks.findProjectNames.mockResolvedValue([]);
+
+    const app = createTestApp();
+    const missingProjectResponse = await request(app, 'get', '/api/sbt/dlq', {
+      headers: { authorization: 'Bearer test-token-admin' }
+    });
+
+    expect(missingProjectResponse.status).toBe(200);
+    expect((missingProjectResponse.body as { data: { entries: Array<{ projectName: string | null }> } }).data.entries).toEqual([
+      { ...entries[0], projectName: null }
+    ]);
+
+    projectMocks.findProjectNames.mockRejectedValue(new Error('project lookup failed'));
+    const lookupErrorResponse = await request(app, 'get', '/api/sbt/dlq', {
+      headers: { authorization: 'Bearer test-token-admin' }
+    });
+
+    expect(lookupErrorResponse.status).toBe(200);
+    expect((lookupErrorResponse.body as { data: { entries: Array<{ projectName: string | null }> } }).data.entries).toEqual([
+      { ...entries[0], projectName: null }
+    ]);
+  });
+
+  it('rejects stale admin authentication before reading DLQ data', async () => {
+    roleMocks.freshRoleAllowed = false;
+    const app = createTestApp();
+    const res = await request(app, 'get', '/api/sbt/dlq', {
+      headers: { authorization: 'Bearer test-token-admin' }
+    });
+
+    expect(res.status).toBe(401);
+    expect(dlqMocks.findByStatus).not.toHaveBeenCalled();
+  });
+
+  it('does not expose Mongo internal fields in the DLQ response', async () => {
+    dlqMocks.findByStatus.mockResolvedValue([{
+      mintRequestId: 'MINT-INTERNAL-FIELDS',
+      projectId: 'PROJECT-1',
+      status: 'OPEN',
+      _id: 'mongo-internal-id',
+      __v: 7
+    }]);
+
+    const app = createTestApp();
+    const res = await request(app, 'get', '/api/sbt/dlq', {
+      headers: { authorization: 'Bearer test-token-admin' }
+    });
+
+    expect(res.status).toBe(200);
+    const entry = (res.body as { data: { entries: Array<Record<string, unknown>> } }).data.entries[0];
+    expect(entry).not.toHaveProperty('_id');
+    expect(entry).not.toHaveProperty('__v');
+  });
 });
 
 // ─── Tests: POST /api/sbt/retry-job/:mintRequestId ───────────────────────────
@@ -220,6 +366,7 @@ describe('sbt routes - GET /api/sbt/dlq', () => {
 describe('sbt routes - POST /api/sbt/retry-job/:mintRequestId', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    roleMocks.freshRoleAllowed = true;
   });
 
   it('unauthorized (no token) → 401', async () => {
@@ -294,6 +441,7 @@ describe('sbt routes - POST /api/sbt/retry-job/:mintRequestId', () => {
 describe('sbt routes - POST /api/sbt/admin-mint', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    roleMocks.freshRoleAllowed = true;
   });
 
   it('unauthorized (no token) → 401', async () => {

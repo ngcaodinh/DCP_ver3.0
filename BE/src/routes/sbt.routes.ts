@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import { createAuthenticationMiddleware } from '../middleware/authenticationMiddleware';
-import { createRoleAuthorizationMiddleware } from '../middleware/roleAuthorizationMiddleware';
+import { createFreshRoleAuthorizationMiddleware } from '../middleware/roleAuthorizationMiddleware';
+import { createRateLimitMiddleware } from '../middleware/rateLimitMiddleware';
 import {
   handleGetSbtDlqList,
   handleRetrySbtMintJob,
@@ -31,6 +32,10 @@ const retryJobRateLimiter = rateLimit({
 export function createSbtRoutes(): Router {
   const router = Router();
   const authenticationMiddleware = createAuthenticationMiddleware();
+  const adminRoleMiddleware = createFreshRoleAuthorizationMiddleware(['admin']);
+  const dlqReadRateLimiter = createRateLimitMiddleware(120, 60 * 1000, {
+    bucketName: 'sbt-dlq-read'
+  });
 
   /**
    * GET /api/sbt/dlq
@@ -40,7 +45,8 @@ export function createSbtRoutes(): Router {
   router.get(
     '/dlq',
     authenticationMiddleware,
-    createRoleAuthorizationMiddleware(['admin']),
+    adminRoleMiddleware,
+    dlqReadRateLimiter,
     createZodValidatorMiddleware(paginationQuerySchema, 'query'),
     handleGetSbtDlqList
   );
@@ -54,7 +60,7 @@ export function createSbtRoutes(): Router {
     '/retry-job/:mintRequestId',
     retryJobRateLimiter,
     authenticationMiddleware,
-    createRoleAuthorizationMiddleware(['admin']),
+    adminRoleMiddleware,
     createZodValidatorMiddleware(mintRequestIdParamSchema, 'params'),
     handleRetrySbtMintJob
   );
@@ -68,7 +74,7 @@ export function createSbtRoutes(): Router {
   router.post(
     '/admin-mint',
     authenticationMiddleware,
-    createRoleAuthorizationMiddleware(['admin']),
+    adminRoleMiddleware,
     handleAdminMintSbt
   );
 

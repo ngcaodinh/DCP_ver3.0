@@ -130,6 +130,7 @@ export async function findSbtMintDlqByStatus(
   skip = 0
 ): Promise<SbtMintDlqRecord[]> {
   return SbtMintDlqMongoModel.find({ status })
+    .select({ _id: 0, __v: 0 })
     .sort({ dlqAt: 1 })
     .skip(skip)
     .limit(limit)

@@ -3,11 +3,40 @@ import { getLogger } from '../config/logger';
 import { rerunSbtMintJob } from '../services/sbtMintService';
 import { sendErrorFromUnknown, sendErrorResponse, sendSuccessResponse } from '../utils/apiResponse';
 import { sanitizeProviderError } from '../utils/sanitizeProviderError';
+import { findProjectNamesByProjectIdList } from '../models/projectModel';
 import {
   findSbtMintDlqByStatus,
-  countSbtMintDlqByStatus
+  countSbtMintDlqByStatus,
+  type SbtMintDlqRecord
 } from '../models/sbtMintDlqModel';
 const logger = getLogger();
+
+export type SbtMintDlqListEntry = SbtMintDlqRecord & {
+  projectName: string | null;
+};
+
+/** Chuyển bản ghi DLQ sang response contract và loại bỏ metadata nội bộ của MongoDB. */
+function toSbtMintDlqListEntry(entry: SbtMintDlqRecord, projectName: string | null): SbtMintDlqListEntry {
+  return {
+    dlqId: entry.dlqId,
+    mintRequestId: entry.mintRequestId,
+    sbtId: entry.sbtId,
+    projectId: entry.projectId,
+    projectName,
+    organizationId: entry.organizationId,
+    beneficiaryAddress: entry.beneficiaryAddress,
+    attemptNumber: entry.attemptNumber,
+    lastErrorMessage: entry.lastErrorMessage,
+    firstAttemptedAt: entry.firstAttemptedAt,
+    dlqAt: entry.dlqAt,
+    recoveredAt: entry.recoveredAt,
+    recoveredBy: entry.recoveredBy,
+    recoveryAttemptNumber: entry.recoveryAttemptNumber,
+    status: entry.status,
+    createdAt: entry.createdAt,
+    updatedAt: entry.updatedAt
+  };
+}
 
 // ============ DLQ LIST ============
 
@@ -33,8 +62,24 @@ export async function handleGetSbtDlqList(req: Request, res: Response): Promise<
       countSbtMintDlqByStatus('OPEN')
     ]);
 
+    let entriesWithProjectNames: SbtMintDlqListEntry[];
+    try {
+      const projectIdList = [...new Set(entries.map((entry) => entry.projectId))];
+      const projectRecords = await findProjectNamesByProjectIdList(projectIdList);
+      const projectNameById = new Map(projectRecords.map((project) => [project.projectId, project.name]));
+      entriesWithProjectNames = entries.map((entry) => toSbtMintDlqListEntry(
+        entry,
+        projectNameById.get(entry.projectId) ?? null
+      ));
+    } catch (error) {
+      logger.warn('Không thể lấy tên project cho danh sách DLQ SBT.', {
+        errorMessage: sanitizeProviderError(error) ?? 'UNKNOWN_ERROR'
+      });
+      entriesWithProjectNames = entries.map((entry) => toSbtMintDlqListEntry(entry, null));
+    }
+
     sendSuccessResponse(res, 200, 'Lấy danh sách DLQ SBT thành công.', {
-      entries,
+      entries: entriesWithProjectNames,
       pagination: {
         page,
         limit,
