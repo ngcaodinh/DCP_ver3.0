@@ -74,6 +74,7 @@ import {
   SBT_MINT_STUCK_TX_THRESHOLD_MS
 } from '../queues/sbtMintQueue';
 import { findImpactSbtNeedingRecovery } from '../models/impactSbtMetadataModel';
+import { invalidateSbtGalleryTotalCache } from './sbtMetadataCacheService';
 
 /**
  * Số block confirmations dùng chung được đọc từ constants để mint và status update có cùng semantics.
@@ -419,6 +420,16 @@ export async function executeSbtMint(
     blockNumber,
     confirmedAt
   });
+
+  // Mint CONFIRMED thay đổi total gallery; cache được invalidate theo project và toàn cục.
+  try {
+    await invalidateSbtGalleryTotalCache(record.projectId);
+  } catch (error) {
+    logger.warn('Invalidate total gallery SBT tháº¥t báº¡i sau khi mint confirm.', {
+      mintRequestId,
+      errorMessage: sanitizeProviderError(error) ?? 'UNKNOWN_ERROR'
+    });
+  }
 
   // DLQ status check được thực hiện fire-and-forget bên dưới sau khi emit event
 

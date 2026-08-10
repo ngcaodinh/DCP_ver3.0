@@ -3,12 +3,14 @@ import { createAuthenticationMiddleware } from '../middleware/authenticationMidd
 import { createFreshRoleAuthorizationMiddleware } from '../middleware/roleAuthorizationMiddleware';
 import { createRateLimitMiddleware } from '../middleware/rateLimitMiddleware';
 import {
+  handleGetSbtGallery,
   handleGetSbtListByProject,
   handleGetSbtTokenDetail,
   handleUpdateSbtStatus
 } from '../controllers/sbtMetadataController';
 import {
   createSbtMetadataValidatorMiddleware,
+  sbtGalleryQuerySchema,
   sbtMetadataQuerySchema,
   sbtProjectIdParamSchema,
   sbtTokenIdParamSchema,
@@ -28,6 +30,13 @@ export function createSbtMetadataRoutes(): Router {
   });
 
   // Dữ liệu SBT đã public on-chain và có thể đọc qua RPC/explorer; GET public giúp gallery không cần auth.
+  router.get(
+    '/gallery',
+    readRateLimiter,
+    createSbtMetadataValidatorMiddleware(sbtGalleryQuerySchema, 'query'),
+    handleGetSbtGallery
+  );
+
   router.get(
     '/project/:projectId',
     readRateLimiter,

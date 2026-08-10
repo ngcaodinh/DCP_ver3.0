@@ -2,6 +2,7 @@ import type { Response } from 'express';
 import type { AuthenticatedRequest } from '../middleware/authenticationMiddleware';
 import { getLogger } from '../config/logger';
 import {
+  getSbtGallery,
   getSbtListByProject,
   getSbtTokenDetail,
   updateSbtStatus
@@ -10,6 +11,29 @@ import { sendErrorFromUnknown, sendErrorResponse, sendSuccessResponse } from '..
 import { sanitizeProviderError } from '../utils/sanitizeProviderError';
 
 const logger = getLogger();
+
+/** Xử lý GET gallery SBT toàn cục hoặc theo project với response envelope chuẩn. */
+export async function handleGetSbtGallery(
+  request: AuthenticatedRequest,
+  response: Response
+): Promise<void> {
+  const { page, limit, projectId } = request.query as unknown as {
+    page: number;
+    limit: number;
+    projectId?: string;
+  };
+
+  try {
+    const result = await getSbtGallery(page, limit, projectId);
+    sendSuccessResponse(response, 200, 'Lấy gallery SBT thành công.', result);
+  } catch (error) {
+    logger.error('Lấy gallery SBT thất bại.', {
+      projectId,
+      errorMessage: sanitizeProviderError(error) ?? 'UNKNOWN_ERROR'
+    });
+    sendErrorFromUnknown(response, error, 'Không thể lấy gallery SBT.');
+  }
+}
 
 /** Xử lý GET gallery SBT theo project với response envelope chuẩn. */
 export async function handleGetSbtListByProject(

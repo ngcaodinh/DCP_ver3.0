@@ -2,19 +2,26 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import mongoose from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import {
-  countImpactSbtByProjectId,
-  findImpactSbtMetadataByProjectId
+  countImpactSbtGallery,
+  findEarliestConfirmedImpactSbtBackfillAnchor,
+  findEarliestConfirmedImpactSbtBlock,
+  findImpactSbtGallery,
+  updateImpactSbtOnChainStatus
 } from '../../models/impactSbtMetadataModel';
 
 let mongoServer: MongoMemoryServer;
 
 /** Tạo fixture SBT tối thiểu với trạng thái on-chain cần kiểm tra trong gallery. */
-function buildRecord(index: number, onChainTokenStatus: string | null): Record<string, unknown> {
+function buildRecord(
+  index: number,
+  onChainTokenStatus: string | null,
+  projectId = 'project-gallery'
+): Record<string, unknown> {
   return {
     sbtId: `SBT-${index}`,
     mintRequestId: `MINT-${index}`,
     verificationId: `VER-${index}`,
-    projectId: 'project-gallery',
+    projectId,
     organizationId: 'org-1',
     beneficiaryAddress: `0x${String(index).padStart(40, '0')}`,
     projectIdNumeric: 5,
@@ -56,7 +63,9 @@ describe('impactSbtMetadataModel gallery visibility', () => {
       buildRecord(1, null),
       buildRecord(2, 'ACTIVE'),
       buildRecord(3, 'FROZEN'),
-      buildRecord(4, 'REVOKED')
+      buildRecord(4, 'REVOKED'),
+      buildRecord(5, null, 'project-second'),
+      buildRecord(6, 'BURNED')
     ]);
   });
 
@@ -66,8 +75,8 @@ describe('impactSbtMetadataModel gallery visibility', () => {
   });
 
   it('excludes revoked records consistently from find and count while allowing admin opt-in', async () => {
-    const visibleRecords = await findImpactSbtMetadataByProjectId('project-gallery');
-    const visibleTotal = await countImpactSbtByProjectId('project-gallery');
+    const visibleRecords = await findImpactSbtGallery(20, 0, 'project-gallery');
+    const visibleTotal = await countImpactSbtGallery('project-gallery');
 
     expect(visibleRecords).toHaveLength(3);
     expect(visibleRecords.map(record => record.onChainTokenStatus)).toEqual([
@@ -77,14 +86,83 @@ describe('impactSbtMetadataModel gallery visibility', () => {
     ]);
     expect(visibleTotal).toBe(3);
 
-    const allRecords = await findImpactSbtMetadataByProjectId(
-      'project-gallery',
-      20,
-      0,
-      { includeHidden: true }
-    );
-    const allTotal = await countImpactSbtByProjectId('project-gallery', { includeHidden: true });
-    expect(allRecords).toHaveLength(4);
-    expect(allTotal).toBe(4);
+    const allRecords = await findImpactSbtGallery(20, 0, 'project-gallery', { includeHidden: true });
+    const allTotal = await countImpactSbtGallery('project-gallery', { includeHidden: true });
+    expect(allRecords).toHaveLength(5);
+    expect(allTotal).toBe(5);
+  });
+
+  it('applies the same hidden-status filter to global gallery find and count', async () => {
+    const visibleRecords = await findImpactSbtGallery();
+    const visibleTotal = await countImpactSbtGallery();
+
+    expect(visibleRecords).toHaveLength(4);
+    expect(visibleRecords[0].projectId).toBe('project-second');
+    expect(visibleRecords.map(record => record.onChainTokenStatus)).not.toContain('REVOKED');
+    expect(visibleRecords.map(record => record.onChainTokenStatus)).not.toContain('BURNED');
+    expect(visibleTotal).toBe(4);
+  });
+
+  it('filters global gallery by projectId without returning another project', async () => {
+    const records = await findImpactSbtGallery(20, 0, 'project-second');
+    const total = await countImpactSbtGallery('project-second');
+
+    expect(records).toHaveLength(1);
+    expect(records[0].projectId).toBe('project-second');
+    expect(total).toBe(1);
+  });
+
+  it('does not broaden an explicitly empty project filter into the global gallery', async () => {
+    const records = await findImpactSbtGallery(20, 0, '');
+    const total = await countImpactSbtGallery('');
+
+    expect(records).toHaveLength(0);
+    expect(total).toBe(0);
+  });
+
+  it('removes a revoked token from both gallery find and count after a durable event projection', async () => {
+    const projectedRecord = await updateImpactSbtOnChainStatus(1, {
+      onChainTokenStatus: 'REVOKED',
+      reason: 'Evidence invalidated.',
+      updatedBy: 'ON_CHAIN_STATUS_PROJECTOR',
+      updatedAt: new Date('2026-08-10T10:00:00.000Z'),
+      eventLocation: {
+        blockNumber: 999,
+        logIndex: 2,
+        transactionHash: '0xstatus-event'
+      }
+    });
+
+    const visibleRecords = await findImpactSbtGallery(20, 0, 'project-gallery');
+    const visibleTotal = await countImpactSbtGallery('project-gallery');
+
+    expect(projectedRecord).toMatchObject({
+      onChainTokenStatus: 'REVOKED',
+      tokenStatusBlockNumber: 999,
+      tokenStatusLogIndex: 2
+    });
+    expect(visibleRecords.map(record => record.onChainTokenId)).not.toContain(1);
+    expect(visibleTotal).toBe(2);
+  });
+
+  it('finds the earliest confirmed block and ignores confirmed records without a block', async () => {
+    await mongoose.connection.collection('impact_sbt_metadata').insertOne({
+      ...buildRecord(7, null),
+      status: 'CONFIRMED',
+      blockNumber: null,
+      onChainTokenId: 7,
+      sbtId: 'SBT-null-block',
+      mintRequestId: 'MINT-null-block',
+      verificationId: 'VER-null-block'
+    });
+
+    await expect(findEarliestConfirmedImpactSbtBlock()).resolves.toBe(101);
+  });
+
+  it('returns the earliest confirmed block and timestamp for legacy checkpoint detection', async () => {
+    await expect(findEarliestConfirmedImpactSbtBackfillAnchor()).resolves.toMatchObject({
+      blockNumber: 101,
+      confirmedAt: new Date('2026-08-02T10:00:00.000Z')
+    });
   });
 });

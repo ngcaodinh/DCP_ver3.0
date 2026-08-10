@@ -170,6 +170,25 @@ export async function findAllProjectsByProjectIdList(projectIdList: string[]): P
 }
 
 
+/**
+ * Lấy tên project theo lô mà không lọc trạng thái hoặc deadline.
+ * Mục đích: gallery vẫn hiển thị đúng tên của project đã hoàn thành hoặc đã đóng.
+ */
+export async function findProjectNamesByProjectIdList(
+  projectIdList: string[]
+): Promise<Array<Pick<ProjectRecord, 'projectId' | 'name'>>> {
+  if (!projectIdList.length) {
+    return [];
+  }
+
+  return ProjectMongoModel.find(
+    { projectId: { $in: projectIdList } },
+    { _id: 0, projectId: 1, name: 1 }
+  )
+    .lean<Array<Pick<ProjectRecord, 'projectId' | 'name'>>>()
+    .exec();
+}
+
 /** Hàm cập nhật dự án theo projectId. Mục đích: cập nhật trạng thái vòng đời và metadata review. */
 export async function updateProjectByProjectId(
   projectId: string,

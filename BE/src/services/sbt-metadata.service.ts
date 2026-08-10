@@ -1,6 +1,7 @@
 import { getReadOnlyImpactSbtContract, getWritableImpactSbtContract } from '../config/sbtContract';
 import { getLogger } from '../config/logger';
 import type { Contract } from 'ethers';
+import { SBT_GALLERY_MAX_PAGE, SBT_GALLERY_PAGE_SIZE } from '../constants/sbtGallery';
 import { SBT_MINT_CONFIRMATION_BLOCKS } from '../constants/sbtMint';
 import {
   SBT_TERMINAL_STATUSES,
@@ -9,33 +10,34 @@ import {
   toSbtTokenStatusName
 } from '../constants/sbtTokenStatus';
 import {
-  countImpactSbtByProjectId,
-  findImpactSbtMetadataByProjectId,
+  countImpactSbtGallery,
+  findImpactSbtGallery,
   findImpactSbtMetadataByTokenId,
   updateImpactSbtOnChainStatus,
   type ImpactSbtMetadataRecord
 } from '../models/impactSbtMetadataModel';
+import { findProjectNamesByProjectIdList } from '../models/projectModel';
 import { ApplicationError } from '../utils/applicationError';
 import { sanitizeProviderError } from '../utils/sanitizeProviderError';
+import { withRpcTimeout } from '../utils/withRpcTimeout';
 import {
   buildIpfsGatewayUrl,
   fetchJsonFromIpfs,
   IpfsGatewayError
 } from '../utils/ipfsGateway';
 import {
+  getOrLoadSbtGalleryTotal,
   getSbtTokenCache,
   getSbtTokenNotFoundCache,
+  invalidateSbtGalleryTotalCache,
   invalidateSbtTokenCache,
   setSbtTokenCache,
   setSbtTokenNotFoundCache
 } from './sbtMetadataCacheService';
 
 const logger = getLogger();
-const SBT_RPC_READ_TIMEOUT_MS = 5_000;
 const MAX_STATUS_UPDATE_GAS = 200_000n;
 const MAX_STATUS_REASON_LENGTH = 200;
-const MAX_PAGE_NUMBER = 500;
-let orphanedRpcPromiseCount = 0;
 
 type NumericValue = bigint | number;
 
@@ -66,6 +68,7 @@ type SbtWriteContract = SbtReadContract & {
 export interface SbtGalleryEntry {
   onChainTokenId: number | null;
   projectId: string;
+  projectName: string | null;
   milestone: number;
   beneficiaryCount: number;
   imageCid: string;
@@ -122,8 +125,8 @@ export interface SbtStatusUpdateResult {
 
 /** Chuẩn hóa page/limit ở service để các caller nội bộ không thể vượt giới hạn API. */
 function normalizePagination(page: number, limit: number): { page: number; limit: number } {
-  const normalizedPage = Number.isInteger(page) && page > 0 ? Math.min(page, MAX_PAGE_NUMBER) : 1;
-  const normalizedLimit = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 20) : 20;
+  const normalizedPage = Number.isInteger(page) && page > 0 ? Math.min(page, SBT_GALLERY_MAX_PAGE) : 1;
+  const normalizedLimit = Number.isInteger(limit) && limit > 0 ? Math.min(limit, SBT_GALLERY_PAGE_SIZE) : SBT_GALLERY_PAGE_SIZE;
   return { page: normalizedPage, limit: normalizedLimit };
 }
 
@@ -140,10 +143,11 @@ function tryBuildIpfsGatewayUrl(cid: string): string | null {
 }
 
 /** Chuyển metadata record sang DTO gallery, không trả các field lifecycle mint không cần cho màn hình public. */
-function toGalleryEntry(record: ImpactSbtMetadataRecord): SbtGalleryEntry {
+function toGalleryEntry(record: ImpactSbtMetadataRecord, projectName: string | null): SbtGalleryEntry {
   return {
     onChainTokenId: record.onChainTokenId ?? null,
     projectId: record.projectId,
+    projectName,
     milestone: record.milestone,
     beneficiaryCount: record.beneficiaryCount,
     imageCid: record.imageCid,
@@ -151,6 +155,22 @@ function toGalleryEntry(record: ImpactSbtMetadataRecord): SbtGalleryEntry {
     onChainTokenStatus: record.onChainTokenStatus ?? null,
     confirmedAt: record.confirmedAt
   };
+}
+
+/**
+ * Gắn tên project cho một trang gallery bằng đúng một batch query.
+ * Mục đích: tránh N+1 query khi một trang chứa SBT của nhiều project.
+ */
+async function mapGalleryEntries(records: ImpactSbtMetadataRecord[]): Promise<SbtGalleryEntry[]> {
+  if (records.length === 0) {
+    return [];
+  }
+
+  const projectIdList = [...new Set(records.map(record => record.projectId))];
+  const projectRecords = await findProjectNamesByProjectIdList(projectIdList);
+  const projectNameById = new Map(projectRecords.map(project => [project.projectId, project.name]));
+
+  return records.map(record => toGalleryEntry(record, projectNameById.get(record.projectId) ?? null));
 }
 
 /** Chọn metadata off-chain công khai, loại bỏ ID vận hành, địa chỉ ví và thông tin retry khỏi public API. */
@@ -289,35 +309,6 @@ function toSafeDateFromUnixSeconds(value: NumericValue): Date {
   return date;
 }
 
-/** Bao timeout cho RPC read để request API không bị treo vô hạn khi provider không phản hồi. */
-function withRpcTimeout<T>(promise: Promise<T>): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    let timedOut = false;
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      const timeoutError = Object.assign(new Error('RPC read timeout.'), { code: 'TIMEOUT' });
-      logger.warn('RPC read SBT đã timeout; promise provider tiếp tục chạy nền.', {
-        timeoutMs: SBT_RPC_READ_TIMEOUT_MS,
-        orphanedPromiseCount: orphanedRpcPromiseCount += 1
-      });
-      reject(timeoutError);
-    }, SBT_RPC_READ_TIMEOUT_MS);
-
-    promise.then(
-      value => {
-        clearTimeout(timeout);
-        if (timedOut) return;
-        resolve(value);
-      },
-      error => {
-        clearTimeout(timeout);
-        if (timedOut) return;
-        reject(error);
-      }
-    );
-  });
-}
-
 /** Kiểm tra lỗi ethers có phải custom error TokenNotExists hay không. */
 function isTokenNotExistsError(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false;
@@ -411,15 +402,33 @@ export async function getSbtListByProject(
   page = 1,
   limit = 20
 ): Promise<SbtListResult> {
+  return getSbtGallery(page, limit, projectId);
+}
+
+/**
+ * Lấy danh sách SBT public toàn cục hoặc theo project cho trang Impact NFT Gallery.
+ * @param page Số trang bắt đầu từ 1.
+ * @param limit Số record mỗi trang, được giới hạn tối đa 20.
+ * @param projectId Bộ lọc project tùy chọn.
+ */
+export async function getSbtGallery(
+  page = 1,
+  limit = 20,
+  projectId?: string
+): Promise<SbtListResult> {
   const pagination = normalizePagination(page, limit);
   const skip = (pagination.page - 1) * pagination.limit;
+  const normalizedProjectId = projectId === undefined ? undefined : projectId.trim();
   const [records, total] = await Promise.all([
-    findImpactSbtMetadataByProjectId(projectId, pagination.limit, skip),
-    countImpactSbtByProjectId(projectId)
+    findImpactSbtGallery(pagination.limit, skip, normalizedProjectId),
+    getOrLoadSbtGalleryTotal(
+      normalizedProjectId,
+      () => countImpactSbtGallery(normalizedProjectId)
+    )
   ]);
 
   return {
-    entries: records.map(toGalleryEntry),
+    entries: await mapGalleryEntries(records),
     pagination: {
       ...pagination,
       total,
@@ -598,6 +607,7 @@ export async function updateSbtStatus(
 
   const updatedAt = new Date();
   let auditWarning: SbtStatusUpdateResult['auditWarning'] = null;
+  let updatedProjectId: string | undefined;
   try {
     const updatedRecord = await updateImpactSbtOnChainStatus(tokenId, {
       onChainTokenStatus: newStatus as SbtTokenStatusName,
@@ -612,8 +622,9 @@ export async function updateSbtStatus(
         transactionHash: transaction.hash
       });
     }
+    updatedProjectId = updatedRecord?.projectId;
   } catch (error) {
-    // Transaction đã thành công nên không thể rollback; listener/reconcile sẽ sửa Mongo ở follow-up.
+    // Transaction đã thành công nên không thể rollback; projector durable sẽ replay TokenStatusUpdated.
     auditWarning = 'OFF_CHAIN_SYNC_FAILED';
     logger.error('Đồng bộ trạng thái SBT vào Mongo thất bại sau khi tx thành công.', {
       tokenId,
@@ -623,7 +634,12 @@ export async function updateSbtStatus(
   }
 
   try {
-    await invalidateSbtTokenCache(tokenId);
+    await Promise.all([
+      invalidateSbtTokenCache(tokenId),
+      ...(newStatus === 'REVOKED' || newStatus === 'BURNED'
+        ? [invalidateSbtGalleryTotalCache(updatedProjectId)]
+        : [])
+    ]);
   } catch (error) {
     // Invalidate lỗi không được biến transaction thành failure; TTL cache sẽ tự dọn sau tối đa một giờ.
     logger.warn('Invalidate cache SBT thất bại sau khi cập nhật trạng thái.', {

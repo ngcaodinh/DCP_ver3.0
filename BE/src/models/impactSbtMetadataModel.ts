@@ -60,6 +60,9 @@ export type ImpactSbtMetadataRecord = {
   tokenStatusReason?: string | null;
   tokenStatusUpdatedAt?: Date | null;
   tokenStatusUpdatedBy?: string | null;
+  tokenStatusBlockNumber?: number | null;
+  tokenStatusLogIndex?: number | null;
+  tokenStatusTransactionHash?: string | null;
   submittedAt: Date | null;               // Thời điểm submit tx
   dlqAt: Date | null;                     // Thời điểm chuyển DLQ
   reRunCount: number;                     // Số lần admin đã trigger re-run job
@@ -71,6 +74,11 @@ export type ImpactSbtMetadataRecord = {
 
 export interface ImpactSbtProjectQueryOptions {
   includeHidden?: boolean;
+}
+
+export interface EarliestConfirmedImpactSbtBackfillAnchor {
+  blockNumber: number;
+  confirmedAt: Date;
 }
 
 const impactSbtMetadataSchema = new Schema<ImpactSbtMetadataRecord>(
@@ -108,6 +116,9 @@ const impactSbtMetadataSchema = new Schema<ImpactSbtMetadataRecord>(
     tokenStatusReason: { type: String, default: null },
     tokenStatusUpdatedAt: { type: Date, default: null },
     tokenStatusUpdatedBy: { type: String, default: null },
+    tokenStatusBlockNumber: { type: Number, default: null },
+    tokenStatusLogIndex: { type: Number, default: null },
+    tokenStatusTransactionHash: { type: String, default: null },
     submittedAt: { type: Date, default: null },
     dlqAt: { type: Date, default: null },
     reRunCount: { type: Number, required: true, default: 0 },
@@ -130,6 +141,10 @@ impactSbtMetadataSchema.index(
 );
 // Tối ưu truy vấn findImpactSbtMetadataByBeneficiary — sắp xếp theo confirmedAt desc
 impactSbtMetadataSchema.index({ beneficiaryAddress: 1, status: 1, confirmedAt: -1 });
+// Index phục vụ gallery toàn cục, sắp xếp SBT đã confirm theo thời gian mới nhất.
+impactSbtMetadataSchema.index({ status: 1, confirmedAt: -1 });
+// Index phục vụ bootstrap projector tìm block mint CONFIRMED nhỏ nhất.
+impactSbtMetadataSchema.index({ status: 1, blockNumber: 1 });
 
 const ImpactSbtMetadataMongoModel = mongoose.model<ImpactSbtMetadataRecord>(
   'ImpactSbtMetadata',
@@ -137,15 +152,18 @@ const ImpactSbtMetadataMongoModel = mongoose.model<ImpactSbtMetadataRecord>(
   'impact_sbt_metadata'
 );
 
-/** Dựng query project dùng chung để find và count luôn áp dụng cùng chính sách ẩn gallery. */
-function buildProjectSbtQuery(
-  projectId: string,
-  options: ImpactSbtProjectQueryOptions
+/** Dựng query gallery dùng chung để find và count luôn áp dụng cùng chính sách ẩn. */
+function buildGallerySbtQuery(
+  projectId?: string,
+  options: ImpactSbtProjectQueryOptions = {}
 ): Record<string, unknown> {
   const query: Record<string, unknown> = {
-    projectId,
     status: 'CONFIRMED'
   };
+  // Chỉ undefined mới là gallery toàn cục; chuỗi rỗng phải là filter không khớp.
+  if (projectId !== undefined) {
+    query.projectId = projectId;
+  }
   if (!options.includeHidden) {
     query.onChainTokenStatus = { $nin: SBT_HIDDEN_FROM_GALLERY_STATUSES };
   }
@@ -257,16 +275,28 @@ export async function findImpactSbtMetadataByTokenId(
 }
 
 /**
- * Lấy danh sách SBT theo project (phân trang) — cho API list.
- * Mục đích: trang Impact NFT Gallery fetch theo projectId.
+ * Lấy danh sách SBT public toàn cục hoặc theo project cho Impact NFT Gallery.
+ * @param limit Số record tối đa cần lấy.
+ * @param skip Số record bỏ qua để phân trang.
+ * @param projectId Bộ lọc project tùy chọn.
+ * @param options Chính sách visibility dành cho caller nội bộ.
  */
-export async function findImpactSbtMetadataByProjectId(
-  projectId: string,
+export async function findImpactSbtGallery(
   limit = 20,
   skip = 0,
+  projectId?: string,
   options: ImpactSbtProjectQueryOptions = {}
 ): Promise<ImpactSbtMetadataRecord[]> {
-  return ImpactSbtMetadataMongoModel.find(buildProjectSbtQuery(projectId, options))
+  return ImpactSbtMetadataMongoModel.find(buildGallerySbtQuery(projectId, options))
+    .select({
+      onChainTokenId: 1,
+      projectId: 1,
+      milestone: 1,
+      beneficiaryCount: 1,
+      imageCid: 1,
+      onChainTokenStatus: 1,
+      confirmedAt: 1
+    })
     .sort({ confirmedAt: -1 })
     .skip(skip)
     .limit(limit)
@@ -292,14 +322,56 @@ export async function findImpactSbtMetadataByBeneficiary(
 }
 
 /**
- * Đếm số SBT CONFIRMED của một project.
- * Mục đích: hiển thị badge "X certificates" trên project page.
+ * Đếm số SBT public toàn cục hoặc theo project để pagination khớp với gallery.
+ * @param projectId Bộ lọc project tùy chọn.
+ * @param options Chính sách visibility dành cho caller nội bộ.
  */
-export async function countImpactSbtByProjectId(
-  projectId: string,
+export async function countImpactSbtGallery(
+  projectId?: string,
   options: ImpactSbtProjectQueryOptions = {}
 ): Promise<number> {
-  return ImpactSbtMetadataMongoModel.countDocuments(buildProjectSbtQuery(projectId, options)).exec();
+  return ImpactSbtMetadataMongoModel.countDocuments(buildGallerySbtQuery(projectId, options)).exec();
+}
+
+/** Lấy block mint cũ nhất để projector bắt đầu replay từ thời điểm có SBT cần hiển thị. */
+export async function findEarliestConfirmedImpactSbtBlock(): Promise<number | null> {
+  const record = await ImpactSbtMetadataMongoModel.findOne({
+    status: 'CONFIRMED',
+    blockNumber: { $gte: 0 }
+  })
+    .select({ blockNumber: 1 })
+    .sort({ blockNumber: 1 })
+    .lean()
+    .exec();
+
+  const blockNumber = record?.blockNumber;
+  return typeof blockNumber === 'number' && Number.isSafeInteger(blockNumber) ? blockNumber : null;
+}
+
+/** Lấy block và thời điểm CONFIRMED sớm nhất để backfill nhận diện sentinel legacy mà không rewind checkpoint khỏe mạnh. */
+export async function findEarliestConfirmedImpactSbtBackfillAnchor(): Promise<EarliestConfirmedImpactSbtBackfillAnchor | null> {
+  const record = await ImpactSbtMetadataMongoModel.findOne({
+    status: 'CONFIRMED',
+    blockNumber: { $gte: 0 },
+    confirmedAt: { $type: 'date' }
+  })
+    .select({ blockNumber: 1, confirmedAt: 1 })
+    .sort({ blockNumber: 1 })
+    .lean()
+    .exec();
+
+  const blockNumber = record?.blockNumber;
+  const confirmedAt = record?.confirmedAt;
+  if (
+    typeof blockNumber !== 'number'
+    || !Number.isSafeInteger(blockNumber)
+    || !(confirmedAt instanceof Date)
+    || Number.isNaN(confirmedAt.getTime())
+  ) {
+    return null;
+  }
+
+  return { blockNumber, confirmedAt };
 }
 
 /** Đồng bộ trạng thái on-chain vào metadata mà không làm thay đổi lifecycle mint off-chain. */
@@ -310,17 +382,44 @@ export async function updateImpactSbtOnChainStatus(
     reason: string;
     updatedBy: string;
     updatedAt: Date;
+    eventLocation?: {
+      blockNumber: number;
+      logIndex: number;
+      transactionHash: string;
+    };
   }
 ): Promise<ImpactSbtMetadataRecord | null> {
+  const query: Record<string, unknown> = {
+    onChainTokenId,
+    status: 'CONFIRMED'
+  };
+  const statusUpdatePayload: Record<string, unknown> = {
+    onChainTokenStatus: payload.onChainTokenStatus,
+    tokenStatusReason: payload.reason,
+    tokenStatusUpdatedAt: payload.updatedAt,
+    tokenStatusUpdatedBy: payload.updatedBy
+  };
+
+  if (payload.eventLocation) {
+    const { blockNumber, logIndex, transactionHash } = payload.eventLocation;
+    // Chỉ event mới hơn được ghi để replay cũ không ghi đè canonical state hiện tại.
+    query.$or = [
+      { tokenStatusBlockNumber: { $exists: false } },
+      { tokenStatusBlockNumber: null },
+      { tokenStatusBlockNumber: { $lt: blockNumber } },
+      { tokenStatusBlockNumber: blockNumber, tokenStatusLogIndex: { $exists: false } },
+      { tokenStatusBlockNumber: blockNumber, tokenStatusLogIndex: null },
+      { tokenStatusBlockNumber: blockNumber, tokenStatusLogIndex: { $lt: logIndex } }
+    ];
+    statusUpdatePayload.tokenStatusBlockNumber = blockNumber;
+    statusUpdatePayload.tokenStatusLogIndex = logIndex;
+    statusUpdatePayload.tokenStatusTransactionHash = transactionHash;
+  }
+
   return ImpactSbtMetadataMongoModel.findOneAndUpdate(
-    { onChainTokenId, status: 'CONFIRMED' },
+    query,
     {
-      $set: {
-        onChainTokenStatus: payload.onChainTokenStatus,
-        tokenStatusReason: payload.reason,
-        tokenStatusUpdatedAt: payload.updatedAt,
-        tokenStatusUpdatedBy: payload.updatedBy
-      }
+      $set: statusUpdatePayload
     },
     { returnDocument: 'after' }
   ).lean().exec();

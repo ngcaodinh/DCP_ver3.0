@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  sbtGalleryQuerySchema,
   sbtMetadataQuerySchema,
+  sbtProjectIdParamSchema,
   sbtTokenIdParamSchema,
   updateSbtStatusBodySchema
 } from '../../validators/sbtMetadataValidator';
@@ -31,5 +33,14 @@ describe('sbtMetadataValidator', () => {
       newStatus: 'ACTIVE',
       reason: 'x'.repeat(201)
     }).success).toBe(false);
+  });
+
+  it('normalizes bounded projectId values and rejects path or punctuation injection', () => {
+    expect(sbtProjectIdParamSchema.parse({ projectId: '  project_001  ' })).toEqual({
+      projectId: 'project_001'
+    });
+    expect(sbtGalleryQuerySchema.safeParse({ projectId: 'project.001' }).success).toBe(false);
+    expect(sbtGalleryQuerySchema.safeParse({ projectId: 'p'.repeat(65) }).success).toBe(false);
+    expect(sbtGalleryQuerySchema.parse({})).toEqual({ page: 1, limit: 20 });
   });
 });

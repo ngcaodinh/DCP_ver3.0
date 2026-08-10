@@ -24,6 +24,12 @@ export default function sitemap(): MetadataRoute.Sitemap {
       priority: 0.9
     },
     {
+      url: `${siteBaseUrl}/impact-gallery`,
+      lastModified: currentTimestamp,
+      changeFrequency: 'daily',
+      priority: 0.7
+    },
+    {
       url: `${siteBaseUrl}/organizations`,
       lastModified: currentTimestamp,
       changeFrequency: 'weekly',

@@ -1,4 +1,5 @@
 const ipfsGatewayBaseUrl = 'https://gateway.pinata.cloud/ipfs';
+const trustedIpfsGatewayHosts = new Set(['gateway.pinata.cloud', 'ipfs.io', 'cloudflare-ipfs.com']);
 
 type ResolveIpfsPreviewKindInput = {
   mimeType?: string | null;
@@ -19,6 +20,19 @@ export function isValidIpfsCid(cidValue: string): boolean {
   return cidVersionZeroRegex.test(normalizedCidValue) || cidVersionOneRegex.test(normalizedCidValue);
 }
 
+/** Chỉ chấp nhận gateway HTTPS thuộc allowlist cố định để không gửi request ảnh tới host lạ. */
+export function isAllowedIpfsGatewayUrl(value: string): boolean {
+  try {
+    const parsedUrl = new URL(value);
+    return parsedUrl.protocol === 'https:'
+      && !parsedUrl.username
+      && !parsedUrl.password
+      && trustedIpfsGatewayHosts.has(parsedUrl.host);
+  } catch {
+    return false;
+  }
+}
+
 /** Hàm tạo URL gateway IPFS từ CID hợp lệ. Mục đích: chuẩn hóa duy nhất một nơi build link IPFS cho toàn bộ FE. */
 export function buildIpfsGatewayUrl(cidValue: string): string {
   const normalizedCidValue = cidValue.trim();
@@ -28,6 +42,27 @@ export function buildIpfsGatewayUrl(cidValue: string): string {
   }
 
   return `${ipfsGatewayBaseUrl}/${encodeURIComponent(normalizedCidValue)}`;
+}
+
+/** Chuẩn hóa CID có thể được truyền dưới dạng URI ipfs:// hoặc CID trần. */
+export function normalizeIpfsCid(cidValue: string): string {
+  const normalizedCidValue = cidValue.trim();
+  return normalizedCidValue.startsWith('ipfs://')
+    ? normalizedCidValue.slice('ipfs://'.length).replace(/^\/+/, '')
+    : normalizedCidValue;
+}
+
+/** Dựng danh sách gateway IPFS cố định cho fallback ảnh gallery theo đúng thứ tự ưu tiên. */
+export function buildIpfsGatewayUrlList(cidValue: string): string[] {
+  const normalizedCidValue = normalizeIpfsCid(cidValue);
+  if (!isValidIpfsCid(normalizedCidValue)) {
+    return [];
+  }
+
+  return [
+    `https://gateway.pinata.cloud/ipfs/${encodeURIComponent(normalizedCidValue)}`,
+    `https://ipfs.io/ipfs/${encodeURIComponent(normalizedCidValue)}`
+  ];
 }
 
 /** Hàm suy luận loại preview từ mime, tên file hoặc content-type. Mục đích: ưu tiên dữ liệu backend trước, rồi mới fallback qua thông tin khác. */

@@ -12,15 +12,18 @@ const mocks = vi.hoisted(() => {
       getTokenStatus: vi.fn()
     },
     writeContract: { updateTokenStatus },
-    findByProject: vi.fn(),
-    countByProject: vi.fn(),
+    findGallery: vi.fn(),
+    countGallery: vi.fn(),
+    findProjectNames: vi.fn(),
     findByToken: vi.fn(),
     updateMongo: vi.fn(),
     getCache: vi.fn(),
     getNotFoundCache: vi.fn(),
+    getOrLoadGalleryTotal: vi.fn(),
     setCache: vi.fn(),
     setNotFoundCache: vi.fn(),
     invalidateCache: vi.fn(),
+    invalidateGalleryTotal: vi.fn(),
     fetchIpfs: vi.fn(),
     buildGateway: vi.fn()
   };
@@ -32,18 +35,24 @@ vi.mock('../../config/sbtContract', () => ({
 }));
 
 vi.mock('../../models/impactSbtMetadataModel', () => ({
-  findImpactSbtMetadataByProjectId: mocks.findByProject,
-  countImpactSbtByProjectId: mocks.countByProject,
+  findImpactSbtGallery: mocks.findGallery,
+  countImpactSbtGallery: mocks.countGallery,
   findImpactSbtMetadataByTokenId: mocks.findByToken,
   updateImpactSbtOnChainStatus: mocks.updateMongo
 }));
 
+vi.mock('../../models/projectModel', () => ({
+  findProjectNamesByProjectIdList: mocks.findProjectNames
+}));
+
 vi.mock('../../services/sbtMetadataCacheService', () => ({
+  getOrLoadSbtGalleryTotal: mocks.getOrLoadGalleryTotal,
   getSbtTokenCache: mocks.getCache,
   getSbtTokenNotFoundCache: mocks.getNotFoundCache,
   setSbtTokenCache: mocks.setCache,
   setSbtTokenNotFoundCache: mocks.setNotFoundCache,
-  invalidateSbtTokenCache: mocks.invalidateCache
+  invalidateSbtTokenCache: mocks.invalidateCache,
+  invalidateSbtGalleryTotalCache: mocks.invalidateGalleryTotal
 }));
 
 vi.mock('../../utils/ipfsGateway', () => ({
@@ -117,9 +126,11 @@ function setOnChainDefaults(): void {
   mocks.writeContract.updateTokenStatus.estimateGas.mockResolvedValue(50_000n);
   mocks.getCache.mockResolvedValue(null);
   mocks.getNotFoundCache.mockResolvedValue(false);
+  mocks.getOrLoadGalleryTotal.mockImplementation(async (_projectId: string | undefined, loadTotal: () => Promise<number>) => loadTotal());
   mocks.setCache.mockResolvedValue(undefined);
   mocks.setNotFoundCache.mockResolvedValue(undefined);
   mocks.invalidateCache.mockResolvedValue(undefined);
+  mocks.invalidateGalleryTotal.mockResolvedValue(undefined);
   mocks.fetchIpfs.mockResolvedValue({ name: 'Impact SBT' });
   mocks.findByToken.mockResolvedValue(makeRecord());
   mocks.updateMongo.mockResolvedValue(makeRecord({ onChainTokenStatus: 'REVOKED' }));
@@ -129,21 +140,27 @@ describe('sbt-metadata.service', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     setOnChainDefaults();
-    mocks.findByProject.mockResolvedValue([makeRecord()]);
-    mocks.countByProject.mockResolvedValue(1);
+    mocks.findGallery.mockResolvedValue([makeRecord()]);
+    mocks.countGallery.mockResolvedValue(1);
+    mocks.findProjectNames.mockResolvedValue([{ projectId: 'project-1', name: 'Dự án mẫu' }]);
   });
 
   it('clamps limit to 20 and returns list pagination', async () => {
     const result = await getSbtListByProject('project-1', 2, 50);
 
     expect(result.pagination).toEqual({ page: 2, limit: 20, total: 1, totalPages: 1 });
-    expect(mocks.findByProject).toHaveBeenCalledWith('project-1', 20, 20);
-    expect(result.entries[0]).toMatchObject({ onChainTokenId: 1, imageGatewayUrl: 'https://ipfs.test/ipfs/QmImage' });
+    expect(mocks.findGallery).toHaveBeenCalledWith(20, 20, 'project-1');
+    expect(mocks.countGallery).toHaveBeenCalledWith('project-1');
+    expect(result.entries[0]).toMatchObject({
+      onChainTokenId: 1,
+      projectName: 'Dự án mẫu',
+      imageGatewayUrl: 'https://ipfs.test/ipfs/QmImage'
+    });
   });
 
   it('returns an empty collection when the project has no SBT', async () => {
-    mocks.findByProject.mockResolvedValue([]);
-    mocks.countByProject.mockResolvedValue(0);
+    mocks.findGallery.mockResolvedValue([]);
+    mocks.countGallery.mockResolvedValue(0);
 
     const result = await getSbtListByProject('missing-project');
 
@@ -330,6 +347,7 @@ describe('sbt-metadata.service', () => {
       { gasLimit: 200_000n }
     );
     expect(order).toEqual(['mongo', 'cache']);
+    expect(mocks.invalidateGalleryTotal).toHaveBeenCalledWith('project-1');
   });
 
   it('rejects terminal token without sending a transaction', async () => {
@@ -368,6 +386,17 @@ describe('sbt-metadata.service', () => {
       auditWarning: 'OFF_CHAIN_RECORD_NOT_FOUND',
       transactionHash: '0xstatus'
     });
+  });
+
+  it('returns an audit warning when Mongo sync throws after a confirmed terminal transaction', async () => {
+    mocks.updateMongo.mockRejectedValue(new Error('Mongo unavailable'));
+
+    await expect(updateSbtStatus(1, 'REVOKED', 'Evidence invalidated.', 'admin-1')).resolves.toMatchObject({
+      auditWarning: 'OFF_CHAIN_SYNC_FAILED',
+      transactionHash: '0xstatus'
+    });
+    expect(mocks.invalidateCache).toHaveBeenCalledWith(1);
+    expect(mocks.invalidateGalleryTotal).toHaveBeenCalledWith(undefined);
   });
 
   it('maps contract InvalidTransition to a stable conflict error', async () => {

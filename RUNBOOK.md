@@ -95,3 +95,36 @@ db.impact_sbt_metadata.createIndex(
   { unique: true, partialFilterExpression: { onChainTokenId: { $type: 'number' } } }
 )
 ```
+
+## 8) Trang Impact NFT Gallery (C5)
+
+1. C5 không phát hành production một mình; merge và release cùng C6 vì các card SBT liên kết tới `/impact-gallery/[tokenId]`.
+2. Trong lượt release, deploy backend trước frontend để route `GET /api/sbt/gallery` tồn tại trước khi FE gọi.
+3. Trên collection lớn, tạo index `{ status: 1, confirmedAt: -1 }` với `background: true` trước giờ cao điểm; gộp cùng lượt dọn index cũ ở mục 7.
+4. Gateway fallback phía FE được hard-code trong `FE/app/utils/ipfs.ts`; thay đổi gateway cần build lại frontend. `IPFS_GATEWAY_URLS` phía BE quyết định gateway được ưu tiên đầu tiên trên gallery.
+5. Cache CDN hiện giữ trang public khoảng 5 phút, nên SBT vừa mint có thể chưa xuất hiện ngay.
+6. Smoke test sau deploy: gallery có SBT của nhiều project (kể cả project đã kết thúc), card hiển thị tên project, projectId không tồn tại hiển thị empty state, chặn `ipfs.io` vẫn có ảnh fallback, và link card mở được route detail C6.
+7. `RUN_WORKERS` mặc định được bật; chạy projector trên đúng một process/instance có `RUN_WORKERS` khác `false`. Các instance API-only phải đặt `RUN_WORKERS=false` để tránh nhiều process cùng quét RPC. Worker chỉ project `TokenStatusUpdated` sau 12 confirmations, lưu checkpoint/event idempotency trong `sbt_status_projection_checkpoints` và `sbt_status_projection_events`; không xóa hai collection này khi dọn cache hoặc bảo trì MongoDB.
+8. Ước lượng thời gian projector bắt kịp: mỗi chu kỳ xử lý tối đa 10.000 block và chu kỳ danh nghĩa là 15 giây, tương đương khoảng `10.000 / 15 × 60 ≈ 40.000 block/phút`. Với backlog `B` block, ETA danh nghĩa là `B / 40.000` phút; cộng thêm thời gian RPC `getLogs`, retry và khoảng 5 phút cache CDN khi cần ước lượng thời điểm gallery hiển thị revoke.
+9. Nếu hệ thống đã từng chạy bản worker khởi tạo checkpoint sai, chạy backfill ở chế độ dry-run trước, sau đó chạy write mode trước khi rollout worker:
+
+```powershell
+docker compose -f docker-compose.ghcr.yml run --rm --no-deps backend npm run backfill:sbt-status-projection-checkpoints -- --dry-run
+docker compose -f docker-compose.ghcr.yml run --rm --no-deps backend npm run backfill:sbt-status-projection-checkpoints
+```
+
+10. Trên collection lớn, tạo các index dưới đây trước khi rollout projector. Index `{ status: 1, blockNumber: 1 }` phục vụ bootstrap; index event giúp truy vấn `PENDING` đến hạn luôn bounded. Sau khi verify query plan, có thể drop index event cũ không có `nextRetryAt`:
+
+```javascript
+db.impact_sbt_metadata.createIndex(
+  { status: 1, blockNumber: 1 },
+  { background: true }
+)
+db.sbt_status_projection_events.createIndex(
+  { chainId: 1, contractAddress: 1, projectionStatus: 1, nextRetryAt: 1, blockNumber: 1, logIndex: 1 },
+  { background: true }
+)
+db.sbt_status_projection_events.dropIndex(
+  { chainId: 1, contractAddress: 1, projectionStatus: 1, blockNumber: 1, logIndex: 1 }
+)
+```

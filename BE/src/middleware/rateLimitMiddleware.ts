@@ -36,10 +36,8 @@ setInterval(() => {
  * Nếu thêm proxy trong tương lai, cần update comment này và count trong x-forwarded-for parsing.
  */
 function buildRateLimitKey(request: Request, bucketName?: string): string {
-  // Nếu đặt behind proxy (Nginx), phải bật TRUST_PROXY=true và đảm bảo chỉ có 1 proxy
-  // Current: 1 proxy (Nginx) → trust proxy count = 1
-  const trustProxy = process.env.TRUST_PROXY === 'true';
-  const clientIpAddress = trustProxy ? (request.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || request.ip : request.ip || 'unknown';
+  // Express đã chuẩn hóa IP theo `trust proxy = 1`; không đọc header thô để tránh spoof bucket.
+  const clientIpAddress = request.ip || 'unknown';
   const normalizedBucketName = bucketName || `${request.method}:${request.baseUrl}${request.path}`;
   return `${normalizedBucketName}:${clientIpAddress}`;
 }

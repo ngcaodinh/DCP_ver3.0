@@ -24,12 +24,14 @@ vi.mock('../../services/sbtMintService', () => ({
 }));
 
 const metadataMocks = vi.hoisted(() => ({
+  getGallery: vi.fn(),
   getList: vi.fn(),
   getDetail: vi.fn(),
   updateStatus: vi.fn()
 }));
 
 vi.mock('../../services/sbt-metadata.service', () => ({
+  getSbtGallery: metadataMocks.getGallery,
   getSbtListByProject: metadataMocks.getList,
   getSbtTokenDetail: metadataMocks.getDetail,
   updateSbtStatus: metadataMocks.updateStatus

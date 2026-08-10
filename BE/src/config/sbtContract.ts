@@ -56,7 +56,7 @@ let _readOnlyContract: ethers.Contract | null = null;
 let _writableContract: ethers.Contract | null = null;
 let _oracleSigner: ethers.Wallet | null = null;
 
-function getReadOnlyProvider(): ethers.JsonRpcProvider {
+export function getReadOnlyImpactSbtProvider(): ethers.JsonRpcProvider {
   if (!_readOnlyProvider) {
     const rpcUrl = process.env.BLOCKCHAIN_RPC_URL?.trim() ?? '';
     if (!rpcUrl) {
@@ -107,7 +107,7 @@ export function getWritableImpactSbtContract(): ethers.Contract {
   if (_writableContract) {
     return _writableContract;
   }
-  const provider = getReadOnlyProvider();
+  const provider = getReadOnlyImpactSbtProvider();
   const signer = getOracleSigner().connect(provider);
   _writableContract = new ethers.Contract(getImpactSbtContractAddress(), impactSbtEthersAbi, signer);
   return _writableContract;
@@ -123,7 +123,7 @@ export function getReadOnlyImpactSbtContract(): ethers.Contract {
   if (_readOnlyContract) {
     return _readOnlyContract;
   }
-  _readOnlyContract = new ethers.Contract(getImpactSbtContractAddress(), impactSbtEthersAbi, getReadOnlyProvider());
+  _readOnlyContract = new ethers.Contract(getImpactSbtContractAddress(), impactSbtEthersAbi, getReadOnlyImpactSbtProvider());
   return _readOnlyContract;
 }
 
@@ -133,7 +133,7 @@ export function getReadOnlyImpactSbtContract(): ethers.Contract {
  * KHÔNG gọi trong hot path (mỗi mint) vì thêm 1 RPC call.
  */
 export async function verifyContractDeployed(address: string): Promise<boolean> {
-  const provider = getReadOnlyProvider();
+  const provider = getReadOnlyImpactSbtProvider();
   const code = await provider.getCode(address);
   return code !== '0x';
 }

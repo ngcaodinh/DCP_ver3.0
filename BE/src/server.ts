@@ -16,6 +16,7 @@ import { startOracleWorker, stopOracleWorker } from './workers/oracle.worker';
 import { startOverrideExpiryWorker, stopOverrideExpiryWorker } from './workers/overrideExpiryWorker';
 import { startSbtMintWorker, stopSbtMintWorker } from './workers/sbtMintWorker';
 import { startSbtMintRecoveryScheduler } from './workers/sbtMintRecoveryScheduler';
+import { startSbtStatusProjectionWorker, stopSbtStatusProjectionWorker } from './workers/sbtStatusProjectionWorker';
 import { initializeSbtEventBridge } from './services/sbtEventBridge.service';
 import { startDataMapperWorker } from './workers/data-mapper.worker';
 import { startNotificationWorker, stopNotificationWorker } from './workers/notification.worker';
@@ -53,6 +54,8 @@ function startBackgroundWorkers(): void {
   startOverrideExpiryWorker();
   // SBT Mint Worker: tự động mint SBT khi Oracle verified
   startSbtMintWorker();
+  // SBT status projector: replay TokenStatusUpdated thành Mongo read model cho gallery public.
+  startSbtStatusProjectionWorker();
   // SBT Mint Recovery Scheduler: cron 15 phut phat hien stuck jobs
   startSbtMintRecoveryScheduler();
   // Data Mapper Worker: dong bo PayOS + blockchain vao unified_transactions (5 phut)
@@ -96,6 +99,7 @@ async function startServer(): Promise<void> {
       stopOverrideExpiryWorker();
       await stopOracleWorker();
       await stopSbtMintWorker();
+      stopSbtStatusProjectionWorker();
       // Notification worker: Bull queue.close() chờ active job xong (graceful per spec E1)
       await stopNotificationWorker();
     } catch (error) {

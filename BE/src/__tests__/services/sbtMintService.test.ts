@@ -56,6 +56,10 @@ vi.mock('../../events/sbtEvents', () => ({
   sbtEvents: { emit: vi.fn() }
 }));
 
+vi.mock('../../services/sbtMetadataCacheService', () => ({
+  invalidateSbtGalleryTotalCache: vi.fn()
+}));
+
 vi.mock('../../utils/applicationError', () => ({
   ApplicationError: class ApplicationError extends Error {
     public statusCode: number;
@@ -84,6 +88,7 @@ import {
 import { createSbtMintDlqEntry, findSbtMintDlqByMintRequestId } from '../../models/sbtMintDlqModel';
 import { enqueueSbtMint, getSbtMintJobIndexByRequestId, countPendingSbtMintJobsByRequestId, removePendingSbtMintJobsByRequestId, SBT_MINT_RETRY_DELAYS_MS, SBT_MINT_MAX_ATTEMPTS } from '../../queues/sbtMintQueue';
 import { sbtEvents } from '../../events/sbtEvents';
+import { invalidateSbtGalleryTotalCache } from '../../services/sbtMetadataCacheService';
 import { ApplicationError } from '../../utils/applicationError';
 import {
   createSbtMintRequest,
@@ -340,6 +345,7 @@ describe('sbtMintService - executeSbtMint', () => {
       attemptNumber: 1
     }));
     expect(markImpactSbtAsConfirmed).toHaveBeenCalled();
+    expect(invalidateSbtGalleryTotalCache).toHaveBeenCalledWith(pendingRecord.projectId);
     expect(sbtEvents.emit).toHaveBeenCalledWith('sbt.minted', expect.objectContaining({
       sbtId: 'SBT-pending',
       mintRequestId: 'SBT-MINT-pending'

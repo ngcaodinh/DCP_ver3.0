@@ -4,12 +4,14 @@ import supertest from 'supertest';
 import { ApplicationError } from '../../utils/applicationError';
 
 const mocks = vi.hoisted(() => ({
+  getGallery: vi.fn(),
   getList: vi.fn(),
   getDetail: vi.fn(),
   updateStatus: vi.fn()
 }));
 
 vi.mock('../../services/sbt-metadata.service', () => ({
+  getSbtGallery: mocks.getGallery,
   getSbtListByProject: mocks.getList,
   getSbtTokenDetail: mocks.getDetail,
   updateSbtStatus: mocks.updateStatus
@@ -61,6 +63,7 @@ import { __resetRateLimitStore } from '../../middleware/rateLimitMiddleware';
 
 function createTestApp() {
   const app = express();
+  app.set('trust proxy', 1);
   app.use(express.json());
   app.use('/api/sbt', createSbtMetadataRoutes());
   return app;
@@ -70,6 +73,10 @@ describe('sbt metadata routes', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     __resetRateLimitStore();
+    mocks.getGallery.mockResolvedValue({
+      entries: [],
+      pagination: { page: 1, limit: 20, total: 0, totalPages: 0 }
+    });
     mocks.getList.mockResolvedValue({
       entries: [],
       pagination: { page: 1, limit: 20, total: 0, totalPages: 0 }
@@ -97,6 +104,55 @@ describe('sbt metadata routes', () => {
     expect(response.status).toBe(200);
     expect(response.body.data.pagination.limit).toBe(20);
     expect(mocks.getList).toHaveBeenCalledWith('p-1', 1, 20);
+  });
+
+  it('GET gallery is public and accepts an optional projectId filter', async () => {
+    mocks.getGallery.mockResolvedValueOnce({
+      entries: [],
+      pagination: { page: 2, limit: 10, total: 0, totalPages: 0 }
+    });
+    const response = await supertest(createTestApp())
+      .get('/api/sbt/gallery?page=2&limit=10&projectId=project-2');
+
+    expect(response.status).toBe(200);
+    expect(mocks.getGallery).toHaveBeenCalledWith(2, 10, 'project-2');
+    expect(response.body.data.pagination).toEqual({ page: 2, limit: 10, total: 0, totalPages: 0 });
+  });
+
+  it('GET gallery rejects an empty projectId instead of calling the service', async () => {
+    const response = await supertest(createTestApp()).get('/api/sbt/gallery?projectId=%20%20');
+
+    expect(response.status).toBe(400);
+    expect(response.body.errorCode).toBe('VALIDATION_ERROR');
+    expect(mocks.getGallery).not.toHaveBeenCalled();
+  });
+
+  it('GET gallery rejects unsafe or oversized projectIds at the public boundary', async () => {
+    const unsafeResponse = await supertest(createTestApp()).get('/api/sbt/gallery?projectId=project%2F1');
+    const oversizedResponse = await supertest(createTestApp()).get(`/api/sbt/gallery?projectId=${'p'.repeat(65)}`);
+
+    expect(unsafeResponse.status).toBe(400);
+    expect(unsafeResponse.body.errorCode).toBe('VALIDATION_ERROR');
+    expect(oversizedResponse.status).toBe(400);
+    expect(oversizedResponse.body.errorCode).toBe('VALIDATION_ERROR');
+    expect(mocks.getGallery).not.toHaveBeenCalled();
+  });
+
+  it('GET gallery rejects a limit above the public cap before calling the service', async () => {
+    const response = await supertest(createTestApp()).get('/api/sbt/gallery?limit=21');
+
+    expect(response.status).toBe(400);
+    expect(response.body.errorCode).toBe('VALIDATION_ERROR');
+    expect(mocks.getGallery).not.toHaveBeenCalled();
+  });
+
+  it('GET gallery maps service failures to the standard 500 response', async () => {
+    mocks.getGallery.mockRejectedValue(new ApplicationError('Gallery unavailable.', 500, 'INTERNAL_ERROR'));
+
+    const response = await supertest(createTestApp()).get('/api/sbt/gallery');
+
+    expect(response.status).toBe(500);
+    expect(response.body.errorCode).toBe('INTERNAL_ERROR');
   });
 
   it('GET token returns on-chain and off-chain detail', async () => {
@@ -127,6 +183,20 @@ describe('sbt metadata routes', () => {
     let lastResponse;
     for (let index = 0; index < 101; index += 1) {
       lastResponse = await supertest(app).get('/api/sbt/project/p-1');
+    }
+
+    expect(lastResponse?.status).toBe(429);
+    expect(lastResponse?.body.errorCode).toBe('RATE_LIMIT_EXCEEDED');
+  });
+
+  it('does not reset the public gallery quota when a client spoofs the left side of X-Forwarded-For', async () => {
+    const app = createTestApp();
+    let lastResponse;
+    for (let index = 0; index < 101; index += 1) {
+      const spoofedIp = index % 2 === 0 ? '198.51.100.10' : '198.51.100.11';
+      lastResponse = await supertest(app)
+        .get('/api/sbt/gallery')
+        .set('X-Forwarded-For', `${spoofedIp}, 203.0.113.50`);
     }
 
     expect(lastResponse?.status).toBe(429);
