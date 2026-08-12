@@ -8,7 +8,6 @@ import {
   CreateProjectModal,
   DashboardSection,
   DisbursementSection,
-  NotificationDropdown,
   ProjectsSection,
   SettingsSection,
   TransparencySection
@@ -16,12 +15,12 @@ import {
 import { ApiErrorResponse, fetchApi, buildApiUrl } from '@/app/utils/apiClient';
 import { clearAuthSession, readAuthSession } from '@/app/utils/authSession';
 import Topbar from '../regulatoryBodies/tailwind/Topbar';
+import NotificationBell from '@/app/components/notifications/NotificationBell';
 import {
   DashboardDonationHistoryItem,
   DashboardFeaturedProject,
   DisbursementResult,
   NavigationItem,
-  NotificationItem,
   OrganizationPageKey,
   ProjectSummary,
   StatisticItem,
@@ -85,11 +84,6 @@ type DonationHistoryApiItem = {
   isAnonymous: boolean;
 };
 
-type NotificationListResponse = {
-  notifications: NotificationItem[];
-  unreadCount: number;
-};
-
 /** Hàm định dạng số tiền rút gọn theo chuẩn Việt Nam. Mục đích: hiển thị nhanh số lớn trên thẻ thống kê Tổng quan. */
 function formatCompactCurrencyVietnamese(amountValue: number): string {
   const safeAmountValue = Number.isFinite(amountValue) ? Math.max(0, amountValue) : 0;
@@ -138,7 +132,7 @@ type SidebarItemProps = {
   item: NavigationItem;
   activePage: OrganizationPageKey;
   onSelectPage: (page: OrganizationPageKey) => void;
-  onTriggerAction: (action: 'createProject' | 'toggleNotification') => void;
+  onTriggerAction: (action: 'createProject') => void;
 };
 
 /** Hàm kiểm tra có tài khoản thụ hưởng đã duyệt hay chưa. Mục đích: chặn UI tạo dự án khi chưa đủ điều kiện ngân hàng theo dữ liệu thật từ KYC. Chỉ check submission có dữ liệu bank account thực sự, tránh nhầm với KYC profile submission. */
@@ -192,16 +186,10 @@ export default function OrganizationsPageView() {
   const backendBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:4000';
   const [activePage, setActivePage] = useState<OrganizationPageKey>('dashboard');
   const [activeDisbursementTab, setActiveDisbursementTab] = useState<'eligible' | 'pending' | 'history'>('eligible');
-  const [isNotificationOpen, setIsNotificationOpen] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isCreateProjectOpen, setIsCreateProjectOpen] = useState(false);
   const [selectedDisbursementProject, setSelectedDisbursementProject] = useState<ProjectSummary | null>(null);
   const [isBankSetupHighlighted, setIsBankSetupHighlighted] = useState(false);
-  const [notificationItemList, setNotificationItemList] = useState<NotificationItem[]>([]);
-  const [unreadNotificationCount, setUnreadNotificationCount] = useState(0);
-  const [realtimeToastNotification, setRealtimeToastNotification] = useState<NotificationItem | null>(null);
-  const [isNotificationLoading, setIsNotificationLoading] = useState(false);
-  const [notificationErrorMessage, setNotificationErrorMessage] = useState<string | null>(null);
   const [createdProjects, setCreatedProjects] = useState<ProjectSummary[]>([]);
   const [disbursements, setDisbursements] = useState<import('./types').DisbursementResult[]>([]);
   const [isDisbursementsLoading, setIsDisbursementsLoading] = useState(false);
@@ -226,8 +214,8 @@ export default function OrganizationsPageView() {
   const [userEmail, setUserEmail] = useState('');
   const [userWalletAddress, setUserWalletAddress] = useState('');
   const latestEligibilityRequestRef = useRef(0);
-  const knownNotificationIdSetRef = useRef<Set<string>>(new Set());
-  const hasInitializedNotificationSnapshotRef = useRef(false);
+  const organizationKycSubmissionListRef = useRef<OrganizationKycSubmissionSummary[]>([]);
+  organizationKycSubmissionListRef.current = organizationKycSubmissionList;
 
   /** Hàm lấy tài khoản thụ hưởng đã duyệt. Mục đích: dùng đúng tài khoản ngân hàng đã qua phê duyệt khi tạo yêu cầu giải ngân. */
   const approvedBeneficiaryBankAccount = useMemo<ApprovedBeneficiaryBankAccount | null>(() => {
@@ -252,7 +240,7 @@ export default function OrganizationsPageView() {
   }, [activePage]);
 
   /** Hàm tải điều kiện tạo dự án từ backend. Mục đích: đồng bộ rule ngân hàng thụ hưởng để khóa/mở tính năng tạo dự án trên UI. */
-  const loadCreateProjectEligibility = async (): Promise<boolean> => {
+  const loadCreateProjectEligibility = useCallback(async (): Promise<boolean> => {
     const requestOrderNumber = latestEligibilityRequestRef.current + 1;
     latestEligibilityRequestRef.current = requestOrderNumber;
 
@@ -272,7 +260,7 @@ export default function OrganizationsPageView() {
       });
 
       // Logic này dùng cả điều kiện backend và trạng thái KYC local để tránh hiển thị sai nút tạo dự án khi dữ liệu chưa đồng bộ hoàn toàn.
-      const hasApprovedBankAccount = hasApprovedBeneficiaryBankAccount(organizationKycSubmissionList);
+      const hasApprovedBankAccount = hasApprovedBeneficiaryBankAccount(organizationKycSubmissionListRef.current);
       const isEligibleToCreateProject = response.data.isEligibleToCreateProject && hasApprovedBankAccount;
 
       // Chỉ cập nhật state từ request mới nhất để tránh race condition khi có nhiều request chạy song song.
@@ -293,7 +281,7 @@ export default function OrganizationsPageView() {
       }
       return false;
     }
-  };
+  }, []);
 
   /** Hàm tải danh sách hồ sơ KYC của tổ chức hiện tại. Mục đích: lấy dữ liệu thật trạng thái tài khoản thụ hưởng cho Dashboard/Settings. */
   const loadOrganizationKycSubmissions = async () => {
@@ -359,59 +347,11 @@ export default function OrganizationsPageView() {
   };
 
   /** Hàm xử lý action từ sidebar. Mục đích: mở modal hoặc dropdown thông báo đúng ngữ cảnh. */
-  const handleSidebarAction = (action: 'createProject' | 'toggleNotification') => {
+  const handleSidebarAction = (action: 'createProject') => {
     if (action === 'createProject') {
       void handleOpenCreateProjectModal();
-      return;
     }
-
-    setIsNotificationOpen(currentState => !currentState);
-    void loadNotificationsFromApi();
   };
-
-  /** Hàm cập nhật state thông báo. Mục đích: đồng bộ danh sách và badge chưa đọc từ response thật. */
-  const applyNotificationResponse = useCallback((notificationResponse: NotificationListResponse) => {
-    const nextNotificationItemList = Array.isArray(notificationResponse.notifications) ? notificationResponse.notifications : [];
-    const newUnreadNotification = nextNotificationItemList.find(notificationItem =>
-      !notificationItem.isRead && !knownNotificationIdSetRef.current.has(notificationItem.notificationId)
-    );
-
-    setNotificationItemList(nextNotificationItemList);
-    setUnreadNotificationCount(Number.isFinite(notificationResponse.unreadCount) ? Math.max(0, notificationResponse.unreadCount) : 0);
-
-    if (hasInitializedNotificationSnapshotRef.current && newUnreadNotification) {
-      setRealtimeToastNotification(newUnreadNotification);
-    }
-
-    nextNotificationItemList.forEach(notificationItem => {
-      knownNotificationIdSetRef.current.add(notificationItem.notificationId);
-    });
-    hasInitializedNotificationSnapshotRef.current = true;
-  }, []);
-
-  /** Hàm tải thông báo từ backend. Mục đích: lấy snapshot ban đầu trước khi nhận realtime. */
-  const loadNotificationsFromApi = useCallback(async () => {
-    const authSession = readAuthSession();
-    if (!authSession?.accessToken) {
-      setNotificationErrorMessage('Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.');
-      return;
-    }
-
-    setIsNotificationLoading(true);
-    setNotificationErrorMessage(null);
-
-    try {
-      const response = await fetchApi<NotificationListResponse>(buildApiUrl('/api/notifications'), {
-        method: 'GET',
-        headers: { Authorization: `Bearer ${authSession.accessToken}` }
-      });
-      applyNotificationResponse(response.data);
-    } catch (error: unknown) {
-      setNotificationErrorMessage(resolveApiErrorMessage(error, 'Không thể tải thông báo. Vui lòng thử lại sau.'));
-    } finally {
-      setIsNotificationLoading(false);
-    }
-  }, [applyNotificationResponse]);
 
   /** Hàm tải danh sách giải ngân từ backend. Mục đích: đồng bộ dữ liệu thật cho màn hình "Giải ngân". */
   const loadDisbursementsFromApi = async () => {
@@ -878,20 +818,6 @@ export default function OrganizationsPageView() {
     void loadDashboardDonationHistory(createdProjects);
   };
 
-  const systemNavigationItemsWithNotificationState = useMemo(() => {
-    return systemNavigationItems.map(item => {
-      if (item.action !== 'toggleNotification') {
-        return item;
-      }
-
-      // Logic này chỉ gắn badge cho item thông báo để reset số khi người dùng đánh dấu đã đọc.
-      return {
-        ...item,
-        badge: unreadNotificationCount > 0 ? String(unreadNotificationCount) : undefined
-      };
-    });
-  }, [unreadNotificationCount]);
-
   /** Hàm xử lý chọn trang từ sidebar. Mục đích: điều hướng trang và tắt trạng thái nhấn mạnh cài đặt ngân hàng khi rời trang. */
   const handleSelectPage = (page: OrganizationPageKey) => {
     setActivePage(page);
@@ -992,36 +918,6 @@ export default function OrganizationsPageView() {
       setIsLogoutProcessing(false);
     }
   }, [backendBaseUrl, isLogoutProcessing, router]);
-  /** Hàm đánh dấu toàn bộ thông báo đã đọc. Mục đích: cập nhật trạng thái thông báo thật và xóa badge. */
-  const handleMarkAllNotificationsAsRead = async () => {
-    const authSession = readAuthSession();
-    if (!authSession?.accessToken) {
-      setNotificationErrorMessage('Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.');
-      return;
-    }
-
-    try {
-      const response = await fetchApi<NotificationListResponse>(buildApiUrl('/api/notifications/read-all'), {
-        method: 'PATCH',
-        headers: { Authorization: `Bearer ${authSession.accessToken}` }
-      });
-      applyNotificationResponse(response.data);
-    } catch (error: unknown) {
-      setNotificationErrorMessage(resolveApiErrorMessage(error, 'Không thể đánh dấu thông báo đã đọc. Vui lòng thử lại sau.'));
-    }
-  };
-
-  /** Hàm đóng dropdown thông báo. Mục đích: gom một điểm xử lý đóng popup để tái sử dụng. */
-  const handleCloseNotificationDropdown = () => {
-    setIsNotificationOpen(false);
-  };
-
-  /** Hàm mở thông báo từ topbar. Mục đích: đồng bộ thao tác chuông thông báo giữa topbar và sidebar. */
-  const handleOpenTopbarNotification = () => {
-    setIsNotificationOpen(currentState => !currentState);
-    void loadNotificationsFromApi();
-  };
-
   /** Hàm mở menu mobile. Mục đích: giữ tương thích API của Topbar trong khi sidebar hiện tại là desktop cố định. */
   const handleOpenMobileMenu = () => {
     setIsMobileMenuOpen(true);
@@ -1048,96 +944,9 @@ export default function OrganizationsPageView() {
       loadCreateProjectEligibility(),
       loadOrganizationKycSubmissions(),
       loadDisbursementsFromApi(),
-      loadRankingFromApi(),
-      loadNotificationsFromApi()
+      loadRankingFromApi()
     ]);
-  }, [isAccessChecking, loadNotificationsFromApi]);
-
-  useEffect(() => {
-    if (isAccessChecking) {
-      return;
-    }
-
-    const authSession = readAuthSession();
-    if (!authSession?.accessToken) {
-      return;
-    }
-
-    const abortController = new AbortController();
-    let pollingInterval: ReturnType<typeof setInterval> | null = null;
-
-    /** Hàm bật polling dự phòng. Mục đích: vẫn nhận thông báo khi stream bị proxy/trình duyệt ngắt. */
-    const startFallbackPolling = () => {
-      if (pollingInterval) {
-        return;
-      }
-
-      void loadNotificationsFromApi();
-      pollingInterval = setInterval(() => {
-        void loadNotificationsFromApi();
-      }, 5000);
-    };
-
-    /** Hàm xử lý từng gói SSE. Mục đích: parse snapshot realtime và cập nhật badge thông báo. */
-    const handleNotificationStreamChunk = (streamChunk: string) => {
-      const dataLine = streamChunk.split('\n').find(lineItem => lineItem.startsWith('data: '));
-      if (!dataLine) {
-        return;
-      }
-
-      try {
-        applyNotificationResponse(JSON.parse(dataLine.replace('data: ', '')) as NotificationListResponse);
-        setNotificationErrorMessage(null);
-      } catch (_error) {
-        startFallbackPolling();
-      }
-    };
-
-    /** Hàm kết nối stream thông báo. Mục đích: nhận realtime bằng Authorization header thay vì đưa token lên URL. */
-    const connectNotificationStream = async () => {
-      try {
-        const streamResponse = await fetch(buildApiUrl('/api/notifications/stream'), {
-          method: 'GET',
-          headers: { Authorization: `Bearer ${authSession.accessToken}` },
-          signal: abortController.signal
-        });
-
-        if (!streamResponse.ok || !streamResponse.body) {
-          startFallbackPolling();
-          return;
-        }
-
-        const streamReader = streamResponse.body.getReader();
-        const textDecoder = new TextDecoder();
-        let bufferedText = '';
-
-        while (true) {
-          const { value, done } = await streamReader.read();
-          if (done) {
-            break;
-          }
-
-          bufferedText += textDecoder.decode(value, { stream: true });
-          const streamChunkList = bufferedText.split('\n\n');
-          bufferedText = streamChunkList.pop() || '';
-          streamChunkList.forEach(handleNotificationStreamChunk);
-        }
-      } catch (error: unknown) {
-        if (!abortController.signal.aborted) {
-          startFallbackPolling();
-        }
-      }
-    };
-
-    void connectNotificationStream();
-
-    return () => {
-      abortController.abort();
-      if (pollingInterval) {
-        clearInterval(pollingInterval);
-      }
-    };
-  }, [applyNotificationResponse, isAccessChecking, loadNotificationsFromApi]);
+  }, [isAccessChecking, loadCreateProjectEligibility]);
 
   useEffect(() => {
     if (isAccessChecking) {
@@ -1154,7 +963,7 @@ export default function OrganizationsPageView() {
 
     // Khi người dùng vào tab dự án, luôn re-check eligibility để đồng bộ trạng thái chặn/mở nút tạo dự án ngay lập tức.
     void loadCreateProjectEligibility();
-  }, [activePage]);
+  }, [activePage, loadCreateProjectEligibility]);
 
   if (isAccessChecking) {
     return (
@@ -1230,7 +1039,7 @@ export default function OrganizationsPageView() {
 
           <div className="px-4 py-4 text-[10px] font-semibold uppercase tracking-[0.14em] text-white/45">HỆ THỐNG</div>
           <div className="space-y-1 px-3">
-            {systemNavigationItemsWithNotificationState.map(item => (
+            {systemNavigationItems.map(item => (
               <SidebarItem
                 key={item.label}
                 item={item}
@@ -1261,9 +1070,8 @@ export default function OrganizationsPageView() {
             userDisplayName={userDisplayName}
             userEmail={userEmail}
             userWalletAddress={userWalletAddress}
-            notificationCount={unreadNotificationCount}
+            notificationContent={<NotificationBell />}
             onOpenMobileMenu={handleOpenMobileMenu}
-            onOpenNotification={handleOpenTopbarNotification}
             onLogout={() => {
               void handleLogout();
             }}
@@ -1394,7 +1202,7 @@ export default function OrganizationsPageView() {
 
               <div className="px-4 py-4 text-[10px] font-semibold uppercase tracking-[0.14em] text-white/45">HỆ THỐNG</div>
               <div className="space-y-1 px-3">
-                {systemNavigationItemsWithNotificationState.map(item => (
+                {systemNavigationItems.map(item => (
                   <SidebarItem
                     key={`mobile-${item.label}`}
                     item={item}
@@ -1415,57 +1223,6 @@ export default function OrganizationsPageView() {
         </div>
       ) : null}
 
-      {isNotificationOpen ? (
-        <NotificationDropdown
-          notificationItemList={notificationItemList}
-          unreadNotificationCount={unreadNotificationCount}
-          isNotificationLoading={isNotificationLoading}
-          notificationErrorMessage={notificationErrorMessage}
-          onMarkAllAsRead={handleMarkAllNotificationsAsRead}
-          onRequestClose={handleCloseNotificationDropdown}
-        />
-      ) : null}
-      {realtimeToastNotification ? (
-        <button
-          type="button"
-          onClick={() => {
-            setRealtimeToastNotification(null);
-            setIsNotificationOpen(true);
-            void loadNotificationsFromApi();
-          }}
-          className="fixed left-3 right-3 top-[72px] z-50 w-auto rounded-2xl border border-[#D1FAE5] bg-white p-3 text-left shadow-[0_18px_55px_rgba(15,23,42,0.18)] transition hover:-translate-y-0.5 hover:shadow-[0_22px_65px_rgba(15,23,42,0.22)] sm:left-auto sm:right-6 sm:top-20 sm:w-[360px] sm:max-w-[calc(100vw-32px)] sm:p-4"
-        >
-          <div className="flex items-start gap-3">
-            <span className="flex h-10 w-10 items-center justify-center rounded-full bg-[#ECFDF5] text-lg" aria-hidden="true">
-              {realtimeToastNotification.notificationType === 'DONATION_RECEIVED' ? '💚' : '✍️'}
-            </span>
-            <div className="min-w-0 flex-1">
-              <p className="text-sm font-bold text-[#064E3B]">{realtimeToastNotification.title}</p>
-              <p className="mt-1 text-sm leading-5 text-[#374151]">{realtimeToastNotification.content}</p>
-              <p className="mt-2 text-xs font-semibold text-[#0F766E]">Bấm để xem danh sách thông báo</p>
-            </div>
-            <span
-              role="button"
-              tabIndex={0}
-              onClick={event => {
-                event.stopPropagation();
-                setRealtimeToastNotification(null);
-              }}
-              onKeyDown={event => {
-                if (event.key === 'Enter' || event.key === ' ') {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  setRealtimeToastNotification(null);
-                }
-              }}
-              className="rounded-full px-2 text-lg leading-none text-[#9CA3AF] hover:bg-[#F3F4F6] hover:text-[#374151]"
-              aria-label="Đóng thông báo realtime"
-            >
-              ×
-            </span>
-          </div>
-        </button>
-      ) : null}
       {isCreateProjectOpen ? (
         <CreateProjectModal
           onClose={() => setIsCreateProjectOpen(false)}

@@ -1,11 +1,12 @@
+import type { ReactNode } from 'react';
+
 type TopbarProps = {
   breadcrumbTitle: string;
   userDisplayName: string;
   userEmail: string;
   userWalletAddress: string;
-  notificationCount?: number;
+  notificationContent: ReactNode;
   onOpenMobileMenu: () => void;
-  onOpenNotification: () => void;
   onLogout: () => void;
 };
 
@@ -49,14 +50,12 @@ export default function Topbar({
   userDisplayName,
   userEmail,
   userWalletAddress,
-  notificationCount = 0,
+  notificationContent,
   onOpenMobileMenu,
-  onOpenNotification,
   onLogout
 }: TopbarProps) {
   const avatarFallbackText = getAvatarFallbackText(userDisplayName);
   const { emailText, walletText } = getUserContactInfo(userEmail, userWalletAddress);
-  const hasUnreadNotification = notificationCount > 0;
 
   return (
     <header className="sticky inset-x-0 top-0 z-20 m-0 flex h-16 items-center justify-between border-b border-emerald-900/15 bg-white px-4 lg:z-10 lg:px-7">
@@ -77,21 +76,7 @@ export default function Topbar({
       </div>
 
       <div className="shrink-0 flex items-center gap-3.5">
-        <button
-          type="button"
-          onClick={onOpenNotification}
-          className="relative inline-flex h-9 w-9 items-center justify-center rounded-lg border border-emerald-900/15 text-slate-700 transition hover:bg-slate-50"
-          aria-label="Mở thông báo"
-        >
-          <svg viewBox="0 0 16 16" className="h-4 w-4" fill="currentColor" aria-hidden="true">
-            <path d="M8 2a5 5 0 00-5 5v1L2 10v1h12v-1l-1-2V7a5 5 0 00-5-5zm0 13a2 2 0 002-2H6a2 2 0 002 2z" />
-          </svg>
-          {hasUnreadNotification ? (
-            <span className="absolute -right-1 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full border-2 border-white bg-red-600 px-1 text-[9px] font-bold text-white">
-              {notificationCount > 9 ? '9+' : notificationCount}
-            </span>
-          ) : null}
-        </button>
+        {notificationContent}
 
         <div className="hidden h-6 w-px bg-emerald-900/15 sm:block" />
 

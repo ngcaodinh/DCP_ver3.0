@@ -12,6 +12,7 @@ import { useRouter } from 'next/navigation';
 import { useQueryClient } from '@tanstack/react-query';
 import Sidebar from './tailwind/Sidebar';
 import Topbar from './tailwind/Topbar';
+import NotificationBell from '@/app/components/notifications/NotificationBell';
 import MetricCard from './tailwind/MetricCard';
 import UrgentTable from './tailwind/UrgentTable';
 import DisbursementStatusCard from './tailwind/DisbursementStatusCard';
@@ -517,6 +518,7 @@ export default function AdminPageClientTailwind() {
             userDisplayName={userDisplayName}
             userEmail={userEmail}
             userWalletAddress={userWalletAddress}
+            notificationContent={<NotificationBell />}
             onLogout={handleLogout}
           />
 
@@ -661,6 +663,7 @@ export default function AdminPageClientTailwind() {
           userDisplayName={userDisplayName}
           userEmail={userEmail}
           userWalletAddress={userWalletAddress}
+          notificationContent={<NotificationBell />}
           onLogout={handleLogout}
         />
 

@@ -5,7 +5,8 @@ import {
   type NotificationPriority,
   type NotificationType,
   type NotificationDeliveryStatusMap,
-  type NotificationDeliveryState
+  type NotificationDeliveryState,
+  NOTIFICATION_PUBLIC_PROJECTION
 } from '../models/notificationModel';
 export type { NotificationDeliveryStatusMap };
 import { UserNotificationPreferenceModel } from '../models/notificationPreferenceModel';
@@ -20,6 +21,11 @@ const logger = getLogger();
 export type NotificationListResult = {
   notifications: Notification[];
   unreadCount: number;
+};
+
+/** Chỉ notification đã route vào IN_APP thuộc list/badge; record legacy thiếu channels vẫn được coi là IN_APP. */
+const IN_APP_NOTIFICATION_FILTER = {
+  $or: [{ channels: 'IN_APP' }, { channels: { $exists: false } }]
 };
 
 export type CreateNotificationPayload = {
@@ -261,13 +267,17 @@ export async function createUserNotification(payload: CreateNotificationPayload)
  */
 export async function getUserNotifications(userId: string): Promise<NotificationListResult> {
   const [notifications, unreadCount] = await Promise.all([
-    NotificationModel.find({ userId, notificationType: { $in: VISIBLE_NOTIFICATION_TYPES } })
+    NotificationModel.find(
+      { userId, notificationType: { $in: VISIBLE_NOTIFICATION_TYPES }, ...IN_APP_NOTIFICATION_FILTER },
+      NOTIFICATION_PUBLIC_PROJECTION
+    )
       .sort({ createdAt: -1 })
       .limit(100)
       .lean<Notification[]>(),
     NotificationModel.countDocuments({
       userId,
       notificationType: { $in: VISIBLE_NOTIFICATION_TYPES },
+      ...IN_APP_NOTIFICATION_FILTER,
       isRead: false
     })
   ]);
@@ -280,7 +290,7 @@ export async function getUserNotifications(userId: string): Promise<Notification
  */
 export async function markAllUserNotificationsAsRead(userId: string): Promise<NotificationListResult> {
   await NotificationModel.updateMany(
-    { userId, notificationType: { $in: VISIBLE_NOTIFICATION_TYPES }, isRead: false },
+    { userId, notificationType: { $in: VISIBLE_NOTIFICATION_TYPES }, ...IN_APP_NOTIFICATION_FILTER, isRead: false },
     { $set: { isRead: true } }
   );
   return getUserNotifications(userId);
@@ -305,7 +315,7 @@ export async function findNotificationById(notificationId: string): Promise<Noti
  */
 export async function markNotificationAsRead(notificationId: string, userId: string): Promise<Notification | null> {
   const result = await NotificationModel.findOneAndUpdate(
-    { notificationId, userId, isRead: false },
+    { notificationId, userId, ...IN_APP_NOTIFICATION_FILTER, isRead: false },
     { $set: { isRead: true } },
     { returnDocument: 'after' }
   ).lean<Notification>().exec();
@@ -323,6 +333,7 @@ export async function markNotificationAsRead(notificationId: string, userId: str
 export async function getUserPreferences(userId: string): Promise<{
   globalEnabled: boolean;
   preferences: NotificationPreferencesMap;
+  version: number;
 }> {
   let pref = await UserNotificationPreferenceModel.findOne({ userId }).lean().exec();
 
@@ -330,12 +341,24 @@ export async function getUserPreferences(userId: string): Promise<{
     pref = await UserNotificationPreferenceModel.create({
       userId,
       preferences: {},
-      globalEnabled: true
+      globalEnabled: true,
+      version: 0
     });
-    return { globalEnabled: pref.globalEnabled, preferences: pref.preferences };
+    return { globalEnabled: pref.globalEnabled, preferences: pref.preferences, version: pref.version ?? 0 };
   }
 
-  return { globalEnabled: pref.globalEnabled, preferences: pref.preferences };
+  if (pref.version === undefined) {
+    const migratedPreference = await UserNotificationPreferenceModel.findOneAndUpdate(
+      { userId },
+      { $set: { version: 0 } },
+      { returnDocument: 'after' }
+    ).lean().exec();
+    if (migratedPreference) {
+      pref = migratedPreference;
+    }
+  }
+
+  return { globalEnabled: pref.globalEnabled, preferences: pref.preferences, version: pref.version ?? 0 };
 }
 
 /**
@@ -346,30 +369,25 @@ export async function getUserPreferences(userId: string): Promise<{
  * @param payload Payload cập nhật từ client
  * @returns Updated preferences
  */
-const ALL_NOTIFICATION_TYPES = [
-  'DONATION_RECEIVED',
-  'DISBURSEMENT_SIGNED',
-  'PROJECT_APPROVED',
-  'KYC_EXPIRING',
-  'LARGE_DONATION',
-  'DISBURSEMENT_COMPLETED',
-  'MANUAL_REVIEW_ESCALATION',
-  'OVERRIDE_APPROVED',
-  'SBT_MINT_FAILED',
-  'SYSTEM'
-] as const;
+const PREFERENCE_KEY_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
+const RESERVED_PREFERENCE_KEYS = new Set(['CONSTRUCTOR', 'PROTOTYPE']);
 
-const ALL_CHANNELS = ['IN_APP', 'EMAIL', 'PUSH', 'SMS'] as const;
+/** Kiểm tra key preference mở rộng nhưng vẫn chặn dot, dollar và prototype key của Mongo/JavaScript. */
+function isSafePreferenceKey(key: string): boolean {
+  return PREFERENCE_KEY_PATTERN.test(key) && !RESERVED_PREFERENCE_KEYS.has(key);
+}
 
 export async function updateUserPreferences(
   userId: string,
   payload: {
     globalEnabled?: boolean;
     preferences?: NotificationPreferencesMap;
+    version?: number;
   }
 ): Promise<{
   globalEnabled: boolean;
   preferences: NotificationPreferencesMap;
+  version: number;
 }> {
   const updateFields: Record<string, unknown> = {};
 
@@ -379,30 +397,50 @@ export async function updateUserPreferences(
 
   if (payload.preferences !== undefined) {
     for (const [notificationType, channels] of Object.entries(payload.preferences)) {
-      if (!ALL_NOTIFICATION_TYPES.includes(notificationType as typeof ALL_NOTIFICATION_TYPES[number])) {
+      if (!isSafePreferenceKey(notificationType)) {
         throw new NotificationValidationError('INVALID_TYPE', `Loại thông báo không hợp lệ: ${notificationType}`);
       }
 
-      if (channels && typeof channels === 'object') {
-        for (const channel of Object.keys(channels)) {
-          if (!ALL_CHANNELS.includes(channel as typeof ALL_CHANNELS[number])) {
-            throw new NotificationValidationError('INVALID_CHANNEL', `Kênh không hợp lệ: ${channel}`);
-          }
+      if (!channels || typeof channels !== 'object' || Array.isArray(channels)) {
+        throw new NotificationValidationError('INVALID_CHANNEL', `Cấu trúc kênh không hợp lệ cho: ${notificationType}`);
+      }
+
+      for (const [channel, enabled] of Object.entries(channels)) {
+        if (!isSafePreferenceKey(channel)) {
+          throw new NotificationValidationError('INVALID_CHANNEL', `Kênh không hợp lệ: ${channel}`);
+        }
+        if (typeof enabled !== 'boolean') {
+          throw new NotificationValidationError('INVALID_CHANNEL', `Giá trị kênh không hợp lệ: ${channel}`);
         }
       }
     }
     updateFields.preferences = payload.preferences;
   }
 
+  const hasVersion = payload.version !== undefined;
+  if (hasVersion && (!Number.isInteger(payload.version) || (payload.version as number) < 0)) {
+    throw new NotificationValidationError('INVALID_VERSION', 'Version preference không hợp lệ.');
+  }
+
+  const filter: { userId: string; version?: number } = { userId };
+  if (hasVersion) {
+    filter.version = payload.version;
+  }
+
   const updated = await UserNotificationPreferenceModel.findOneAndUpdate(
-    { userId },
-    { $set: updateFields },
-    { upsert: true, returnDocument: 'after', runValidators: true }
+    filter,
+    { $set: updateFields, $inc: { version: 1 } },
+    { upsert: !hasVersion, returnDocument: 'after', runValidators: true }
   ).lean().exec();
+
+  if (!updated) {
+    throw new NotificationValidationError('CONFLICT', 'Cài đặt đã thay đổi ở nơi khác.');
+  }
 
   return {
     globalEnabled: (updated as { globalEnabled: boolean }).globalEnabled,
-    preferences: (updated as { preferences: NotificationPreferencesMap }).preferences
+    preferences: (updated as { preferences: NotificationPreferencesMap }).preferences,
+    version: (updated as { version?: number }).version ?? 0
   };
 }
 
@@ -430,6 +468,7 @@ export async function getUnreadCount(userId: string): Promise<number> {
   const count = await NotificationModel.countDocuments({
     userId,
     notificationType: { $in: VISIBLE_NOTIFICATION_TYPES },
+    ...IN_APP_NOTIFICATION_FILTER,
     isRead: false
   }).exec();
   return count;

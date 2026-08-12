@@ -14,7 +14,7 @@ import { sendErrorFromUnknown, sendErrorResponse, sendSuccessResponse } from '..
 import { getLogger } from '../config/logger';
 import { notificationEvents } from '../events/notificationEvents';
 import { VISIBLE_NOTIFICATION_TYPES, NotificationValidationError } from '../services/constants/notification.constants';
-import { NotificationModel } from '../models/notificationModel';
+import { NotificationModel, NOTIFICATION_PUBLIC_PROJECTION } from '../models/notificationModel';
 import type { NotificationPreferencesMap } from '../models/notificationPreferenceModel';
 
 const logger = getLogger();
@@ -80,11 +80,15 @@ async function getUserNotificationsPaginated(userId: string, skip: number, limit
     hasNextPage: boolean;
   };
 }> {
-  const query = { userId, notificationType: { $in: VISIBLE_NOTIFICATION_TYPES } };
+  const query = {
+    userId,
+    notificationType: { $in: VISIBLE_NOTIFICATION_TYPES },
+    $or: [{ channels: 'IN_APP' }, { channels: { $exists: false } }]
+  };
 
   const [notifications, total, unreadCount] = await Promise.all([
     NotificationModel
-      .find(query)
+      .find(query, NOTIFICATION_PUBLIC_PROJECTION)
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
@@ -94,6 +98,7 @@ async function getUserNotificationsPaginated(userId: string, skip: number, limit
     NotificationModel.countDocuments({
       userId,
       notificationType: { $in: VISIBLE_NOTIFICATION_TYPES },
+      $or: [{ channels: 'IN_APP' }, { channels: { $exists: false } }],
       isRead: false
     }).exec()
   ]);
@@ -262,9 +267,16 @@ export async function updateNotificationPreferencesController(
   }
 
   try {
-    const payload = request.body as {
+    const rawPayload: unknown = request.body;
+    if (rawPayload === null || typeof rawPayload !== 'object' || Array.isArray(rawPayload)) {
+      sendErrorResponse(response, 400, 'Payload preferences phải là object.', 'VALIDATION_ERROR');
+      return;
+    }
+
+    const payload = rawPayload as {
       globalEnabled?: boolean;
       preferences?: NotificationPreferencesMap;
+      version?: number;
     };
 
     // Validate payload
@@ -273,8 +285,16 @@ export async function updateNotificationPreferencesController(
       return;
     }
 
-    if (payload.preferences !== undefined && typeof payload.preferences !== 'object') {
+    if (
+      payload.preferences !== undefined &&
+      (payload.preferences === null || typeof payload.preferences !== 'object' || Array.isArray(payload.preferences))
+    ) {
       sendErrorResponse(response, 400, 'preferences phải là object.', 'VALIDATION_ERROR');
+      return;
+    }
+
+    if (payload.version !== undefined && (!Number.isInteger(payload.version) || payload.version < 0)) {
+      sendErrorResponse(response, 400, 'version phải là số nguyên không âm.', 'VALIDATION_ERROR');
       return;
     }
 
@@ -282,7 +302,7 @@ export async function updateNotificationPreferencesController(
     sendSuccessResponse(response, 200, 'Cập nhật preferences thành công.', updated);
   } catch (error: unknown) {
     if (error instanceof NotificationValidationError) {
-      sendErrorResponse(response, 400, error.message, error.code);
+      sendErrorResponse(response, error.code === 'CONFLICT' ? 409 : 400, error.message, error.code);
       return;
     }
     sendErrorFromUnknown(response, error, 'Không thể cập nhật preferences.');

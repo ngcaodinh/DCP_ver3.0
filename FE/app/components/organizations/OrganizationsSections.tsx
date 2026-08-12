@@ -4,7 +4,7 @@ import { transparencyTransactionRows } from './mockData';
 import { ApiErrorDetail, ApiErrorResponse, fetchApi, buildApiUrl } from '@/app/utils/apiClient';
 import { readAuthSession } from '@/app/utils/authSession';
 import IpfsEvidencePreviewCard from '@/app/components/common/IpfsEvidencePreviewCard';
-import { DashboardDonationHistoryItem, DashboardFeaturedProject, NotificationItem, ProjectSummary, StatisticItem, TimelineItem } from './types';
+import { DashboardDonationHistoryItem, DashboardFeaturedProject, ProjectSummary, StatisticItem, TimelineItem } from './types';
 
 type DisbursementSectionProps = {
   activeDisbursementTab: 'eligible' | 'pending' | 'history';
@@ -48,17 +48,6 @@ type ProjectsSectionProps = {
   onProjectSubmitted: (projectId: string, project: ProjectSummary) => void;
   onProjectUpdated: (projectId: string, project: ProjectSummary) => void;
 };
-
-type NotificationDropdownProps = {
-  notificationItemList: NotificationItem[];
-  unreadNotificationCount: number;
-  isNotificationLoading: boolean;
-  notificationErrorMessage: string | null;
-  onMarkAllAsRead: () => void;
-  onRequestClose: () => void;
-};
-
-type NotificationDateFilter = 'day' | 'week' | 'month';
 
 const donationHistoryPageSizeOptionList = [8, 16, 24] as const;
 
@@ -2771,181 +2760,6 @@ export function SettingsSection({
             </div>
           </SectionCard>
         ) : null}
-      </div>
-    </div>
-  );
-}
-
-/** Hàm chọn icon thông báo. Mục đích: giúp người dùng nhận diện nhanh loại thông báo. */
-function getNotificationIcon(notificationType: NotificationItem['notificationType']): string {
-  const notificationIconMap: Record<NotificationItem['notificationType'], string> = {
-    DONATION_RECEIVED: '💚',
-    DISBURSEMENT_SIGNED: '✍️'
-  };
-
-  return notificationIconMap[notificationType] || '🔔';
-}
-
-/** Hàm định dạng thời gian thông báo. Mục đích: hiển thị mốc thời gian thật ngắn gọn, dễ đọc. */
-function formatNotificationTime(createdAt: string): string {
-  const createdDate = new Date(createdAt);
-  if (Number.isNaN(createdDate.getTime())) {
-    return 'Không rõ thời gian';
-  }
-
-  return createdDate.toLocaleString('vi-VN', {
-    hour: '2-digit',
-    minute: '2-digit',
-    day: '2-digit',
-    month: '2-digit'
-  });
-}
-
-/** Hàm kiểm tra thông báo thuộc bộ lọc thời gian. Mục đích: lọc nhanh theo ngày, tuần hoặc tháng hiện tại. */
-function isNotificationInsideDateFilter(createdAt: string, selectedDateFilter: NotificationDateFilter): boolean {
-  const createdDate = new Date(createdAt);
-  if (Number.isNaN(createdDate.getTime())) {
-    return false;
-  }
-
-  const currentDate = new Date();
-  if (selectedDateFilter === 'day') {
-    return createdDate.toDateString() === currentDate.toDateString();
-  }
-
-  const currentDateStart = new Date(currentDate.getFullYear(), currentDate.getMonth(), currentDate.getDate());
-  const filterRangeInDays = selectedDateFilter === 'week' ? 7 : 30;
-  const filterStartDate = new Date(currentDateStart);
-  filterStartDate.setDate(currentDateStart.getDate() - filterRangeInDays + 1);
-
-  return createdDate >= filterStartDate && createdDate <= currentDate;
-}
-
-/** Hàm render dropdown thông báo. Mục đích: hiển thị thông báo thật từ backend theo trạng thái realtime. */
-export function NotificationDropdown({
-  notificationItemList,
-  unreadNotificationCount,
-  isNotificationLoading,
-  notificationErrorMessage,
-  onMarkAllAsRead,
-  onRequestClose
-}: NotificationDropdownProps) {
-  const dropdownContainerRef = useRef<HTMLDivElement | null>(null);
-  const hasUnreadNotification = unreadNotificationCount > 0;
-  const [selectedDateFilter, setSelectedDateFilter] = useState<NotificationDateFilter>('day');
-  const [currentNotificationPage, setCurrentNotificationPage] = useState(1);
-  const notificationPageSize = 5;
-
-  const filteredNotificationItemList = useMemo(() => {
-    return notificationItemList.filter(notificationItem => isNotificationInsideDateFilter(notificationItem.createdAt, selectedDateFilter));
-  }, [notificationItemList, selectedDateFilter]);
-
-  const totalNotificationPages = Math.max(1, Math.ceil(filteredNotificationItemList.length / notificationPageSize));
-  const paginatedNotificationItemList = useMemo(() => {
-    const startNotificationIndex = (currentNotificationPage - 1) * notificationPageSize;
-    return filteredNotificationItemList.slice(startNotificationIndex, startNotificationIndex + notificationPageSize);
-  }, [currentNotificationPage, filteredNotificationItemList]);
-
-  /** Hàm đổi bộ lọc thời gian. Mục đích: reset về trang đầu khi người dùng chuyển ngày, tuần hoặc tháng. */
-  const handleChangeDateFilter = (nextDateFilter: NotificationDateFilter) => {
-    setSelectedDateFilter(nextDateFilter);
-    setCurrentNotificationPage(1);
-  };
-
-  useEffect(() => {
-    /** Hàm xử lý click ra ngoài dropdown. Mục đích: đóng dropdown khi người dùng bấm ngoài vùng popup. */
-    const handleClickOutsideDropdown = (event: MouseEvent) => {
-      if (!dropdownContainerRef.current) {
-        return;
-      }
-
-      // Logic này kiểm tra target click có nằm ngoài vùng dropdown hay không để tránh đóng khi click bên trong.
-      if (!dropdownContainerRef.current.contains(event.target as Node)) {
-        onRequestClose();
-      }
-    };
-
-    document.addEventListener('mousedown', handleClickOutsideDropdown);
-
-    return () => {
-      document.removeEventListener('mousedown', handleClickOutsideDropdown);
-    };
-  }, [onRequestClose]);
-
-  useEffect(() => {
-    if (currentNotificationPage > totalNotificationPages) {
-      setCurrentNotificationPage(totalNotificationPages);
-    }
-  }, [currentNotificationPage, totalNotificationPages]);
-
-  return (
-    <div
-      ref={dropdownContainerRef}
-      className="fixed left-4 right-4 top-16 z-30 max-h-[calc(100vh-88px)] w-auto overflow-hidden rounded-[18px] border border-[#D1FAE5] bg-white shadow-2xl sm:left-auto sm:right-6 sm:w-[calc(100vw-32px)] sm:max-w-[420px]"
-    >
-      <div className="flex items-center justify-between border-b border-[#D1FAE5] bg-[#F8FFFD] p-4">
-        <div className="flex items-center gap-2">
-          <p className="font-semibold text-[#064E3B]">Thông báo</p>
-          {hasUnreadNotification ? <span className="inline-flex h-2 w-2 rounded-full bg-[#EF4444]" /> : null}
-        </div>
-        <button type="button" onClick={onMarkAllAsRead} disabled={!hasUnreadNotification} className="text-xs font-semibold text-[#0E7C6B] disabled:cursor-not-allowed disabled:text-[#9CA3AF]">Đánh dấu đã đọc</button>
-      </div>
-
-      <div className="border-b border-[#E5F7F2] bg-white px-4 py-3">
-        <div className="grid grid-cols-3 gap-2 rounded-2xl bg-[#ECFDF5] p-1">
-          {([
-            { key: 'day', label: 'Ngày' },
-            { key: 'week', label: 'Tuần' },
-            { key: 'month', label: 'Tháng' }
-          ] as Array<{ key: NotificationDateFilter; label: string }>).map(dateFilterItem => (
-            <button
-              key={dateFilterItem.key}
-              type="button"
-              onClick={() => handleChangeDateFilter(dateFilterItem.key)}
-              className={`rounded-xl px-3 py-2 text-xs font-bold transition ${selectedDateFilter === dateFilterItem.key ? 'bg-white text-[#047857] shadow-sm' : 'text-[#0F766E] hover:bg-white/70'}`}
-            >
-              {dateFilterItem.label}
-            </button>
-          ))}
-        </div>
-        <p className="mt-2 text-xs text-[#6B7280]">Chỉ hiển thị quyên góp dự án và chữ ký giải ngân.</p>
-      </div>
-
-      <div className="max-h-[420px] space-y-0 overflow-y-auto">
-        {isNotificationLoading ? <p className="p-4 text-sm text-[#6B7280]">Đang tải thông báo...</p> : null}
-        {!isNotificationLoading && notificationErrorMessage ? <p className="p-4 text-sm text-[#B91C1C]">{notificationErrorMessage}</p> : null}
-        {!isNotificationLoading && !notificationErrorMessage && filteredNotificationItemList.length === 0 ? <p className="p-4 text-sm text-[#6B7280]">Chưa có thông báo trong bộ lọc này.</p> : null}
-        {!isNotificationLoading && !notificationErrorMessage ? paginatedNotificationItemList.map(notificationItem => (
-          <div key={notificationItem.notificationId} className={`flex gap-3 border-b border-[#F3F4F6] p-3 last:border-b-0 ${notificationItem.isRead ? 'bg-white' : 'bg-[#F2FBFA]'}`}>
-            <span className="text-lg" aria-hidden="true">{getNotificationIcon(notificationItem.notificationType)}</span>
-            <div className="min-w-0 flex-1">
-              <p className="text-sm font-semibold text-[#111827]">{notificationItem.title}</p>
-              <p className="mt-0.5 text-sm text-[#374151]">{notificationItem.content}</p>
-              <p className="mt-1 text-xs text-[#9CA3AF]">{formatNotificationTime(notificationItem.createdAt)}</p>
-            </div>
-          </div>
-        )) : null}
-      </div>
-      <div className="flex flex-col items-stretch justify-between gap-3 border-t border-[#D1FAE5] bg-[#F8FFFD] p-3 sm:flex-row sm:items-center">
-        <button
-          type="button"
-          onClick={() => setCurrentNotificationPage(previousPage => Math.max(1, previousPage - 1))}
-          disabled={currentNotificationPage <= 1 || isNotificationLoading}
-          className="inline-flex h-9 w-full items-center justify-center rounded-xl border border-[#A7F3D0] bg-white px-3 text-xs font-bold text-[#047857] transition hover:bg-[#ECFDF5] disabled:cursor-not-allowed disabled:border-[#E5E7EB] disabled:text-[#9CA3AF] sm:w-auto"
-        >
-          Trang trước
-        </button>
-        <span className="text-xs font-semibold text-[#0F766E]" aria-live="polite">
-          Trang {currentNotificationPage} / {totalNotificationPages}
-        </span>
-        <button
-          type="button"
-          onClick={() => setCurrentNotificationPage(previousPage => Math.min(totalNotificationPages, previousPage + 1))}
-          disabled={currentNotificationPage >= totalNotificationPages || isNotificationLoading}
-          className="inline-flex h-9 w-full items-center justify-center rounded-xl border border-[#A7F3D0] bg-white px-3 text-xs font-bold text-[#047857] transition hover:bg-[#ECFDF5] disabled:cursor-not-allowed disabled:border-[#E5E7EB] disabled:text-[#9CA3AF] sm:w-auto"
-        >
-          Trang sau
-        </button>
       </div>
     </div>
   );

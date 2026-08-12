@@ -2,6 +2,7 @@
  * Test cho notificationPreferenceModel - kiểm tra unsubscribeToken field.
  */
 import { describe, it, expect } from 'vitest';
+import { UserNotificationPreferenceModel } from '../notificationPreferenceModel';
 import type { UserNotificationPreference, NotificationPreferencesMap } from '../notificationPreferenceModel';
 
 describe('UserNotificationPreferenceModel - Schema', () => {
@@ -13,6 +14,7 @@ describe('UserNotificationPreferenceModel - Schema', () => {
         LARGE_DONATION: { IN_APP: true }
       },
       globalEnabled: true,
+      version: 0,
       createdAt: new Date(),
       updatedAt: new Date()
     };
@@ -26,6 +28,7 @@ describe('UserNotificationPreferenceModel - Schema', () => {
       userId: 'user-123',
       preferences: {},
       globalEnabled: false,
+      version: 0,
       createdAt: new Date(),
       updatedAt: new Date()
     };
@@ -40,6 +43,7 @@ describe('NotificationPreferenceModel - Unsubscribe Token', () => {
       userId: 'user-123',
       preferences: {},
       globalEnabled: true,
+      version: 0,
       unsubscribeToken: 'a'.repeat(64),
       createdAt: new Date(),
       updatedAt: new Date()
@@ -79,5 +83,22 @@ describe('NotificationPreferenceModel - Preferences Map', () => {
     };
 
     expect(Object.keys(allChannels.DONATION_RECEIVED!)).toContain('IN_APP');
+  });
+
+  it('preserves future notification type and channel keys through a Mongoose document', () => {
+    const futurePreferences: NotificationPreferencesMap = {
+      FUTURE_EVENT: {
+        EMAIL: true,
+        WEBHOOK: false
+      }
+    };
+    const preferenceDocument = new UserNotificationPreferenceModel({
+      userId: 'user-future',
+      preferences: futurePreferences,
+      globalEnabled: true,
+      version: 0
+    });
+
+    expect(preferenceDocument.toObject().preferences).toEqual(futurePreferences);
   });
 });

@@ -21,6 +21,17 @@ vi.mock('../../config/logger', () => ({
  * Mock NotificationModel
  */
 vi.mock('../../models/notificationModel', () => ({
+  NOTIFICATION_PUBLIC_PROJECTION: {
+    _id: 0,
+    notificationId: 1,
+    notificationType: 1,
+    title: 1,
+    content: 1,
+    isRead: 1,
+    metadata: 1,
+    channels: 1,
+    createdAt: 1
+  },
   NotificationModel: {
     find: vi.fn().mockReturnThis(),
     countDocuments: vi.fn().mockReturnThis(),
@@ -76,15 +87,15 @@ vi.mock('../../utils/applicationError', () => ({
  * Mock NotificationValidationError — hoisted BEFORE vi.mock so the factory can reference it.
  * Renamed to MockNVE to avoid shadowing the imported mock.
  */
-const MockNVE = vi.hoisted<new (code: 'INVALID_TYPE' | 'INVALID_CHANNEL', message: string) => {
-  code: 'INVALID_TYPE' | 'INVALID_CHANNEL';
+const MockNVE = vi.hoisted<new (code: 'INVALID_TYPE' | 'INVALID_CHANNEL' | 'INVALID_VERSION' | 'CONFLICT', message: string) => {
+  code: 'INVALID_TYPE' | 'INVALID_CHANNEL' | 'INVALID_VERSION' | 'CONFLICT';
   name: string;
   message: string;
 }>(() => {
   class NotificationValidationError extends Error {
-    public readonly code: 'INVALID_TYPE' | 'INVALID_CHANNEL';
+    public readonly code: 'INVALID_TYPE' | 'INVALID_CHANNEL' | 'INVALID_VERSION' | 'CONFLICT';
 
-    constructor(code: 'INVALID_TYPE' | 'INVALID_CHANNEL', message: string) {
+    constructor(code: 'INVALID_TYPE' | 'INVALID_CHANNEL' | 'INVALID_VERSION' | 'CONFLICT', message: string) {
       super(message);
       this.name = 'NotificationValidationError';
       this.code = code;
@@ -226,6 +237,7 @@ describe('notificationController', () => {
   describe('getNotificationPreferencesController', () => {
     it('tra 200 voi preferences khi thanh cong', async () => {
       const mockPrefs = {
+        version: 0,
         globalEnabled: true,
         preferences: {
           LARGE_DONATION: { IN_APP: true, EMAIL: true }
@@ -282,8 +294,34 @@ describe('notificationController', () => {
       }));
     });
 
+    it('tra 400 khi request body khong phai object', async () => {
+      const req = buildMockRequest({ body: [] as never });
+      const { response, jsonMock, statusMock } = buildMockResponse();
+
+      await updateNotificationPreferencesController(req, response);
+
+      expect(statusMock).toHaveBeenCalledWith(400);
+      expect(jsonMock).toHaveBeenCalledWith(expect.objectContaining({
+        errorCode: 'VALIDATION_ERROR'
+      }));
+    });
+
+    it('trả message UTF-8 đúng khi version không hợp lệ', async () => {
+      const req = buildMockRequest({ body: { version: -1 } });
+      const { response, jsonMock, statusMock } = buildMockResponse();
+
+      await updateNotificationPreferencesController(req, response);
+
+      expect(statusMock).toHaveBeenCalledWith(400);
+      expect(jsonMock).toHaveBeenCalledWith(expect.objectContaining({
+        message: 'version phải là số nguyên không âm.',
+        errorCode: 'VALIDATION_ERROR'
+      }));
+    });
+
     it('tra 200 khi update thanh cong', async () => {
       const mockUpdated = {
+        version: 1,
         globalEnabled: false,
         preferences: { LARGE_DONATION: { EMAIL: false } }
       };
@@ -336,6 +374,24 @@ describe('notificationController', () => {
       expect(statusMock).toHaveBeenCalledWith(400);
       expect(jsonMock).toHaveBeenCalledWith(expect.objectContaining({
         errorCode: 'INVALID_CHANNEL'
+      }));
+    });
+
+    it('tra 409 khi version bi conflict', async () => {
+      vi.mocked(updateUserPreferences).mockRejectedValue(
+        new MockNVE('CONFLICT', 'Cài đặt đã thay đổi ở nơi khác.')
+      );
+
+      const req = buildMockRequest({
+        body: { version: 0, preferences: { LARGE_DONATION: { EMAIL: false } } }
+      });
+      const { response, jsonMock, statusMock } = buildMockResponse();
+
+      await updateNotificationPreferencesController(req, response);
+
+      expect(statusMock).toHaveBeenCalledWith(409);
+      expect(jsonMock).toHaveBeenCalledWith(expect.objectContaining({
+        errorCode: 'CONFLICT'
       }));
     });
 
@@ -495,6 +551,11 @@ describe('notificationController', () => {
       await getNotificationsController(req, response);
 
       expect(statusMock).toHaveBeenCalledWith(200);
+      expect(NotificationModel.find).toHaveBeenCalledWith(
+        expect.any(Object),
+        expect.objectContaining({ _id: 0, notificationId: 1, metadata: 1 })
+      );
+      expect(vi.mocked(NotificationModel.find).mock.calls[0]?.[1]).not.toHaveProperty('lastError');
       expect(jsonMock).toHaveBeenCalledWith(expect.objectContaining({ success: true }));
     });
 

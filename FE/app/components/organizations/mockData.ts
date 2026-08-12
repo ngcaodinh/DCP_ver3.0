@@ -10,7 +10,6 @@ export const financeNavigationItems: NavigationItem[] = [
 ];
 
 export const systemNavigationItems: NavigationItem[] = [
-  { icon: '🔔', label: 'Thông báo', action: 'toggleNotification' },
   { icon: '⚙️', label: 'Cài đặt', page: 'settings' }
 ];
 

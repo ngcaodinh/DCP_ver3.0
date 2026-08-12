@@ -108,9 +108,9 @@ export const VISIBLE_NOTIFICATION_TYPES = [
  * Dùng typed error codes thay vì string matching trong controller.
  */
 export class NotificationValidationError extends Error {
-  public readonly code: 'INVALID_TYPE' | 'INVALID_CHANNEL';
+  public readonly code: 'INVALID_TYPE' | 'INVALID_CHANNEL' | 'INVALID_VERSION' | 'CONFLICT';
 
-  constructor(code: 'INVALID_TYPE' | 'INVALID_CHANNEL', detail: string) {
+  constructor(code: 'INVALID_TYPE' | 'INVALID_CHANNEL' | 'INVALID_VERSION' | 'CONFLICT', detail: string) {
     super(detail);
     this.name = 'NotificationValidationError';
     this.code = code;

@@ -5,7 +5,7 @@ export type NavigationItem = {
   label: string;
   page?: OrganizationPageKey;
   badge?: string;
-  action?: 'createProject' | 'toggleNotification';
+  action?: 'createProject';
 };
 
 export type StatisticItem = {
@@ -37,15 +37,6 @@ export type TimelineItem = {
   dotStyle: string;
   content: string;
   time: string;
-};
-
-export type NotificationItem = {
-  notificationId: string;
-  notificationType: 'DONATION_RECEIVED' | 'DISBURSEMENT_SIGNED';
-  title: string;
-  content: string;
-  isRead: boolean;
-  createdAt: string;
 };
 
 export type DashboardFeaturedProject = {

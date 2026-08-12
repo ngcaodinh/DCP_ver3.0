@@ -17,6 +17,7 @@ export type NotificationPreferencesMap = {
     EMAIL?: boolean;
     PUSH?: boolean;
     SMS?: boolean;
+    [channel: string]: boolean | undefined;
   };
 };
 
@@ -25,25 +26,22 @@ export type UserNotificationPreference = {
   preferences: NotificationPreferencesMap;
   /** Master switch: nếu false → skip toàn bộ notification dù type nào. */
   globalEnabled: boolean;
+  /** Version tÄƒng nguyÃªn tá»­ sau má»—i cáº­p nháº­t Ä‘á»ƒ phÃ¡t hiá»‡n lost update giá»¯a nhiá»u client. */
+  version: number;
   /** Token để user hủy đăng ký notification qua link email (không cần login). */
   unsubscribeToken?: string;
   createdAt: Date;
   updatedAt: Date;
 };
 
-const preferencesSchema = new Schema<NotificationPreferencesMap>(
-  {
-    type: Schema.Types.Mixed,
-    default: {}
-  },
-  { _id: false }
-);
-
 const userNotificationPreferenceSchema = new Schema<UserNotificationPreference>(
   {
     userId: { type: String, required: true, unique: true, index: true },
-    preferences: { type: preferencesSchema, required: true, default: {} },
+    // Map type/channel co the mo rong; service validate key truoc khi luu.
+    // Mixed giu nguyen key tuong lai thay vi de Mongoose tu dong loai bo.
+    preferences: { type: Schema.Types.Mixed, required: true, default: {} },
     globalEnabled: { type: Boolean, required: true, default: true },
+    version: { type: Number, required: true, default: 0 },
     /** Token để user hủy đăng ký notification qua link email (không cần login). */
     unsubscribeToken: { type: String, sparse: true, index: true }
   },

@@ -1,50 +1,48 @@
-/**
- * Unit tests cho cac ham moi trong notificationService.ts — E3 Notification API Endpoints.
- * Bao gồm: deleteUserNotification, getUnreadCount, markNotificationAsRead,
- * getUserPreferences, updateUserPreferences.
- */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   deleteUserNotification,
   getUnreadCount,
   getUserPreferences,
-  updateUserPreferences,
-  markNotificationAsRead
+  markNotificationAsRead,
+  updateUserPreferences
 } from '../../services/notificationService';
 
-// Mock functions — phai dung vi.hoisted() de tranh hoisting issue voi vi.mock
-const mocks = vi.hoisted(() => {
-  const deleteOneExec = vi.fn();
-  const countDocumentsExec = vi.fn();
-  const findOneAndUpdateLeanExec = vi.fn();
-  const preferenceFindOneLeanExec = vi.fn();
-  const preferenceCreate = vi.fn();
-  const preferenceFindOneAndUpdateLeanExec = vi.fn();
-  return { deleteOneExec, countDocumentsExec, findOneAndUpdateLeanExec, preferenceFindOneLeanExec, preferenceCreate, preferenceFindOneAndUpdateLeanExec };
-});
+const mocks = vi.hoisted(() => ({
+  deleteOneExec: vi.fn(),
+  deleteOne: vi.fn(),
+  countDocuments: vi.fn(),
+  countDocumentsExec: vi.fn(),
+  findOneAndUpdateLeanExec: vi.fn(),
+  preferenceFindOneLeanExec: vi.fn(),
+  preferenceCreate: vi.fn(),
+  preferenceFindOneAndUpdate: vi.fn(),
+  preferenceFindOneAndUpdateLeanExec: vi.fn()
+}));
 
-vi.mock('../../models/notificationModel', () => {
-  // Sử dụng closure để capture hoisted mock functions — tránh vi.fn() shadowing
-  const { deleteOneExec, countDocumentsExec, findOneAndUpdateLeanExec } = mocks;
-  return {
-    NotificationModel: {
-      findOneAndUpdate: () => ({ lean: () => ({ exec: findOneAndUpdateLeanExec }) }),
-      countDocuments: () => ({ exec: countDocumentsExec }),
-      deleteOne: () => ({ exec: deleteOneExec })
+vi.mock('../../models/notificationModel', () => ({
+  NotificationModel: {
+    findOneAndUpdate: () => ({ lean: () => ({ exec: mocks.findOneAndUpdateLeanExec }) }),
+    countDocuments: (...args: unknown[]) => {
+      mocks.countDocuments(...args);
+      return { exec: mocks.countDocumentsExec };
+    },
+    deleteOne: (...args: unknown[]) => {
+      mocks.deleteOne(...args);
+      return { exec: mocks.deleteOneExec };
     }
-  };
-});
+  }
+}));
 
-vi.mock('../../models/notificationPreferenceModel', () => {
-  const { preferenceFindOneLeanExec, preferenceCreate, preferenceFindOneAndUpdateLeanExec } = mocks;
-  return {
-    UserNotificationPreferenceModel: {
-      findOne: () => ({ lean: () => ({ exec: preferenceFindOneLeanExec }) }),
-      create: preferenceCreate,
-      findOneAndUpdate: () => ({ lean: () => ({ exec: preferenceFindOneAndUpdateLeanExec }) })
+vi.mock('../../models/notificationPreferenceModel', () => ({
+  UserNotificationPreferenceModel: {
+    findOne: () => ({ lean: () => ({ exec: mocks.preferenceFindOneLeanExec }) }),
+    create: mocks.preferenceCreate,
+    findOneAndUpdate: (...args: unknown[]) => {
+      mocks.preferenceFindOneAndUpdate(...args);
+      return { lean: () => ({ exec: mocks.preferenceFindOneAndUpdateLeanExec }) };
     }
-  };
-});
+  }
+}));
 
 vi.mock('../../queues/notificationQueue', () => ({
   enqueueNotification: vi.fn(),
@@ -59,177 +57,187 @@ vi.mock('../../queues/notificationQueue', () => ({
   }
 }));
 
-// Tests for deleteUserNotification
-describe('deleteUserNotification', () => {
-  afterEach(() => {
-    // Khong clear mock giua cac test vi mock la singleton cho ca file
+describe('notificationService preference and notification operations', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
   });
 
-  it('tra true khi xoa thanh cong', async () => {
+  it('xóa notification chỉ khi thuộc user hiện tại', async () => {
     mocks.deleteOneExec.mockResolvedValue({ deletedCount: 1 });
 
-    const result = await deleteUserNotification('NOTI-123', 'user-1');
-    expect(result).toBe(true);
+    await expect(deleteUserNotification('NOTI-123', 'user-1')).resolves.toBe(true);
+    expect(mocks.deleteOne).toHaveBeenCalledWith({ notificationId: 'NOTI-123', userId: 'user-1' });
   });
 
-  it('tra false khi khong tim thay hoac khong thuoc user', async () => {
+  it('trả false khi notification không tồn tại', async () => {
     mocks.deleteOneExec.mockResolvedValue({ deletedCount: 0 });
 
-    const result = await deleteUserNotification('NOTI-999', 'user-1');
-    expect(result).toBe(false);
+    await expect(deleteUserNotification('NOTI-999', 'user-1')).resolves.toBe(false);
   });
 
-  it('chi xoa notification thuoc user (IDOR protection)', async () => {
-    mocks.deleteOneExec.mockResolvedValue({ deletedCount: 1 });
-
-    const result = await deleteUserNotification('NOTI-123', 'user-specific');
-    expect(result).toBe(true);
-    expect(mocks.deleteOneExec).toHaveBeenCalled();
-  });
-});
-
-// Tests for getUnreadCount
-describe('getUnreadCount', () => {
-  afterEach(() => {
-    // Khong clear mock giua cac test vi mock la singleton cho ca file
-  });
-
-  it('tra so luong notification chua doc', async () => {
+  it('đếm unread notification', async () => {
     mocks.countDocumentsExec.mockResolvedValue(7);
 
-    const result = await getUnreadCount('user-1');
-    expect(result).toBe(7);
+    await expect(getUnreadCount('user-1')).resolves.toBe(7);
+    expect(mocks.countDocuments).toHaveBeenCalledWith(expect.objectContaining({
+      userId: 'user-1',
+      notificationType: { $in: expect.arrayContaining(['DONATION_RECEIVED', 'DISBURSEMENT_SIGNED']) },
+      $or: [{ channels: 'IN_APP' }, { channels: { $exists: false } }],
+      isRead: false
+    }));
   });
 
-  it('tra 0 khi khong co notification nao', async () => {
+  it('returns zero when the user has no unread notifications', async () => {
     mocks.countDocumentsExec.mockResolvedValue(0);
 
-    const result = await getUnreadCount('user-new');
-    expect(result).toBe(0);
+    await expect(getUnreadCount('new-user')).resolves.toBe(0);
   });
 
-  it('chi dem notification cua user hien tai', async () => {
-    mocks.countDocumentsExec.mockResolvedValue(3);
-
-    const result = await getUnreadCount('user-2');
-
-    expect(mocks.countDocumentsExec).toHaveBeenCalled();
-    expect(result).toBe(3);
-  });
-});
-
-// Tests for markNotificationAsRead
-describe('markNotificationAsRead', () => {
-  afterEach(() => {
-    // Khong clear mock giua cac test vi mock la singleton cho ca file
-  });
-
-  it('tra notification da cap nhat khi thanh cong', async () => {
+  it('mark-read trả notification đã cập nhật và giữ IDOR filter', async () => {
     mocks.findOneAndUpdateLeanExec.mockResolvedValue({ notificationId: 'NOTI-123', isRead: true });
 
-    const result = await markNotificationAsRead('NOTI-123', 'user-1');
-    expect(result).not.toBeNull();
+    await expect(markNotificationAsRead('NOTI-123', 'user-1')).resolves.toMatchObject({ isRead: true });
+    expect(mocks.findOneAndUpdateLeanExec).toHaveBeenCalledTimes(1);
   });
 
-  it('tra null khi khong tim thay', async () => {
+  it('returns null when mark-read cannot find the notification', async () => {
     mocks.findOneAndUpdateLeanExec.mockResolvedValue(null);
 
-    const result = await markNotificationAsRead('NOTI-999', 'user-1');
-    expect(result).toBeNull();
+    await expect(markNotificationAsRead('NOTI-MISSING', 'user-1')).resolves.toBeNull();
   });
 
-  it('chi cap nhat notification thuoc user (IDOR protection)', async () => {
-    // Khi userId khong khop, MongoDB khong tim thay record -> tra null
-    mocks.findOneAndUpdateLeanExec.mockResolvedValue(null);
-
-    const result = await markNotificationAsRead('NOTI-123', 'user-other');
-
-    // Service tra null khi notification khong thuoc user
-    expect(result).toBeNull();
-    // Verify mock duoc goi (IDOR check da thuc hien)
-    expect(mocks.findOneAndUpdateLeanExec).toHaveBeenCalled();
-  });
-});
-
-// Tests for getUserPreferences
-describe('getUserPreferences', () => {
-  afterEach(() => {
-    // Khong clear mock giua cac test vi mock la singleton cho ca file
-  });
-
-  it('tra preferences cua user khi co record', async () => {
+  it('lấy preference hiện tại và version', async () => {
     mocks.preferenceFindOneLeanExec.mockResolvedValue({
       userId: 'user-1',
       globalEnabled: true,
+      version: 4,
       preferences: { LARGE_DONATION: { IN_APP: true } }
     });
 
-    const result = await getUserPreferences('user-1');
-    expect(result.globalEnabled).toBe(true);
-    expect(result.preferences).toHaveProperty('LARGE_DONATION');
+    await expect(getUserPreferences('user-1')).resolves.toEqual({
+      globalEnabled: true,
+      version: 4,
+      preferences: { LARGE_DONATION: { IN_APP: true } }
+    });
   });
 
-  it('tao record moi voi default khi user chua co preferences', async () => {
+  it('tạo preference mặc định với version 0 khi chưa có record', async () => {
     mocks.preferenceFindOneLeanExec.mockResolvedValue(null);
     mocks.preferenceCreate.mockResolvedValue({
       userId: 'user-new',
       globalEnabled: true,
+      version: 0,
       preferences: {}
     });
 
-    const result = await getUserPreferences('user-new');
-    expect(result.globalEnabled).toBe(true);
+    await expect(getUserPreferences('user-new')).resolves.toEqual({ globalEnabled: true, version: 0, preferences: {} });
     expect(mocks.preferenceCreate).toHaveBeenCalledWith({
       userId: 'user-new',
       preferences: {},
       globalEnabled: true,
-      unsubscribeToken: undefined
+      version: 0
     });
   });
-});
 
-// Tests for updateUserPreferences
-describe('updateUserPreferences', () => {
-  afterEach(() => {
-    // Khong clear mock giua cac test vi mock la singleton cho ca file
+  it('migrate record cũ chưa có version trước khi FE cập nhật', async () => {
+    mocks.preferenceFindOneLeanExec.mockResolvedValue({ userId: 'legacy-user', globalEnabled: true, preferences: {} });
+    mocks.preferenceFindOneAndUpdateLeanExec.mockResolvedValue({ userId: 'legacy-user', globalEnabled: true, preferences: {}, version: 0 });
+
+    await expect(getUserPreferences('legacy-user')).resolves.toMatchObject({ version: 0 });
+    expect(mocks.preferenceFindOneAndUpdate).toHaveBeenCalledWith(
+      { userId: 'legacy-user' },
+      { $set: { version: 0 } },
+      { returnDocument: 'after' }
+    );
   });
 
-  it('update globalEnabled khi duoc cung cap', async () => {
-    mocks.preferenceFindOneAndUpdateLeanExec.mockResolvedValue({
-      globalEnabled: false,
-      preferences: {}
-    });
-
-    const result = await updateUserPreferences('user-1', { globalEnabled: false });
-    expect(result.globalEnabled).toBe(false);
+  it('từ chối notification type có key không an toàn', async () => {
+    await expect(updateUserPreferences('user-1', {
+      preferences: { 'invalid.type': { IN_APP: true } }
+    })).rejects.toMatchObject({ code: 'INVALID_TYPE' });
   });
 
-  it('nem loi khi notification type khong hop le', async () => {
-    await expect(
-      updateUserPreferences('user-1', {
-        preferences: { INVALID_TYPE: { IN_APP: true } }
-      })
-    ).rejects.toThrow('Loại thông báo không hợp lệ: INVALID_TYPE');
+  it('rejects prototype keys in preference maps', async () => {
+    await expect(updateUserPreferences('user-1', {
+      preferences: { CONSTRUCTOR: { IN_APP: true } }
+    })).rejects.toMatchObject({ code: 'INVALID_TYPE' });
   });
 
-  it('nem loi khi channel khong hop le', async () => {
-    // Cast payload thành 'any' để inject channel không tồn tại trong literal type union
-    await expect(
-      updateUserPreferences('user-1', {
-        preferences: { LARGE_DONATION: { FAX: true } as unknown as { IN_APP?: boolean } }
-      } as Parameters<typeof updateUserPreferences>[1])
-    ).rejects.toThrow('Kênh không hợp lệ: FAX');
+  it('từ chối channel có key không an toàn', async () => {
+    await expect(updateUserPreferences('user-1', {
+      preferences: { LARGE_DONATION: { fax: true } }
+    })).rejects.toMatchObject({ code: 'INVALID_CHANNEL' });
   });
 
-  it('update preferences cu the khi hop le', async () => {
+  it('từ chối channel có giá trị không phải boolean', async () => {
+    await expect(updateUserPreferences('user-1', {
+      preferences: { LARGE_DONATION: { CUSTOM: 'yes' as unknown as boolean } }
+    })).rejects.toMatchObject({ code: 'INVALID_CHANNEL' });
+  });
+
+  it('cho phép và bảo toàn notification type/channel future an toàn', async () => {
     mocks.preferenceFindOneAndUpdateLeanExec.mockResolvedValue({
       globalEnabled: true,
-      preferences: { LARGE_DONATION: { EMAIL: false } }
+      preferences: { FUTURE_NOTIFICATION_TYPE: { CUSTOM: true } },
+      version: 1
     });
 
     const result = await updateUserPreferences('user-1', {
-      preferences: { LARGE_DONATION: { EMAIL: false } }
+      preferences: { FUTURE_NOTIFICATION_TYPE: { CUSTOM: true } },
+      version: 0
     });
-    expect(result.preferences).toHaveProperty('LARGE_DONATION');
+
+    expect(result.preferences.FUTURE_NOTIFICATION_TYPE?.CUSTOM).toBe(true);
+    expect(result.version).toBe(1);
+    expect(mocks.preferenceFindOneAndUpdate).toHaveBeenCalledWith(
+      { userId: 'user-1', version: 0 },
+      { $set: { preferences: { FUTURE_NOTIFICATION_TYPE: { CUSTOM: true } } }, $inc: { version: 1 } },
+      { upsert: false, returnDocument: 'after', runValidators: true }
+    );
+  });
+
+  it('trả conflict khi version stale để ngăn lost update', async () => {
+    mocks.preferenceFindOneAndUpdateLeanExec.mockResolvedValueOnce(null);
+
+    await expect(updateUserPreferences('user-1', {
+      preferences: { LARGE_DONATION: { EMAIL: false } },
+      version: 0
+    })).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+
+  it('rejects invalid versions as validation errors', async () => {
+    await expect(updateUserPreferences('user-1', {
+      preferences: {},
+      version: -1
+    })).rejects.toMatchObject({ code: 'INVALID_VERSION' });
+  });
+
+  it('cập nhật globalEnabled theo legacy payload không có version', async () => {
+    mocks.preferenceFindOneAndUpdateLeanExec.mockResolvedValue({
+      globalEnabled: false,
+      preferences: {},
+      version: 1
+    });
+
+    await expect(updateUserPreferences('user-1', { globalEnabled: false })).resolves.toEqual({
+      globalEnabled: false,
+      preferences: {},
+      version: 1
+    });
+  });
+
+  it('updates a valid full preference map without a version', async () => {
+    mocks.preferenceFindOneAndUpdateLeanExec.mockResolvedValue({
+      globalEnabled: true,
+      preferences: { LARGE_DONATION: { EMAIL: false } },
+      version: 1
+    });
+
+    await expect(updateUserPreferences('user-1', {
+      preferences: { LARGE_DONATION: { EMAIL: false } }
+    })).resolves.toMatchObject({
+      preferences: { LARGE_DONATION: { EMAIL: false } },
+      version: 1
+    });
   });
 });

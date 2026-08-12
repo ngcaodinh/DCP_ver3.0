@@ -71,6 +71,19 @@ export type Notification = {
   updatedAt: Date;
 };
 
+/** Projection public cho notification list, loại bỏ user identity và delivery diagnostics nội bộ. */
+export const NOTIFICATION_PUBLIC_PROJECTION = {
+  _id: 0,
+  notificationId: 1,
+  notificationType: 1,
+  title: 1,
+  content: 1,
+  isRead: 1,
+  metadata: 1,
+  channels: 1,
+  createdAt: 1
+} as const;
+
 const channelDeliveryStatusSchema = new Schema(
   {
     channel: { type: String, required: true, enum: ['IN_APP', 'EMAIL', 'PUSH', 'SMS'] },
@@ -124,6 +137,8 @@ const notificationSchema = new Schema<Notification>(
 
 notificationSchema.index({ userId: 1, isRead: 1, createdAt: -1 });
 notificationSchema.index({ userId: 1, createdAt: -1 });
+// Phục vụ list notification theo user/type với thứ tự mới nhất trước, tránh lọc type ngoài index.
+notificationSchema.index({ userId: 1, notificationType: 1, createdAt: -1 });
 // Index phục vụ DLQ monitor (admin view) — filter notification FAILED theo thời gian.
 notificationSchema.index({ deliveryState: 1, updatedAt: -1 });
 // Sparse unique — chỉ enforce uniqueness khi có deduplicationKey (null không conflict).

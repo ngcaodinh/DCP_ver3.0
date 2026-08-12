@@ -1,5 +1,7 @@
 'use client';
 
+import type { ReactNode } from 'react';
+
 // =============================================================================
 // Topbar cho System Admin Page
 // Clone from: FE/app/components/regulatoryBodies/tailwind/Topbar.tsx
@@ -12,9 +14,8 @@ type TopbarProps = {
   userEmail: string;
   userWalletAddress: string;
   onOpenMobileMenu?: () => void;
-  onOpenNotification?: () => void;
+  notificationContent: ReactNode;
   onLogout: () => void;
-  notificationCount?: number;
 };
 
 /** Trả về chữ cái đầu tiên của tên hiển thị avatar. */
@@ -30,9 +31,8 @@ export default function Topbar({
   userEmail,
   userWalletAddress,
   onOpenMobileMenu,
-  onOpenNotification,
+  notificationContent,
   onLogout,
-  notificationCount = 0,
 }: TopbarProps) {
   const avatarFallbackText = getAvatarFallbackText(userDisplayName);
   const shortWalletAddress = userWalletAddress.length > 15
@@ -62,35 +62,7 @@ export default function Topbar({
 
       {/* Right: notification bell + user info + logout */}
       <div className="flex items-center gap-3.5">
-        {/* Notification bell */}
-        {onOpenNotification ? (
-          <button
-            type="button"
-            onClick={onOpenNotification}
-            className="relative inline-flex h-9 w-9 items-center justify-center rounded-lg border border-emerald-900/15 text-slate-700 transition hover:bg-slate-50"
-            aria-label="Mở thông báo"
-          >
-            <svg viewBox="0 0 16 16" className="h-4 w-4" fill="currentColor" aria-hidden="true">
-              <path d="M8 2a5 5 0 00-5 5v1L2 10v1h12v-1l-1-2V7a5 5 0 00-5-5zm0 13a2 2 0 002-2H6a2 2 0 002 2z" />
-            </svg>
-            {notificationCount > 0 && (
-              <span className="absolute -right-1 -top-1 inline-flex h-4 w-4 items-center justify-center rounded-full border-2 border-white bg-red-600 text-[9px] font-bold text-white">
-                {notificationCount > 9 ? '9+' : notificationCount}
-              </span>
-            )}
-          </button>
-        ) : (
-          <div className="relative inline-flex h-9 w-9 items-center justify-center rounded-lg border border-emerald-900/15 text-slate-700">
-            <svg viewBox="0 0 16 16" className="h-4 w-4" fill="currentColor" aria-hidden="true">
-              <path d="M8 2a5 5 0 00-5 5v1L2 10v1h12v-1l-1-2V7a5 5 0 00-5-5zm0 13a2 2 0 002-2H6a2 2 0 002 2z" />
-            </svg>
-            {notificationCount > 0 && (
-              <span className="absolute -right-1 -top-1 inline-flex h-4 w-4 items-center justify-center rounded-full border-2 border-white bg-red-600 text-[9px] font-bold text-white">
-                {notificationCount > 9 ? '9+' : notificationCount}
-              </span>
-            )}
-          </div>
-        )}
+        {notificationContent}
 
         <div className="hidden h-6 w-px bg-emerald-900/15 sm:block" />
 

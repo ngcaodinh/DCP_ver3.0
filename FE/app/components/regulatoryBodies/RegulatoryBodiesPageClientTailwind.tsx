@@ -15,6 +15,7 @@ import RequestDrawer from './tailwind/RequestDrawer';
 import Sidebar from './tailwind/Sidebar';
 import ToastStack from './tailwind/ToastStack';
 import Topbar from './tailwind/Topbar';
+import NotificationBell from '@/app/components/notifications/NotificationBell';
 import type { AuditLogItem, DrawerTabKey, PageKey, ToastItem, UrgentRequestItem } from './tailwind/types';
 import UrgentTable from './tailwind/UrgentTable';
 import OverrideVoteDrawer from '../systemAdmin/tailwind/OverrideVoteDrawer';
@@ -291,13 +292,13 @@ export default function RegulatoryBodiesPageClientTailwind() {
   }, [isMobileMenuOpen, selectedUrgentRequestItem]);
 
   /** Hàm thêm toast và tự đóng sau 3 giây để phản hồi nhanh mà không cản thao tác. */
-  function pushToast(titleText: string, bodyText: string, tone: 'success' | 'error' | 'info') {
+  const pushToast = useCallback((titleText: string, bodyText: string, tone: 'success' | 'error' | 'info'): void => {
     const newToastItem = buildToastItem(titleText, bodyText, tone);
     setToastItemList((previousToastItemList) => [...previousToastItemList, newToastItem]);
     window.setTimeout(() => {
       setToastItemList((previousToastItemList) => previousToastItemList.filter((toastItem) => toastItem.id !== newToastItem.id));
     }, 3000);
-  }
+  }, []);
 
   // Override socket — regulatory commissioner nhận event ghi đè GPS realtime (B4).
   // Hàm sync số lượng pending overrides bằng cách invalidate cache TanStack Query
@@ -511,7 +512,7 @@ export default function RegulatoryBodiesPageClientTailwind() {
     } finally {
       setIsActionProcessing(false);
     }
-  }, [isActionProcessing, loadDashboardData, selectedUrgentRequestItem, submitDisbursementAction]);
+  }, [isActionProcessing, loadDashboardData, pushToast, selectedUrgentRequestItem, submitDisbursementAction]);
 
   /** Hàm từ chối từ drawer, nhận lý do đã được nhập trong form để đảm bảo audit trail rõ ràng. */
   const handleRejectFromDrawer = useCallback(async (rejectReason: string): Promise<void> => {
@@ -537,7 +538,7 @@ export default function RegulatoryBodiesPageClientTailwind() {
     } finally {
       setIsActionProcessing(false);
     }
-  }, [isActionProcessing, loadDashboardData, selectedUrgentRequestItem, submitDisbursementAction]);
+  }, [isActionProcessing, loadDashboardData, pushToast, selectedUrgentRequestItem, submitDisbursementAction]);
 
   /** Hàm chạy guard phân quyền khi component mount. */
   useEffect(() => {
@@ -582,8 +583,8 @@ export default function RegulatoryBodiesPageClientTailwind() {
           userDisplayName={userDisplayName}
           userEmail={userEmail}
           userWalletAddress={userWalletAddress}
+          notificationContent={<NotificationBell />}
           onOpenMobileMenu={() => setIsMobileMenuOpen(true)}
-          onOpenNotification={() => pushToast('Thông báo mới', `Bạn có ${urgentRequestItemList.length} yêu cầu cần xử lý.`, 'info')}
           onLogout={handleLogout}
         />
 
