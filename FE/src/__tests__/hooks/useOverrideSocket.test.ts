@@ -124,7 +124,7 @@ describe('useOverrideSocket', () => {
     // Connect lại → polling bị stop
     const connectHandlers = eventHandlers['connect'] ?? [];
     act(() => {
-      connectHandlers.forEach((h) => h());
+      connectHandlers.forEach((h) => h(undefined));
     });
 
     onEvent.mockClear();

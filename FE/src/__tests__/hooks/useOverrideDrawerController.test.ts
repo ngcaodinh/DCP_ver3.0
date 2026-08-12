@@ -148,8 +148,7 @@ describe('useOverrideDrawerController', () => {
       capturedOnEvent?.({
         type: 'override:resolved',
         overrideRequestId: 'req-resolved-789',
-        projectId: 'proj-003',
-        reason: 'OUT_OF_GEOFENCE',
+        status: 'APPROVED',
         timestamp: new Date().toISOString()
       });
     });
