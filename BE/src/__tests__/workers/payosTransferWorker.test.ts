@@ -644,6 +644,30 @@ describe('payosTransferWorker - processTransferJob', () => {
     expect(disbursementModel.updateDisbursementByRequestId).not.toHaveBeenCalled();
   });
 
+  // Kiểm tra duplicate Bull job cùng attempt bị chặn bằng atomic claim trước provider call.
+  it('should skip duplicate job when the attempt was already claimed', async () => {
+    const { processTransferJob } = await import('../../workers/payosTransferWorker');
+    (disbursementModel.findDisbursementByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeMockDisbursement({
+        requestId: 'DS-TEST-001',
+        status: 'APPROVED',
+        payosTransferStatus: 'PROCESSING',
+        payosTransferAttemptCount: 1,
+        transferIdempotencyKey: 'key-1'
+      })
+    );
+    (disbursementModel.updateDisbursementByRequestIdWithCondition as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+
+    await processTransferJob(makeMockJob({ requestId: 'DS-TEST-001', attemptNumber: 1, idempotencyKey: 'key-1' }));
+
+    expect(disbursementModel.updateDisbursementByRequestIdWithCondition).toHaveBeenCalledWith(
+      'DS-TEST-001',
+      expect.objectContaining({ payosTransferAttemptCount: { $lt: 1 } }),
+      expect.objectContaining({ payosTransferAttemptCount: 1 })
+    );
+    expect(payosService.createPayosTransfer).not.toHaveBeenCalled();
+  });
+
   it('should move to manual review when disbursement is timed out', async () => {
     const { processTransferJob } = await import('../../workers/payosTransferWorker');
     const pastDeadline = new Date(Date.now() - 60 * 1000);

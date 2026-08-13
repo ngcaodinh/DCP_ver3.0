@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   submitOverrideVote,
-  VoteRejectedError
+  VoteRejectedError,
+  type VoteOutcome
 } from '../../services/overrideVotingService';
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
@@ -28,6 +29,10 @@ vi.mock('../../models/disbursementModel', () => ({
   updateDisbursementByRequestIdWithCondition: vi.fn()
 }));
 
+vi.mock('../../services/audit-log.service', () => ({
+  recordAdminAuditLog: vi.fn().mockResolvedValue({})
+}));
+
 vi.mock('../../services/notificationService', () => ({
   createUserNotification: vi.fn().mockResolvedValue({})
 }));
@@ -48,6 +53,7 @@ import {
   findDisbursementByRequestId,
   updateDisbursementByRequestIdWithCondition
 } from '../../models/disbursementModel';
+import { recordAdminAuditLog } from '../../services/audit-log.service';
 import { oracleEvents } from '../../events/oracleEvents';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -212,6 +218,27 @@ describe('submitOverrideVote', () => {
 
     expect(result.outcome).toBe('RESOLVED_REJECTED');
     expect(resolveOverrideRequest).toHaveBeenCalledWith('req-001', 'REJECTED', expect.any(Date));
+  });
+
+  // Kiá»ƒm chá»©ng race final resolution khÃ´ng ghi audit outcome sai khi conditional update khÃ´ng match.
+  it('khÃ´ng tráº£ RESOLVED_REJECTED vÃ  khÃ´ng ghi audit khi final resolve fail', async () => {
+    const initialRequest = buildPendingRequest();
+    const requestAfterReject = buildPendingRequest({
+      votes: [
+        { commissionerId: 'admin-1', commissionerRole: 'admin', vote: 'REJECT', reason: 'invalid', votedAt: new Date() }
+      ]
+    });
+    vi.mocked(findOverrideRequestById)
+      .mockResolvedValueOnce(initialRequest as never)
+      .mockResolvedValueOnce(requestAfterReject as never);
+    mockUnchangedCommissionerSet();
+    vi.mocked(addVoteToOverrideRequest).mockResolvedValue('OK' as never);
+    vi.mocked(resolveOverrideRequest).mockResolvedValue(null);
+
+    await expect(
+      submitOverrideVote('req-001', 'admin-1', 'admin', 'REJECT', 'invalid location')
+    ).rejects.toThrow(new VoteRejectedError('REQUEST_NOT_PENDING'));
+    expect(recordAdminAuditLog).not.toHaveBeenCalled();
   });
 
   // ─── APPROVED khi tất cả vote APPROVE (không có disbursement) ─────────────
@@ -409,17 +436,24 @@ describe('submitOverrideVote', () => {
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce(null);
 
-    const results = await Promise.all([
+    const results = await Promise.allSettled([
       submitOverrideVote('req-001', 'admin-1', 'admin', 'APPROVE', 'ok'),
       submitOverrideVote('req-001', 'regulatory-1', 'regulatory', 'APPROVE', 'ok'),
       submitOverrideVote('req-001', 'admin-2', 'admin', 'APPROVE', 'ok')
     ]);
 
-    const approvedCount = results.filter(r => r.outcome === 'RESOLVED_APPROVED').length;
-    const recordedCount = results.filter(r => r.outcome === 'VOTE_RECORDED').length;
+    const fulfilledResults = results
+      .filter((result): result is PromiseFulfilledResult<VoteOutcome> => result.status === 'fulfilled')
+      .map(result => result.value);
+    const approvedCount = fulfilledResults.filter(result => result.outcome === 'RESOLVED_APPROVED').length;
+    const rejectedRaceCount = results.filter(result => (
+      result.status === 'rejected'
+      && result.reason instanceof VoteRejectedError
+      && result.reason.rejectionReason === 'REQUEST_NOT_PENDING'
+    )).length;
     expect(approvedCount).toBe(1);
-    expect(recordedCount).toBe(2);
-    // Chỉ emit event 1 lần — winner emit, loser không emit vì resolved=null
+    expect(rejectedRaceCount).toBe(2);
+    // Chỉ emit event 1 lần — winner emit sau khi final resolution đã commit.
     expect(vi.mocked(oracleEvents.emit)).toHaveBeenCalledTimes(1);
   });
 });

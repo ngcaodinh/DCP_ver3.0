@@ -1,4 +1,4 @@
-import mongoose, { Schema } from 'mongoose';
+import mongoose, { Schema, type ClientSession } from 'mongoose';
 
 /**
  * Interface cho bản ghi feedback của beneficiary.
@@ -116,3 +116,28 @@ beneficiaryFeedbackSchema.index(
 export const BeneficiaryFeedbackModel =
   mongoose.models.BeneficiaryFeedback ||
   mongoose.model<BeneficiaryFeedback>('BeneficiaryFeedback', beneficiaryFeedbackSchema);
+
+/** Tìm feedback theo ID public để moderation service không truy cập model trực tiếp. */
+export async function findBeneficiaryFeedbackById(
+  feedbackId: string,
+  session?: ClientSession
+): Promise<BeneficiaryFeedback | null> {
+  const query = BeneficiaryFeedbackModel.findOne({ feedbackId });
+  if (session) query.session(session);
+  return query.lean<BeneficiaryFeedback>().exec();
+}
+
+/** Atomically đổi cờ moderation, chỉ một request thắng khi chạy đồng thời. */
+export async function transitionBeneficiaryFeedbackFlag(
+  feedbackId: string,
+  currentValue: boolean,
+  nextValue: boolean,
+  session?: ClientSession
+): Promise<BeneficiaryFeedback | null> {
+  const updated = await BeneficiaryFeedbackModel.findOneAndUpdate(
+    { feedbackId, isFlagged: currentValue },
+    { $set: { isFlagged: nextValue } },
+    { returnDocument: 'after', ...(session ? { session } : {}) }
+  ).exec();
+  return updated ? updated.toObject() as BeneficiaryFeedback : null;
+}

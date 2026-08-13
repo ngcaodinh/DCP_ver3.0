@@ -43,6 +43,10 @@ vi.mock('../../models/adminAuditLogModel', () => ({
   findAuditLogsByRequestId: vi.fn()
 }));
 
+vi.mock('../../models/adminActionOutboxModel', () => ({
+  createAdminActionOutbox: vi.fn().mockResolvedValue({})
+}));
+
 vi.mock('../../models/manualReviewQueueModel', () => ({
   findLatestManualReviewQueueByRequestId: vi.fn(),
   findPendingManualReviewQueueByRequestId: vi.fn(),
@@ -86,6 +90,7 @@ import * as disbursementModel from '../../models/disbursementModel';
 import * as authModel from '../../models/authModel';
 import * as donationModel from '../../models/donationModel';
 import * as auditLogModel from '../../models/adminAuditLogModel';
+import * as adminActionOutboxModel from '../../models/adminActionOutboxModel';
 import * as queueModel from '../../models/manualReviewQueueModel';
 import * as notificationService from '../../services/notificationService';
 import * as transferQueue from '../../queues/disbursementTransferQueue';
@@ -686,28 +691,33 @@ describe('manualReviewService', () => {
       errorMessage: 'failed',
       rawPayload: {}
     });
-    vi.mocked(transferQueue.removePendingJobsByRequestId).mockResolvedValue(0);
     vi.mocked(disbursementModel.updateDisbursementByRequestIdWithCondition).mockResolvedValue(
       makeDisbursement({ payosTransferStatus: 'PROCESSING', payosTransferAttemptCount: 0 })
     );
-    vi.mocked(transferQueue.enqueueDisbursementTransfer).mockResolvedValue({ enqueued: true, jobId: 'job-001' });
     vi.mocked(queueModel.resolveManualReviewQueue).mockResolvedValue(makeQueue({ status: 'APPROVED' }));
     vi.mocked(auditLogModel.createAdminAuditLog).mockResolvedValue({} as never);
 
     const result = await manualApprove('DS-001', 'admin-001');
 
     expect(result.payosTransferStatus).toBe('PROCESSING');
-    expect(transferQueue.enqueueDisbursementTransfer).toHaveBeenCalledWith(
-      'DS-001',
-      1,
-      expect.stringContaining('manual-approve-DS-001-')
+    expect(adminActionOutboxModel.createAdminActionOutbox).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventId: 'manual-approve-transfer:MRQ-001',
+        eventType: 'MANUAL_APPROVE_TRANSFER',
+        payload: expect.objectContaining({
+          requestId: 'DS-001',
+          idempotencyKey: 'manual-approve-DS-001-MRQ-001'
+        })
+      }),
+      undefined
     );
+    expect(transferQueue.removePendingJobsByRequestId).not.toHaveBeenCalled();
     expect(queueModel.resolveManualReviewQueue).toHaveBeenCalledWith(
       expect.objectContaining({ queueId: 'MRQ-001', status: 'APPROVED', adminUserId: 'admin-001' })
     );
   });
 
-  it('compensates approve state when audit persistence fails', async () => {
+  it('aborts approve transaction when audit persistence fails without queue deletion or compensation', async () => {
     const queue = makeQueue({ actionLockId: 'lock-001' });
     const disbursement = makeDisbursement();
     vi.mocked(queueModel.acquireManualReviewActionLease).mockResolvedValue(queue);
@@ -720,11 +730,8 @@ describe('manualReviewService', () => {
       errorMessage: null,
       rawPayload: {}
     });
-    vi.mocked(transferQueue.removePendingJobsByRequestId).mockResolvedValue(0);
     vi.mocked(disbursementModel.updateDisbursementByRequestIdWithCondition)
-      .mockResolvedValueOnce(makeDisbursement({ payosTransferStatus: 'PROCESSING', payosTransferAttemptCount: 0 }))
-      .mockResolvedValueOnce(disbursement);
-    vi.mocked(transferQueue.enqueueDisbursementTransfer).mockResolvedValue({ enqueued: true, jobId: 'job-001' });
+      .mockResolvedValueOnce(makeDisbursement({ payosTransferStatus: 'PROCESSING', payosTransferAttemptCount: 0 }));
     vi.mocked(auditLogModel.createAdminAuditLog).mockRejectedValue(new Error('audit database unavailable'));
 
     await expect(manualApprove('DS-001', 'admin-001')).rejects.toMatchObject({
@@ -732,18 +739,19 @@ describe('manualReviewService', () => {
       errorCode: 'INTERNAL_ERROR'
     });
 
-    expect(transferQueue.removePendingJobsByRequestId).toHaveBeenCalledTimes(2);
-    expect(disbursementModel.updateDisbursementByRequestIdWithCondition).toHaveBeenNthCalledWith(
-      2,
+    expect(transferQueue.removePendingJobsByRequestId).not.toHaveBeenCalled();
+    expect(disbursementModel.updateDisbursementByRequestIdWithCondition).toHaveBeenCalledTimes(1);
+    expect(disbursementModel.updateDisbursementByRequestIdWithCondition).toHaveBeenCalledWith(
       'DS-001',
+      expect.objectContaining({ payosTransferStatus: 'MANUAL_REVIEW' }),
       expect.objectContaining({ payosTransferStatus: 'PROCESSING' }),
-      expect.objectContaining({ payosTransferStatus: 'MANUAL_REVIEW' })
+      undefined
     );
     expect(queueModel.resolveManualReviewQueue).not.toHaveBeenCalled();
     expect(queueModel.releaseManualReviewActionLease).toHaveBeenCalledWith('MRQ-001', expect.any(String));
   });
 
-  it('rolls back approve state and releases lease when enqueue fails', async () => {
+  it('aborts approve transaction when outbox persistence fails', async () => {
     const queue = makeQueue({ actionLockId: 'lock-001' });
     const disbursement = makeDisbursement();
     vi.mocked(queueModel.acquireManualReviewActionLease).mockResolvedValue(queue);
@@ -756,31 +764,18 @@ describe('manualReviewService', () => {
       errorMessage: null,
       rawPayload: {}
     });
-    vi.mocked(transferQueue.removePendingJobsByRequestId).mockResolvedValue(0);
     vi.mocked(disbursementModel.updateDisbursementByRequestIdWithCondition)
-      .mockResolvedValueOnce(makeDisbursement({ payosTransferStatus: 'PROCESSING', payosTransferAttemptCount: 0 }))
-      .mockResolvedValueOnce(disbursement);
-    vi.mocked(transferQueue.enqueueDisbursementTransfer).mockResolvedValue({ enqueued: false, jobId: undefined });
+      .mockResolvedValueOnce(makeDisbursement({ payosTransferStatus: 'PROCESSING', payosTransferAttemptCount: 0 }));
+    vi.mocked(adminActionOutboxModel.createAdminActionOutbox).mockRejectedValueOnce(new Error('outbox unavailable'));
 
-    await expect(manualApprove('DS-001', 'admin-001')).rejects.toMatchObject({
-      statusCode: 503,
-      errorCode: 'INTERNAL_ERROR'
-    });
+    await expect(manualApprove('DS-001', 'admin-001')).rejects.toThrow('outbox unavailable');
 
-    expect(disbursementModel.updateDisbursementByRequestIdWithCondition).toHaveBeenNthCalledWith(
-      2,
-      'DS-001',
-      expect.objectContaining({ payosTransferStatus: 'PROCESSING' }),
-      expect.objectContaining({
-        payosTransferStatus: 'MANUAL_REVIEW',
-        payosTransferAttemptCount: 3,
-        transferIdempotencyKey: 'disbursement-DS-001'
-      })
-    );
+    expect(transferQueue.removePendingJobsByRequestId).not.toHaveBeenCalled();
+    expect(disbursementModel.updateDisbursementByRequestIdWithCondition).toHaveBeenCalledTimes(1);
     expect(queueModel.releaseManualReviewActionLease).toHaveBeenCalledWith('MRQ-001', expect.any(String));
   });
 
-  it('compensates approve state when queue resolve fails after enqueue succeeds', async () => {
+  it('aborts approve transaction when queue resolve fails without deleting jobs', async () => {
     const queue = makeQueue({ actionLockId: 'lock-001' });
     const disbursement = makeDisbursement();
     vi.mocked(queueModel.acquireManualReviewActionLease).mockResolvedValue(queue);
@@ -793,11 +788,7 @@ describe('manualReviewService', () => {
       errorMessage: null,
       rawPayload: {}
     });
-    vi.mocked(transferQueue.removePendingJobsByRequestId).mockResolvedValue(0);
     vi.mocked(disbursementModel.updateDisbursementByRequestIdWithCondition)
-      .mockResolvedValueOnce(makeDisbursement({ payosTransferStatus: 'PROCESSING', payosTransferAttemptCount: 0 }))
-      .mockResolvedValueOnce(disbursement);
-    vi.mocked(transferQueue.enqueueDisbursementTransfer).mockResolvedValue({ enqueued: true, jobId: 'job-001' });
     vi.mocked(queueModel.resolveManualReviewQueue).mockResolvedValue(null);
 
     await expect(manualApprove('DS-001', 'admin-001')).rejects.toMatchObject({
@@ -805,17 +796,8 @@ describe('manualReviewService', () => {
       errorCode: 'INVALID_STATUS_TRANSITION'
     });
 
-    expect(transferQueue.removePendingJobsByRequestId).toHaveBeenCalledTimes(2);
-    expect(disbursementModel.updateDisbursementByRequestIdWithCondition).toHaveBeenNthCalledWith(
-      2,
-      'DS-001',
-      expect.objectContaining({ payosTransferStatus: 'PROCESSING' }),
-      expect.objectContaining({
-        payosTransferStatus: 'MANUAL_REVIEW',
-        payosTransferAttemptCount: 3,
-        transferIdempotencyKey: 'disbursement-DS-001'
-      })
-    );
+    expect(transferQueue.removePendingJobsByRequestId).not.toHaveBeenCalled();
+    expect(disbursementModel.updateDisbursementByRequestIdWithCondition).toHaveBeenCalledTimes(1);
     expect(queueModel.releaseManualReviewActionLease).toHaveBeenCalledWith('MRQ-001', expect.any(String));
   });
 
@@ -853,7 +835,6 @@ describe('manualReviewService', () => {
       errorMessage: null,
       rawPayload: {}
     });
-    vi.mocked(transferQueue.removePendingJobsByRequestId).mockResolvedValue(0);
     vi.mocked(disbursementModel.updateDisbursementByRequestIdWithCondition).mockResolvedValue(rejected);
     vi.mocked(queueModel.resolveManualReviewQueue).mockResolvedValue(makeQueue({ status: 'REJECTED' }));
     vi.mocked(auditLogModel.createAdminAuditLog).mockResolvedValue({} as never);
@@ -881,6 +862,15 @@ describe('manualReviewService', () => {
     const result = await manualReject('DS-001', 'admin-001', 'Invalid beneficiary evidence');
 
     expect(result.status).toBe('REJECTED');
+    expect(adminActionOutboxModel.createAdminActionOutbox).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventId: 'manual-reject-transfer:MRQ-001',
+        eventType: 'MANUAL_REJECT_TRANSFER',
+        payload: { requestId: 'DS-001' }
+      }),
+      undefined
+    );
+    expect(transferQueue.removePendingJobsByRequestId).not.toHaveBeenCalled();
     expect(queueModel.resolveManualReviewQueue).toHaveBeenCalledWith(
       expect.objectContaining({ status: 'REJECTED', reason: 'Invalid beneficiary evidence' })
     );

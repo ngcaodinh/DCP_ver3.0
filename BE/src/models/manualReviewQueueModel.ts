@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import mongoose, { Schema } from 'mongoose';
+import mongoose, { Schema, type ClientSession } from 'mongoose';
 import type { DisbursementRequestMode } from './disbursementModel';
 
 export type ManualReviewQueueStatus = 'PENDING' | 'APPROVED' | 'REJECTED';
@@ -418,6 +418,7 @@ export async function resolveManualReviewQueue(input: {
   adminUserId: string;
   reason: string | null;
   resolvedAt: Date;
+  session?: ClientSession;
 }): Promise<ManualReviewQueueRecord | null> {
   return ManualReviewQueueMongoModel.findOneAndUpdate(
     {
@@ -437,7 +438,7 @@ export async function resolveManualReviewQueue(input: {
         updatedAt: input.resolvedAt
       }
     },
-    { returnDocument: 'after' }
+    { returnDocument: 'after', ...(input.session ? { session: input.session } : {}) }
   ).lean<ManualReviewQueueRecord>().exec();
 }
 

@@ -122,9 +122,14 @@ export async function enqueueSbtMint(
   const jobOptions: Queue.JobOptions = { attempts: 1 };
   if (options?.delay !== undefined) jobOptions.delay = options.delay;
   if (options?.priority !== undefined) jobOptions.priority = options.priority;
+  const jobId = `${jobData.mintRequestId}-attempt${jobData.attemptNumber}`;
 
   try {
-    const jobId = `${jobData.mintRequestId}-attempt${jobData.attemptNumber}`;
+    const existingJob = await queue.getJob(jobId);
+    if (existingJob) {
+      // Retry outbox sau khi queue đã nhận job phải được coi là thành công, không tạo audit failure giả.
+      return { jobId: existingJob.id, enqueued: true };
+    }
     const job = await queue.add(jobData, { ...jobOptions, jobId });
     logger.info('SBT mint job enqueued.', {
       mintRequestId: jobData.mintRequestId,
@@ -136,6 +141,9 @@ export async function enqueueSbtMint(
     });
     return { jobId: job.id, enqueued: true };
   } catch (error) {
+    // Race giữa hai producer: job cố định đã được producer khác tạo thì vẫn là dispatch thành công.
+    const existingJob = await queue.getJob(jobId).catch(() => null);
+    if (existingJob) return { jobId: existingJob.id, enqueued: true };
     logger.error('Enqueue SBT mint job thất bại.', {
       mintRequestId: jobData.mintRequestId,
       sbtId: jobData.sbtId,

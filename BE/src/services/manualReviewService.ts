@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import type { ClientSession } from 'mongoose';
 import { getLogger } from '../config/logger';
 import { getRedisClientIfReady } from '../config/redis';
 import { ApplicationError } from '../utils/applicationError';
@@ -16,11 +17,14 @@ import {
   DisbursementTransferLogRecord
 } from '../models/disbursementTransferModel';
 import {
-  createAdminAuditLog,
   findAuditLogsByRequestId,
   AdminAuditLogRecord,
   AdminAuditAction
 } from '../models/adminAuditLogModel';
+import { recordAdminAuditLog } from './audit-log.service';
+import type { AuditRequestContext } from '../utils/auditRequestContext';
+import { runMongoTransaction } from '../utils/mongoTransaction';
+import { createAdminActionOutbox } from '../models/adminActionOutboxModel';
 import {
   acquireManualReviewActionLease,
   countPendingManualReviewByAdminIds,
@@ -42,10 +46,6 @@ import {
 } from '../models/manualReviewQueueModel';
 import type { DisbursementRequestMode } from '../models/disbursementModel';
 import { createUserNotification } from './notificationService';
-import {
-  enqueueDisbursementTransfer,
-  removePendingJobsByRequestId
-} from '../queues/disbursementTransferQueue';
 import { getSocketServer } from '../config/socketServer';
 import { getPayosTransferStatusByReferenceId } from './payosService';
 
@@ -137,6 +137,7 @@ export type TransferDetailItem = PendingReviewItem & {
 export type ManualReviewDetailOptions = {
   revealBankAccount?: boolean;
   adminUserId?: string;
+  auditRequestContext?: AuditRequestContext;
 };
 
 export type ManualReviewActionResult = {
@@ -360,7 +361,8 @@ export async function getManualReviewDetail(
       options.adminUserId as string,
       'MANUAL_BANK_ACCOUNT_VIEW',
       null,
-      { accessMode: 'REVEAL_ON_DEMAND' }
+      { accessMode: 'REVEAL_ON_DEMAND' },
+      options.auditRequestContext
     );
     // Audit phải được ghi xong trước khi đọc lại để response phản ánh đầy đủ lần reveal hiện tại.
     auditLogs = await findAuditLogsByRequestId(requestId);
@@ -382,12 +384,11 @@ export async function getManualReviewDetail(
  */
 export async function manualApprove(
   requestId: string,
-  adminUserId: string
+  adminUserId: string,
+  auditRequestContext?: AuditRequestContext
 ): Promise<ManualReviewActionResult> {
   const lockId = randomUUID();
   const now = new Date();
-  let originalDisbursement: DisbursementRecord | null = null;
-  let shouldRestoreManualReviewState = false;
   let newIdempotencyKey: string | null = null;
   let queueResolved = false;
   const queueItem = await acquireManualReviewActionLease({
@@ -407,55 +408,49 @@ export async function manualApprove(
 
   try {
     const disbursement = await ensureManualReviewDisbursement(requestId);
-    originalDisbursement = disbursement;
     const providerSnapshot = await reconcileProviderBeforeManualAction(disbursement);
     ensureProviderAllowsManualDecision(providerSnapshot, requestId);
 
-    await removePendingJobsByRequestId(requestId);
-    newIdempotencyKey = `manual-approve-${requestId}-${randomUUID()}`;
-    const updated = await updateDisbursementByRequestIdWithCondition(
-      requestId,
-      { payosTransferStatus: 'MANUAL_REVIEW' },
-      {
-        payosTransferStatus: 'PROCESSING',
-        payosTransferAttemptCount: 0,
-        payosTransferLastError: null,
-        transferIdempotencyKey: newIdempotencyKey
-      }
-    );
-
-    if (!updated) {
-      throw new ApplicationError(
-        `Disbursement ${requestId} không còn ở trạng thái MANUAL_REVIEW.`,
-        409,
-        'INVALID_STATUS_TRANSITION'
-      );
-    }
-    shouldRestoreManualReviewState = true;
-
-    const { enqueued } = await enqueueDisbursementTransfer(requestId, 1, newIdempotencyKey);
-    if (!enqueued) {
-      await restoreManualReviewDisbursementState(
+    newIdempotencyKey = `manual-approve-${requestId}-${queueItem.queueId}`;
+    const outboxEventId = `manual-approve-transfer:${queueItem.queueId}`;
+    const updated = await runMongoTransaction(async (session) => {
+      const transactionUpdated = await updateDisbursementByRequestIdWithCondition(
         requestId,
-        { payosTransferStatus: 'PROCESSING', transferIdempotencyKey: newIdempotencyKey },
-        disbursement,
-        disbursement.transferIdempotencyKey
+        { payosTransferStatus: 'MANUAL_REVIEW' },
+        {
+          payosTransferStatus: 'PROCESSING',
+          payosTransferAttemptCount: 0,
+          payosTransferLastError: null,
+          transferIdempotencyKey: newIdempotencyKey
+        },
+        session
       );
-      shouldRestoreManualReviewState = false;
-      throw new ApplicationError(
-        'Không thể đẩy job vào queue. Redis có thể không khả dụng.',
-        503,
-        'INTERNAL_ERROR'
-      );
-    }
 
-    // Ghi audit trước khi resolve queue để lỗi audit kích hoạt compensation, không hoàn tất action mù.
-    await createManualReviewAuditLogRequired(queueItem, adminUserId, 'MANUAL_APPROVE', null, {
-      previousAttemptCount: disbursement.payosTransferAttemptCount,
-      previousError: sanitizeProviderError(disbursement.payosTransferLastError),
-      providerStatus: providerSnapshot.status
+      if (!transactionUpdated) {
+        throw new ApplicationError(
+          `Disbursement ${requestId} không còn ở trạng thái MANUAL_REVIEW.`,
+          409,
+          'INVALID_STATUS_TRANSITION'
+        );
+      }
+      // Audit, queue resolution và outbox phải commit cùng transaction để không có quyết định mồ côi.
+      await createManualReviewAuditLogRequired(queueItem, adminUserId, 'MANUAL_APPROVE', null, {
+        requestId: disbursement.requestId,
+        projectId: disbursement.projectId,
+        organizationId: disbursement.organizationId,
+        amountVnd: disbursement.amount,
+        previousAttemptCount: disbursement.payosTransferAttemptCount,
+        previousError: sanitizeProviderError(disbursement.payosTransferLastError),
+        providerStatus: providerSnapshot.status
+      }, auditRequestContext, session);
+      await resolveQueueAfterAction(queueItem, lockId, 'APPROVED', adminUserId, null, session);
+      await createAdminActionOutbox({
+        eventId: outboxEventId,
+        eventType: 'MANUAL_APPROVE_TRANSFER',
+        payload: { requestId, idempotencyKey: newIdempotencyKey }
+      }, session);
+      return transactionUpdated;
     });
-    await resolveQueueAfterAction(queueItem, lockId, 'APPROVED', adminUserId, null);
     queueResolved = true;
     emitTransferUpdated(requestId, {
       payosTransferStatus: 'PROCESSING',
@@ -470,15 +465,6 @@ export async function manualApprove(
       payosTransferStatus: updated.payosTransferStatus
     };
   } catch (error) {
-    if (shouldRestoreManualReviewState && originalDisbursement && newIdempotencyKey && !queueResolved) {
-      await removePendingJobsByRequestId(requestId);
-      await restoreManualReviewDisbursementState(
-        requestId,
-        { payosTransferStatus: 'PROCESSING', transferIdempotencyKey: newIdempotencyKey },
-        originalDisbursement,
-        originalDisbursement.transferIdempotencyKey
-      );
-    }
     if (!queueResolved) {
       await releaseManualReviewActionLease(queueItem.queueId, lockId);
     }
@@ -492,7 +478,8 @@ export async function manualApprove(
 export async function manualReject(
   requestId: string,
   adminUserId: string,
-  reason: string
+  reason: string,
+  auditRequestContext?: AuditRequestContext
 ): Promise<ManualReviewActionResult> {
   const sanitizedReason = sanitizeReason(reason);
   if (sanitizedReason.length < 10) {
@@ -501,8 +488,6 @@ export async function manualReject(
 
   const lockId = randomUUID();
   const now = new Date();
-  let originalDisbursement: DisbursementRecord | null = null;
-  let shouldRestoreManualReviewState = false;
   let queueResolved = false;
   const queueItem = await acquireManualReviewActionLease({
     disbursementRequestId: requestId,
@@ -521,37 +506,47 @@ export async function manualReject(
 
   try {
     const disbursement = await ensureManualReviewDisbursement(requestId);
-    originalDisbursement = disbursement;
     const providerSnapshot = await reconcileProviderBeforeManualAction(disbursement);
     ensureProviderAllowsManualDecision(providerSnapshot, requestId);
 
-    await removePendingJobsByRequestId(requestId);
-    const updated = await updateDisbursementByRequestIdWithCondition(
-      requestId,
-      { payosTransferStatus: 'MANUAL_REVIEW' },
-      {
-        status: 'REJECTED',
-        payosTransferStatus: 'FAILED',
-        payosTransferLastError: `Admin reject: ${sanitizedReason}`
-      }
-    );
-
-    if (!updated) {
-      throw new ApplicationError(
-        `Disbursement ${requestId} không còn ở trạng thái MANUAL_REVIEW.`,
-        409,
-        'INVALID_STATUS_TRANSITION'
+    const updated = await runMongoTransaction(async (session) => {
+      const transactionUpdated = await updateDisbursementByRequestIdWithCondition(
+        requestId,
+        { payosTransferStatus: 'MANUAL_REVIEW' },
+        {
+          status: 'REJECTED',
+          payosTransferStatus: 'FAILED',
+          payosTransferLastError: `Admin reject: ${sanitizedReason}`
+        },
+        session
       );
-    }
-    shouldRestoreManualReviewState = true;
 
-    // Ghi audit trước khi resolve queue để lỗi audit kích hoạt compensation, không hoàn tất action mù.
-    await createManualReviewAuditLogRequired(queueItem, adminUserId, 'MANUAL_REJECT', sanitizedReason, {
-      previousAttemptCount: disbursement.payosTransferAttemptCount,
-      previousError: sanitizeProviderError(disbursement.payosTransferLastError),
-      providerStatus: providerSnapshot.status
+      if (!transactionUpdated) {
+        throw new ApplicationError(
+          `Disbursement ${requestId} không còn ở trạng thái MANUAL_REVIEW.`,
+          409,
+          'INVALID_STATUS_TRANSITION'
+        );
+      }
+      // Audit, queue resolution và outbox phải commit cùng transaction để không có action reject dở dang.
+      await createManualReviewAuditLogRequired(queueItem, adminUserId, 'MANUAL_REJECT', sanitizedReason, {
+        requestId: disbursement.requestId,
+        projectId: disbursement.projectId,
+        organizationId: disbursement.organizationId,
+        amountVnd: disbursement.amount,
+        previousAttemptCount: disbursement.payosTransferAttemptCount,
+        previousError: sanitizeProviderError(disbursement.payosTransferLastError),
+        providerStatus: providerSnapshot.status
+      }, auditRequestContext, session);
+      await resolveQueueAfterAction(queueItem, lockId, 'REJECTED', adminUserId, sanitizedReason, session);
+      // Cleanup job cũ là side effect hậu commit; state FAILED vẫn chặn stale worker nếu cleanup retry chậm.
+      await createAdminActionOutbox({
+        eventId: `manual-reject-transfer:${queueItem.queueId}`,
+        eventType: 'MANUAL_REJECT_TRANSFER',
+        payload: { requestId }
+      }, session);
+      return transactionUpdated;
     });
-    await resolveQueueAfterAction(queueItem, lockId, 'REJECTED', adminUserId, sanitizedReason);
     queueResolved = true;
     await notifyManualRejectRecipientsSafely(updated, adminUserId, sanitizedReason, queueItem);
     emitTransferUpdated(requestId, {
@@ -568,14 +563,6 @@ export async function manualReject(
       payosTransferStatus: updated.payosTransferStatus
     };
   } catch (error) {
-    if (shouldRestoreManualReviewState && originalDisbursement && !queueResolved) {
-      await restoreManualReviewDisbursementState(
-        requestId,
-        { status: 'REJECTED', payosTransferStatus: 'FAILED' },
-        originalDisbursement,
-        originalDisbursement.transferIdempotencyKey
-      );
-    }
     if (!queueResolved) {
       await releaseManualReviewActionLease(queueItem.queueId, lockId);
     }
@@ -1048,33 +1035,14 @@ function ensureProviderAllowsManualDecision(
   }
 }
 
-/** Khôi phục snapshot MANUAL_REVIEW khi action chưa resolve queue để tránh lệch state giữa disbursement và queue. */
-async function restoreManualReviewDisbursementState(
-  requestId: string,
-  condition: Record<string, unknown>,
-  disbursement: DisbursementRecord,
-  transferIdempotencyKey: string | null
-): Promise<void> {
-  await updateDisbursementByRequestIdWithCondition(
-    requestId,
-    condition,
-    {
-      status: disbursement.status,
-      payosTransferStatus: 'MANUAL_REVIEW',
-      payosTransferAttemptCount: disbursement.payosTransferAttemptCount,
-      payosTransferLastError: disbursement.payosTransferLastError,
-      transferIdempotencyKey
-    }
-  );
-}
-
 /** Resolve queue và kiểm tra race nếu lease không còn thuộc action hiện tại. */
 async function resolveQueueAfterAction(
   queueItem: ManualReviewQueueRecord,
   lockId: string,
   status: 'APPROVED' | 'REJECTED',
   adminUserId: string,
-  reason: string | null
+  reason: string | null,
+  session?: ClientSession
 ): Promise<void> {
   const resolved = await resolveManualReviewQueue({
     queueId: queueItem.queueId,
@@ -1082,7 +1050,8 @@ async function resolveQueueAfterAction(
     status,
     adminUserId,
     reason,
-    resolvedAt: new Date()
+    resolvedAt: new Date(),
+    ...(session ? { session } : {})
   });
 
   if (!resolved) {
@@ -1096,20 +1065,26 @@ async function createManualReviewAuditLog(
   adminUserId: string,
   action: AdminAuditAction,
   reason: string | null,
-  metadata: Record<string, unknown>
+  metadata: Record<string, unknown>,
+  auditRequestContext?: AuditRequestContext,
+  session?: ClientSession
 ): Promise<void> {
-  await createAdminAuditLog({
-    auditId: randomUUID(),
-    adminUserId,
-    action,
-    targetRequestId: queueItem.disbursementRequestId,
+  await recordAdminAuditLog({
+    actionId: randomUUID(),
+    actorType: 'ADMIN',
+    adminId: adminUserId,
+    adminRole: 'admin',
+    actionType: action,
+    targetId: queueItem.disbursementRequestId,
+    targetType: 'DISBURSEMENT_REQUEST',
     reason,
-    metadata: {
+    requestContext: auditRequestContext,
+    context: {
       ...metadata,
       queueId: queueItem.queueId,
-      reviewCycle: queueItem.reviewCycle,
-      assignedAdminId: queueItem.assignedAdminId
-    }
+      reviewCycle: queueItem.reviewCycle
+    },
+    ...(session ? { session } : {})
   });
 }
 
@@ -1122,10 +1097,12 @@ async function createManualReviewAuditLogRequired(
   adminUserId: string,
   action: AdminAuditAction,
   reason: string | null,
-  metadata: Record<string, unknown>
+  metadata: Record<string, unknown>,
+  auditRequestContext?: AuditRequestContext,
+  session?: ClientSession
 ): Promise<void> {
   try {
-    await createManualReviewAuditLog(queueItem, adminUserId, action, reason, metadata);
+    await createManualReviewAuditLog(queueItem, adminUserId, action, reason, metadata, auditRequestContext, session);
   } catch (error) {
     logger.error('Ghi audit log manual review thất bại; action sẽ không được hoàn tất.', {
       requestId: queueItem.disbursementRequestId,

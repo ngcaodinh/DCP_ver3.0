@@ -1,10 +1,10 @@
-import { randomUUID } from 'crypto';
 import { getLogger } from '../config/logger';
 import {
   findPendingOverrideRequestsExpiredBefore,
   expireOverrideRequest
 } from '../models/oracleOverrideRequestModel';
-import { createAdminAuditLog } from '../models/adminAuditLogModel';
+import { recordAdminAuditLog } from '../services/audit-log.service';
+import { runMongoTransaction } from '../utils/mongoTransaction';
 import { createUserNotification } from '../services/notificationService';
 
 const logger = getLogger();
@@ -72,29 +72,34 @@ async function checkAndExpireOverdueRequests(): Promise<void> {
 
     for (const overrideRequest of overdueRequests) {
       try {
-        const expired = await expireOverrideRequest(overrideRequest.overrideRequestId, new Date());
+        const expired = await runMongoTransaction(async (session) => {
+          const updated = session
+            ? await expireOverrideRequest(overrideRequest.overrideRequestId, new Date(), session)
+            : await expireOverrideRequest(overrideRequest.overrideRequestId, new Date());
+          if (!updated) return null;
+          await recordAdminAuditLog({
+            actionId: `override-expired:${overrideRequest.overrideRequestId}`,
+            actorType: 'SYSTEM',
+            adminId: null,
+            adminRole: null,
+            actionType: 'OVERRIDE_EXPIRED',
+            targetId: overrideRequest.overrideRequestId,
+            targetType: 'OVERRIDE_REQUEST',
+            reason: 'Override request expired by timeout',
+            context: {
+              overrideRequestId: overrideRequest.overrideRequestId,
+              projectId: overrideRequest.projectId,
+              organizationId: overrideRequest.organizationId,
+              commissionerSnapshotSize: overrideRequest.commissionerSnapshot.length,
+              outcome: 'EXPIRED_TIMEOUT'
+            },
+            session
+          });
+          return updated;
+        });
         if (!expired) continue; // Đã được expire bởi chu kỳ khác (race condition bình thường)
 
         expiredCount++;
-
-        // Ghi audit trail — OVERRIDE_EXPIRED phải có trong compliance log
-        void createAdminAuditLog({
-          auditId: randomUUID(),
-          adminUserId: 'system',
-          action: 'OVERRIDE_EXPIRED',
-          targetRequestId: overrideRequest.overrideRequestId,
-          reason: `Quá ${OVERRIDE_EXPIRY_DAYS} ngày không có đủ commissioner vote`,
-          metadata: {
-            projectId: overrideRequest.projectId,
-            organizationId: overrideRequest.organizationId,
-            createdAt: overrideRequest.createdAt
-          }
-        }).catch((err: Error) => {
-          logger.error('Ghi audit log OVERRIDE_EXPIRED thất bại.', {
-            overrideRequestId: overrideRequest.overrideRequestId,
-            errorMessage: err.message
-          });
-        });
 
         // Notify tất cả commissioner trong snapshot và tổ chức
         await notifyOverrideExpired(overrideRequest);

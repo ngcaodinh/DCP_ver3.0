@@ -434,6 +434,8 @@ export async function processTransferJob(job: Job<DisbursementTransferJobData>):
     {
       status: { $in: ['APPROVED', 'EXECUTING'] },
       payosTransferStatus: { $nin: ['SUCCESS', 'MANUAL_REVIEW'] },
+      // Atomic claim: cùng một attempt chỉ được một Bull job đi tới provider.
+      payosTransferAttemptCount: { $lt: attemptNumber },
       $or: [
         { transferIdempotencyKey: null },
         { transferIdempotencyKey: idempotencyKey }

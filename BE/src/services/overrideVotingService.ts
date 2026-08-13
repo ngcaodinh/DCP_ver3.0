@@ -1,4 +1,3 @@
-import { randomUUID } from 'crypto';
 import { getLogger } from '../config/logger';
 import {
   findOverrideRequestById,
@@ -6,19 +5,21 @@ import {
   resolveOverrideRequest,
   expireOverrideRequest,
   type CommissionerVote,
-  type OracleOverrideRequestRecord,
-  type AddVoteResult
+  type OracleOverrideRequestRecord
 } from '../models/oracleOverrideRequestModel';
 import { findActiveCommissioners, type AuthUser } from '../models/authModel';
 import {
   findDisbursementByRequestId,
   updateDisbursementByRequestIdWithCondition
 } from '../models/disbursementModel';
-import { createAdminAuditLog } from '../models/adminAuditLogModel';
+import { recordAdminAuditLog } from './audit-log.service';
+import type { AuditRequestContext } from '../utils/auditRequestContext';
+import { runMongoTransaction } from '../utils/mongoTransaction';
 import { logOverrideApproved, logOverrideRejected, logOverrideExpired } from './multisigOverrideLog.service';
 import { createUserNotification } from './notificationService';
 import { oracleEvents, type OverrideExecutedEventPayload } from '../events/oracleEvents';
 import { getRedisClientIfReady } from '../config/redis';
+import type { ClientSession } from 'mongoose';
 
 const logger = getLogger();
 
@@ -72,7 +73,8 @@ export async function submitOverrideVote(
   commissionerId: string,
   commissionerRole: string,
   vote: 'APPROVE' | 'REJECT',
-  reason: string
+  reason: string,
+  auditRequestContext?: AuditRequestContext
 ): Promise<VoteOutcome> {
   // Bước 1: Load và kiểm tra request
   const overrideRequest = await findOverrideRequestById(overrideRequestId);
@@ -98,14 +100,39 @@ export async function submitOverrideVote(
   // Nếu tuple [userId, role] của admin/regulatory hiện tại khác snapshot → expire để tạo lại
   const isCommissionerSetChanged = await detectCommissionerSetChange(overrideRequest);
   if (isCommissionerSetChanged) {
-    await expireOverrideRequest(overrideRequestId, new Date());
+    const expiredRequest = await runMongoTransaction(async (session) => {
+      const expired = session
+        ? await expireOverrideRequest(overrideRequestId, new Date(), session)
+        : await expireOverrideRequest(overrideRequestId, new Date());
+      if (!expired) return null;
+      await recordAdminAuditLog({
+        actionId: `override-expired:${overrideRequestId}`,
+        actorType: 'SYSTEM',
+        adminId: null,
+        adminRole: null,
+        actionType: 'OVERRIDE_EXPIRED',
+        targetId: overrideRequestId,
+        targetType: 'OVERRIDE_REQUEST',
+        reason: 'Commissioner set changed',
+        context: {
+          overrideRequestId,
+          projectId: expired.projectId,
+          organizationId: expired.organizationId,
+          commissionerSnapshotSize: expired.commissionerSnapshot.length,
+          outcome: 'EXPIRED_COMMISSIONER_SET_CHANGED'
+        },
+        session
+      });
+      return expired;
+    });
+    if (!expiredRequest) throw new VoteRejectedError('REQUEST_NOT_PENDING');
     logger.warn('Commissioner set thay đổi. Override request expired.', {
       overrideRequestId,
       authenticatedUserId: commissionerId
     });
     // [D5] Ghi audit trail vào multisig_override_logs
     // Fetch lại request từ DB vì expiredAt đã được ghi bởi expireOverrideRequest
-    const updatedRequest = await findOverrideRequestById(overrideRequestId);
+    const updatedRequest = expiredRequest;
     if (!updatedRequest) {
       // Race condition: request không fetch được sau expire (replica lag hoặc bị xóa)
       // — không block vote flow, chỉ log error và skip audit log
@@ -119,19 +146,6 @@ export async function submitOverrideVote(
         });
       });
     }
-    // [B2-fix #2] Ghi audit trail — OVERRIDE_EXPIRED phải có trong compliance log
-    void Promise.resolve(createAdminAuditLog({
-      auditId: randomUUID(),
-      adminUserId: commissionerId,
-      action: 'OVERRIDE_EXPIRED',
-      targetRequestId: overrideRequestId,
-      reason: 'Commissioner set thay đổi (role hoặc thành viên)',
-      metadata: { projectId: overrideRequest.projectId, triggeredBy: commissionerId }
-    })).catch((err: Error) => {
-      logger.error('Ghi audit log OVERRIDE_EXPIRED thất bại.', {
-        overrideRequestId, errorMessage: err.message
-      });
-    });
     // Notify tất cả ủy viên cũ trong snapshot biết request đã hết hiệu lực
     await notifyCommissionersOverrideExpired(overrideRequest);
     return { outcome: 'EXPIRED_COMMISSIONER_SET_CHANGED' };
@@ -145,26 +159,44 @@ export async function submitOverrideVote(
     reason,
     votedAt: new Date()
   };
-  const addResult = await addVoteToOverrideRequest(overrideRequestId, newVote);
-  
-  // Xử lý kết quả atomic operation
-  if (addResult === 'ALREADY_VOTED') {
-    throw new VoteRejectedError('ALREADY_VOTED');
-  }
-  if (addResult === 'NOT_PENDING') {
-    // Race condition: request không còn PENDING khi chúng ta vào bước 4 (concurrent vote REJECT vừa resolve)
-    throw new VoteRejectedError('REQUEST_NOT_PENDING');
-  }
+  const transactionResult = await runMongoTransaction(async (session) => {
+    const addResult = await addVoteToOverrideRequest(overrideRequestId, newVote, session);
+    if (addResult === 'ALREADY_VOTED') throw new VoteRejectedError('ALREADY_VOTED');
+    if (addResult === 'NOT_PENDING') throw new VoteRejectedError('REQUEST_NOT_PENDING');
 
-  // addResult === 'OK' — vote đã được ghi thành công, cần load lại request để evaluate
-  const updatedRequest = await findOverrideRequestById(overrideRequestId);
-  if (!updatedRequest) {
-    // Replica lag hoặc bị xóa ngay sau khi ghi vote — edge case cực hiếm
-    logger.error('Không fetch được override request ngay sau khi ghi vote.', {
-      overrideRequestId
+    const updated = await findOverrideRequestById(overrideRequestId, session);
+    if (!updated) {
+      logger.error('Không fetch được override request ngay sau khi ghi vote.', { overrideRequestId });
+      throw new VoteRejectedError('REQUEST_NOT_FOUND');
+    }
+
+    const resolution = await resolveVoteOutcome(updated, session);
+
+    // Vote, final resolution và audit phải commit cùng nhau; không để outcome mồ côi.
+    await recordAdminAuditLog({
+      actionId: `override-vote:${overrideRequestId}:${commissionerId}`,
+      actorType: 'ADMIN',
+      adminId: commissionerId,
+      adminRole: commissionerRole,
+      actionType: vote === 'APPROVE' ? 'OVERRIDE_VOTE_APPROVE' : 'OVERRIDE_VOTE_REJECT',
+      targetId: overrideRequestId,
+      targetType: 'OVERRIDE_REQUEST',
+      reason,
+      requestContext: auditRequestContext,
+      context: {
+        overrideRequestId,
+        projectId: updated.projectId,
+        organizationId: updated.organizationId,
+        disbursementRequestId: updated.disbursementRequestId,
+        commissionerSnapshotSize: updated.commissionerSnapshot.length,
+        vote,
+        voteCountAfter: updated.votes.length,
+        outcome: resolution.voteOutcome.outcome
+      },
+      session
     });
-    throw new VoteRejectedError('REQUEST_NOT_FOUND');
-  }
+    return { updatedRequest: updated, ...resolution };
+  });
 
   logger.info('Commissioner đã vote.', {
     overrideRequestId,
@@ -172,9 +204,23 @@ export async function submitOverrideVote(
     voteOutcome: vote
   });
 
-  // Bước 5: Kiểm tra điều kiện kết thúc
-  return await evaluateVoteOutcome(updatedRequest);
+  // Notification, socket và legacy multisig log là side effect hậu commit của final resolution.
+  if (transactionResult.resolvedRequest) {
+    await publishResolvedOverrideOutcome(
+      transactionResult.resolvedRequest,
+      transactionResult.voteOutcome,
+      transactionResult.disbursementAutoApproved
+    );
+  }
+
+  return transactionResult.voteOutcome;
 }
+
+type VoteTransactionResult = {
+  voteOutcome: VoteOutcome;
+  resolvedRequest: OracleOverrideRequestRecord | null;
+  disbursementAutoApproved: boolean;
+};
 
 const COMMISSIONER_CACHE_KEY = 'commissioners:active';
 const COMMISSIONER_CACHE_TTL_S = 5; // [S4-fix] 5 giây thay vì 30s — giảm race window cho revoked commissioner
@@ -226,127 +272,115 @@ async function detectCommissionerSetChange(
   return false;
 }
 
-/**
- * Đánh giá kết quả sau khi vote được ghi — quyết định request có kết thúc chưa.
- * Gọi sau khi updatedRequest đã có vote mới nhất.
- */
-async function evaluateVoteOutcome(
-  request: OracleOverrideRequestRecord
-): Promise<VoteOutcome> {
+/** Xác định và commit final resolution trong cùng transaction với vote và audit. */
+async function resolveVoteOutcome(
+  request: OracleOverrideRequestRecord,
+  session?: ClientSession
+): Promise<VoteTransactionResult> {
   const totalVoters = request.commissionerSnapshot.length;
   const votes = request.votes;
 
   // Bất kỳ REJECT → kết thúc ngay, không cần chờ đủ N người
   const hasReject = votes.some(v => v.vote === 'REJECT');
   if (hasReject) {
-    const resolved = await resolveOverrideRequest(request.overrideRequestId, 'REJECTED', new Date());
-    if (resolved) {
-      // [B2-fix #2] Ghi audit trail ngay khi resolve — trước notify để đảm bảo trail không bị miss
-      const rejectingVote = votes.find(v => v.vote === 'REJECT');
-      void Promise.resolve(createAdminAuditLog({
-        auditId: randomUUID(),
-        adminUserId: rejectingVote?.commissionerId ?? 'unknown',
-        action: 'OVERRIDE_VOTE_REJECT',
-        targetRequestId: resolved.overrideRequestId,
-        reason: rejectingVote?.reason ?? null,
-        metadata: { projectId: resolved.projectId, disbursementRequestId: resolved.disbursementRequestId }
-      })).catch((err: Error) => {
-        logger.error('Ghi audit log OVERRIDE_VOTE_REJECT thất bại.', {
-          overrideRequestId: resolved.overrideRequestId, errorMessage: err.message
-        });
-      });
-      // [D5] Ghi audit trail vào multisig_override_logs
-      void Promise.resolve(logOverrideRejected(resolved, rejectingVote!)).catch((err: Error) => {
-        logger.error('Ghi multisig_override_logs REJECTED thất bại.', {
-          overrideRequestId: resolved.overrideRequestId, errorMessage: err.message
-        });
-      });
-      await notifyOrganizationOverrideResult(resolved, false);
-      // Emit để socket bridge thông báo commissioner request đã bị từ chối
-      oracleEvents.emit('override.executed', {
-        overrideRequestId: resolved.overrideRequestId,
-        projectId: resolved.projectId,
-        organizationId: resolved.organizationId,
-        evidenceCid: resolved.evidenceCid,
-        disbursementRequestId: resolved.disbursementRequestId,
-        totalVoters,
-        executedAt: new Date(),
-        status: 'REJECTED'
-      } satisfies OverrideExecutedEventPayload);
-    }
-    logger.info('Override request bị REJECTED.', {
-      overrideRequestId: request.overrideRequestId,
-      projectId: request.projectId
-    });
-    return { outcome: 'RESOLVED_REJECTED' };
+    const resolved = session
+      ? await resolveOverrideRequest(request.overrideRequestId, 'REJECTED', new Date(), session)
+      : await resolveOverrideRequest(request.overrideRequestId, 'REJECTED', new Date());
+    if (!resolved) throw new VoteRejectedError('REQUEST_NOT_PENDING');
+    return {
+      voteOutcome: { outcome: 'RESOLVED_REJECTED' },
+      resolvedRequest: resolved,
+      disbursementAutoApproved: false
+    };
   }
 
   // Kiểm tra tất cả APPROVE — guard totalVoters > 0 tránh auto-approve khi snapshot rỗng
   const approveCount = votes.filter(v => v.vote === 'APPROVE').length;
   if (totalVoters > 0 && approveCount >= totalVoters) {
-    const resolved = await resolveOverrideRequest(request.overrideRequestId, 'APPROVED', new Date());
-    if (!resolved) {
-      // Concurrent race — một request khác đã resolve trước
-      return { outcome: 'VOTE_RECORDED', pendingVoters: 0, totalVoters };
-    }
+    const resolved = session
+      ? await resolveOverrideRequest(request.overrideRequestId, 'APPROVED', new Date(), session)
+      : await resolveOverrideRequest(request.overrideRequestId, 'APPROVED', new Date());
+    if (!resolved) throw new VoteRejectedError('REQUEST_NOT_PENDING');
 
-    // Auto-approve disbursement nếu có link
     const disbursementAutoApproved = await tryAutoApproveDisbursement(
       resolved.disbursementRequestId,
-      resolved.overrideRequestId
+      resolved.overrideRequestId,
+      session
     );
+    return {
+      voteOutcome: { outcome: 'RESOLVED_APPROVED', disbursementAutoApproved },
+      resolvedRequest: resolved,
+      disbursementAutoApproved
+    };
+  }
 
-    // [B2-fix #2] Ghi audit trail cho APPROVED — compliance yêu cầu immutable log
-    void Promise.resolve(createAdminAuditLog({
-      auditId: randomUUID(),
-      adminUserId: votes[votes.length - 1]?.commissionerId ?? 'unknown',
-      action: 'OVERRIDE_VOTE_APPROVE',
-      targetRequestId: resolved.overrideRequestId,
-      reason: `${approveCount}/${totalVoters} commissioner đồng ý`,
-      metadata: {
-        projectId: resolved.projectId,
-        disbursementRequestId: resolved.disbursementRequestId,
-        disbursementAutoApproved
-      }
-    })).catch((err: Error) => {
-      logger.error('Ghi audit log OVERRIDE_VOTE_APPROVE thất bại.', {
-        overrideRequestId: resolved.overrideRequestId, errorMessage: err.message
+  // Chưa đủ → ghi nhận vote, trả về số người còn chờ
+  const pendingVoters = totalVoters - votes.length;
+  return {
+    voteOutcome: { outcome: 'VOTE_RECORDED', pendingVoters, totalVoters },
+    resolvedRequest: null,
+    disbursementAutoApproved: false
+  };
+}
+
+/** Phát các side effect của final resolution sau khi transaction đã commit thành công. */
+async function publishResolvedOverrideOutcome(
+  resolved: OracleOverrideRequestRecord,
+  outcome: VoteOutcome,
+  disbursementAutoApproved: boolean
+): Promise<void> {
+  if (outcome.outcome === 'RESOLVED_REJECTED') {
+    const rejectingVote = resolved.votes.find(vote => vote.vote === 'REJECT');
+    if (rejectingVote) {
+      void Promise.resolve(logOverrideRejected(resolved, rejectingVote)).catch((error: Error) => {
+        logger.error('Ghi multisig_override_logs REJECTED thất bại.', {
+          overrideRequestId: resolved.overrideRequestId, errorMessage: error.message
+        });
       });
-    });
-
-    // [D5] Ghi audit trail vào multisig_override_logs
-    void Promise.resolve(logOverrideApproved(resolved, votes[votes.length - 1]!, disbursementAutoApproved)).catch((err: Error) => {
-      logger.error('Ghi multisig_override_logs APPROVED thất bại.', {
-        overrideRequestId: resolved.overrideRequestId, errorMessage: err.message
-      });
-    });
-
-    // Emit override.executed (TODO: cần oracle contract để ghi on-chain)
+    }
+    await notifyOrganizationOverrideResult(resolved, false);
     oracleEvents.emit('override.executed', {
       overrideRequestId: resolved.overrideRequestId,
       projectId: resolved.projectId,
       organizationId: resolved.organizationId,
       evidenceCid: resolved.evidenceCid,
       disbursementRequestId: resolved.disbursementRequestId,
-      totalVoters,
+      totalVoters: resolved.commissionerSnapshot.length,
       executedAt: new Date(),
-      status: 'APPROVED'
+      status: 'REJECTED'
     } satisfies OverrideExecutedEventPayload);
-
-    await notifyOrganizationOverrideResult(resolved, true);
-
-    logger.info('Override request APPROVED — tất cả commissioner đã vote.', {
+    logger.info('Override request bị REJECTED.', {
       overrideRequestId: resolved.overrideRequestId,
-      projectId: resolved.projectId,
-      disbursementRequestId: resolved.disbursementRequestId ?? undefined  // null → undefined cho LogMetadata
+      projectId: resolved.projectId
     });
-
-    return { outcome: 'RESOLVED_APPROVED', disbursementAutoApproved };
+    return;
   }
 
-  // Chưa đủ → ghi nhận vote, trả về số người còn chờ
-  const pendingVoters = totalVoters - votes.length;
-  return { outcome: 'VOTE_RECORDED', pendingVoters, totalVoters };
+  if (outcome.outcome !== 'RESOLVED_APPROVED') return;
+  const finalVote = resolved.votes[resolved.votes.length - 1];
+  if (finalVote) {
+    void Promise.resolve(logOverrideApproved(resolved, finalVote, disbursementAutoApproved)).catch((error: Error) => {
+      logger.error('Ghi multisig_override_logs APPROVED thất bại.', {
+        overrideRequestId: resolved.overrideRequestId, errorMessage: error.message
+      });
+    });
+  }
+  oracleEvents.emit('override.executed', {
+    overrideRequestId: resolved.overrideRequestId,
+    projectId: resolved.projectId,
+    organizationId: resolved.organizationId,
+    evidenceCid: resolved.evidenceCid,
+    disbursementRequestId: resolved.disbursementRequestId,
+    totalVoters: resolved.commissionerSnapshot.length,
+    executedAt: new Date(),
+    status: 'APPROVED'
+  } satisfies OverrideExecutedEventPayload);
+  await notifyOrganizationOverrideResult(resolved, true);
+  logger.info('Override request APPROVED — tất cả commissioner đã vote.', {
+    overrideRequestId: resolved.overrideRequestId,
+    projectId: resolved.projectId,
+    disbursementRequestId: resolved.disbursementRequestId ?? undefined
+  });
 }
 
 /**
@@ -356,11 +390,12 @@ async function evaluateVoteOutcome(
  */
 async function tryAutoApproveDisbursement(
   disbursementRequestId: string | null,
-  overrideRequestId: string
+  overrideRequestId: string,
+  session?: ClientSession
 ): Promise<boolean> {
   if (!disbursementRequestId) return false;
 
-  const disbursement = await findDisbursementByRequestId(disbursementRequestId);
+  const disbursement = await findDisbursementByRequestId(disbursementRequestId, session);
   if (!disbursement) {
     logger.warn('Disbursement không tìm thấy khi auto-approve.', {
       overrideRequestId, disbursementRequestId
@@ -368,11 +403,18 @@ async function tryAutoApproveDisbursement(
     return false;
   }
 
-  const updated = await updateDisbursementByRequestIdWithCondition(
-    disbursementRequestId,
-    { status: 'PENDING' },
-    { status: 'APPROVED' }
-  );
+  const updated = session
+    ? await updateDisbursementByRequestIdWithCondition(
+      disbursementRequestId,
+      { status: 'PENDING' },
+      { status: 'APPROVED' },
+      session
+    )
+    : await updateDisbursementByRequestIdWithCondition(
+      disbursementRequestId,
+      { status: 'PENDING' },
+      { status: 'APPROVED' }
+    );
 
   if (!updated) {
     // [B2-fix #3] Phân biệt log level theo trạng thái:

@@ -20,6 +20,8 @@ import { startSbtStatusProjectionWorker, stopSbtStatusProjectionWorker } from '.
 import { initializeSbtEventBridge } from './services/sbtEventBridge.service';
 import { startDataMapperWorker } from './workers/data-mapper.worker';
 import { startNotificationWorker, stopNotificationWorker } from './workers/notification.worker';
+import { startAdminAuditArchiveWorker, stopAdminAuditArchiveWorker } from './workers/adminAuditArchiveWorker';
+import { startAdminActionOutboxWorker, stopAdminActionOutboxWorker } from './workers/adminActionOutboxWorker';
 
 const logger = getLogger();
 
@@ -62,6 +64,9 @@ function startBackgroundWorkers(): void {
   startDataMapperWorker();
   // Notification Worker (E1): consume notification queue, channel routing + throttle + DLQ
   startNotificationWorker();
+  // Admin audit cold archive: chỉ chạy khi private S3-compatible storage được bật/configured.
+  startAdminAuditArchiveWorker();
+  startAdminActionOutboxWorker();
 }
 
 /**
@@ -102,6 +107,8 @@ async function startServer(): Promise<void> {
       stopSbtStatusProjectionWorker();
       // Notification worker: Bull queue.close() chờ active job xong (graceful per spec E1)
       await stopNotificationWorker();
+      stopAdminAuditArchiveWorker();
+      stopAdminActionOutboxWorker();
     } catch (error) {
       logger.error('Lỗi khi shutdown workers.', {
         errorMessage: (error as Error).message

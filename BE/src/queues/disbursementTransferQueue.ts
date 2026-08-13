@@ -1,4 +1,5 @@
 import Queue from 'bull';
+import { createHash } from 'crypto';
 import { getLogger } from '../config/logger';
 import { getRedisClientIfReady } from '../config/redis';
 
@@ -83,6 +84,18 @@ function extractErrorMessage(error: unknown): string {
   return String(error);
 }
 
+/** Tạo Bull job ID ổn định theo transfer chain để retry outbox không tạo duplicate job. */
+export function getDisbursementTransferJobId(
+  requestId: string,
+  attemptNumber: number,
+  idempotencyKey: string
+): string {
+  const fingerprint = createHash('sha256')
+    .update(`${requestId}:${attemptNumber}:${idempotencyKey}`)
+    .digest('hex');
+  return `disbursement-transfer-${fingerprint}`;
+}
+
 /**
  * Hàm đẩy job transfer disbursement vào queue.
  * Mục đích: trigger PayOS transfer khi disbursement đạt APPROVED.
@@ -120,9 +133,15 @@ export async function enqueueDisbursementTransfer(
   if (options?.priority !== undefined) {
     jobOptions.priority = options.priority;
   }
+  const jobId = getDisbursementTransferJobId(requestId, attemptNumber, idempotencyKey);
 
   try {
-    const job = await queue.add(jobData, jobOptions);
+    const existingJob = await queue.getJob(jobId);
+    if (existingJob) {
+      // Retry sau khi queue đã nhận job phải được coi là thành công, không enqueue lại.
+      return { jobId: existingJob.id, enqueued: true };
+    }
+    const job = await queue.add(jobData, { ...jobOptions, jobId });
     logger.info('Disbursement transfer job enqueued.', {
       requestId,
       attemptNumber,
@@ -132,6 +151,8 @@ export async function enqueueDisbursementTransfer(
     });
     return { jobId: job.id, enqueued: true };
   } catch (error) {
+    const existingJob = await queue.getJob(jobId).catch(() => null);
+    if (existingJob) return { jobId: existingJob.id, enqueued: true };
     logger.error('Enqueue disbursement transfer job thất bại.', {
       requestId,
       attemptNumber,
@@ -178,7 +199,10 @@ export async function countPendingJobsByRequestId(
  * Hàm xóa tất cả job đang chờ cho một requestId.
  * Mục đích: cleanup khi disbursement được xử lý thành công hoặc chuyển manual review.
  */
-export async function removePendingJobsByRequestId(requestId: string): Promise<number> {
+export async function removePendingJobsByRequestId(
+  requestId: string,
+  preserveJobId?: string | number
+): Promise<number> {
   const queue = getDisbursementTransferQueue();
   if (!queue) return 0;
 
@@ -188,7 +212,10 @@ export async function removePendingJobsByRequestId(requestId: string): Promise<n
   ]);
 
   const allPendingJobs = [...waitingJobs, ...delayedJobs];
-  const matchingJobs = allPendingJobs.filter(job => job.data.requestId === requestId);
+  const matchingJobs = allPendingJobs.filter(job => (
+    job.data.requestId === requestId
+    && (preserveJobId === undefined || String(job.id) !== String(preserveJobId))
+  ));
 
   const removePromises = matchingJobs.map(async (job): Promise<number> => {
     try {

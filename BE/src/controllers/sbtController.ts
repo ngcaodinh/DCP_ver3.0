@@ -1,9 +1,11 @@
 import { Request, Response } from 'express';
+import type { AuthenticatedRequest } from '../middleware/authenticationMiddleware';
 import { getLogger } from '../config/logger';
 import { rerunSbtMintJob } from '../services/sbtMintService';
 import { sendErrorFromUnknown, sendErrorResponse, sendSuccessResponse } from '../utils/apiResponse';
 import { sanitizeProviderError } from '../utils/sanitizeProviderError';
 import { findProjectNamesByProjectIdList } from '../models/projectModel';
+import { extractAuditRequestContext } from '../utils/auditRequestContext';
 import {
   findSbtMintDlqByStatus,
   countSbtMintDlqByStatus,
@@ -108,9 +110,9 @@ export async function handleGetSbtDlqList(req: Request, res: Response): Promise<
  * - Chỉ áp dụng cho DLQ hoặc FAILED
  * - Reset attemptNumber = 0, tăng reRunCount
  */
-export async function handleRetrySbtMintJob(req: Request, res: Response): Promise<void> {
+export async function handleRetrySbtMintJob(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
-    const userId = (req as unknown as { authenticatedUser?: { userId?: string } }).authenticatedUser?.userId;
+    const userId = req.authenticatedUser?.userId;
     if (!userId) {
       sendErrorResponse(res, 401, 'Không có quyền truy cập.', 'UNAUTHENTICATED');
       return;
@@ -122,7 +124,10 @@ export async function handleRetrySbtMintJob(req: Request, res: Response): Promis
       return;
     }
 
-    const result = await rerunSbtMintJob(mintRequestId.trim(), userId);
+    const auditRequestContext = extractAuditRequestContext(req);
+    const result = auditRequestContext.ipAddress || auditRequestContext.userAgent
+      ? await rerunSbtMintJob(mintRequestId.trim(), userId, auditRequestContext)
+      : await rerunSbtMintJob(mintRequestId.trim(), userId);
 
     logger.info('Admin re-run SBT mint job thành công.', {
       mintRequestId,

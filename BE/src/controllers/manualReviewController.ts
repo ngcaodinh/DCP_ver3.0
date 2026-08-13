@@ -14,6 +14,7 @@ import {
   manualReviewPendingQuerySchema,
   manualReviewRejectBodySchema
 } from '../validators/manualReviewValidator';
+import { extractAuditRequestContext } from '../utils/auditRequestContext';
 
 /**
  * GET /api/disbursements/pending-review
@@ -79,10 +80,13 @@ export async function handleGetManualReviewDetail(
   }
 
   try {
-    const detail = await getManualReviewDetail(paramsResult.data.id, {
+    const auditRequestContext = getOptionalAuditRequestContext(request);
+    const detailOptions = {
       revealBankAccount: queryResult.data.revealBankAccount,
-      adminUserId: request.authenticatedUser?.userId
-    });
+      adminUserId: request.authenticatedUser?.userId,
+      ...(auditRequestContext ? { auditRequestContext } : {})
+    };
+    const detail = await getManualReviewDetail(paramsResult.data.id, detailOptions);
     sendSuccessResponse(response, 200, 'Lấy chi tiết manual review thành công.', detail);
   } catch (error) {
     sendErrorFromUnknown(response, error, 'Không thể lấy chi tiết manual review.');
@@ -109,7 +113,10 @@ export async function handleManualApprove(
   }
 
   try {
-    const result = await manualApprove(paramsResult.data.id, request.authenticatedUser.userId);
+    const auditRequestContext = getOptionalAuditRequestContext(request);
+    const result = auditRequestContext
+      ? await manualApprove(paramsResult.data.id, request.authenticatedUser.userId, auditRequestContext)
+      : await manualApprove(paramsResult.data.id, request.authenticatedUser.userId);
     sendSuccessResponse(response, 202, 'Manual approve đã được chấp nhận và đẩy lại vào queue.', result);
   } catch (error) {
     sendErrorFromUnknown(response, error, 'Manual approve thất bại.');
@@ -142,13 +149,18 @@ export async function handleManualReject(
   }
 
   try {
-    const result = await manualReject(
-      paramsResult.data.id,
-      request.authenticatedUser.userId,
-      bodyResult.data.reason
-    );
+    const auditRequestContext = getOptionalAuditRequestContext(request);
+    const result = auditRequestContext
+      ? await manualReject(paramsResult.data.id, request.authenticatedUser.userId, bodyResult.data.reason, auditRequestContext)
+      : await manualReject(paramsResult.data.id, request.authenticatedUser.userId, bodyResult.data.reason);
     sendSuccessResponse(response, 200, 'Manual reject thành công.', result);
   } catch (error) {
     sendErrorFromUnknown(response, error, 'Manual reject thất bại.');
   }
+}
+
+/** Chỉ truyền HTTP context khi request thực sự có dữ liệu để giữ mock/controller contract cũ. */
+function getOptionalAuditRequestContext(request: AuthenticatedRequest) {
+  const context = extractAuditRequestContext(request);
+  return context.ipAddress || context.userAgent ? context : undefined;
 }

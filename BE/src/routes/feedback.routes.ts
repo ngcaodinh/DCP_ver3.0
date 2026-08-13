@@ -8,8 +8,10 @@ import multer from 'multer';
 import { batchUploadFeedbackController } from '../controllers/feedbackBatchController';
 import { createAuthenticationMiddleware } from '../middleware/authenticationMiddleware';
 import { createRoleAuthorizationMiddleware } from '../middleware/roleAuthorizationMiddleware';
+import { createFreshRoleAuthorizationMiddleware } from '../middleware/roleAuthorizationMiddleware';
 import { createRateLimitMiddleware } from '../middleware/rateLimitMiddleware';
 import { FEEDBACK_BATCH_RATE_LIMIT_CONFIG, MAX_BATCH_SIZE, MAX_UPLOAD_SIZE_BYTES } from '../controllers/feedbackBatchController';
+import { handleFeedbackModeration } from '../controllers/feedbackModerationController';
 
 /**
  * Giới hạn file size cho upload (tái sử dụng từ service).
@@ -35,6 +37,18 @@ export function createFeedbackRoutes(): Router {
     FEEDBACK_BATCH_RATE_LIMIT_CONFIG.maxRequests,
     FEEDBACK_BATCH_RATE_LIMIT_CONFIG.windowMs,
     { bucketName: FEEDBACK_BATCH_RATE_LIMIT_CONFIG.bucketName }
+  );
+  const feedbackModerationRateLimiter = createRateLimitMiddleware(30, 60 * 1000, {
+    bucketName: 'feedback:moderation'
+  });
+
+  // F5/E8: chỉ admin active mới được đổi state moderation và tạo audit trail.
+  router.post(
+    '/:feedbackId/:action(flag|unflag)',
+    createAuthenticationMiddleware(),
+    createFreshRoleAuthorizationMiddleware(['admin']),
+    feedbackModerationRateLimiter,
+    handleFeedbackModeration
   );
 
   /**

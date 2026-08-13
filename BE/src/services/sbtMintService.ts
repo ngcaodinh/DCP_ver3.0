@@ -75,6 +75,12 @@ import {
 } from '../queues/sbtMintQueue';
 import { findImpactSbtNeedingRecovery } from '../models/impactSbtMetadataModel';
 import { invalidateSbtGalleryTotalCache } from './sbtMetadataCacheService';
+import { recordAdminAuditLog } from './audit-log.service';
+import type { AuditRequestContext } from '../utils/auditRequestContext';
+import { runMongoTransaction } from '../utils/mongoTransaction';
+import { createAdminActionOutbox } from '../models/adminActionOutboxModel';
+import { runAdminActionOutboxOnce } from '../workers/adminActionOutboxWorker';
+
 
 /**
  * Số block confirmations dùng chung được đọc từ constants để mint và status update có cùng semantics.
@@ -659,7 +665,8 @@ export async function handleSbtMintFailure(
  */
 export async function rerunSbtMintJob(
   mintRequestId: string,
-  adminUserId: string
+  adminUserId: string,
+  auditRequestContext?: AuditRequestContext
 ): Promise<{ record: ImpactSbtMetadataRecord; jobId: string | number | undefined; enqueued: boolean }> {
   const record = await findImpactSbtMetadataByMintRequestId(mintRequestId);
   if (!record) {
@@ -693,33 +700,64 @@ export async function rerunSbtMintJob(
   }
 
   const reRunAt = new Date();
-  const updatedRecord = await resetImpactSbtForReRun(mintRequestId, {
-    reRunBy: adminUserId,
-    reRunAt
-  });
+  const nextReRunCount = (record.reRunCount ?? 0) + 1;
+  const outboxEventId = `sbt-rerun-dispatch:${mintRequestId}:${nextReRunCount}`;
+  const updatedRecord = await runMongoTransaction(async (session) => {
+    const resetInput = { reRunBy: adminUserId, reRunAt };
+    const updated = session
+      ? await resetImpactSbtForReRun(mintRequestId, resetInput, session)
+      : await resetImpactSbtForReRun(mintRequestId, resetInput);
 
-  if (!updatedRecord) {
-    throw new ApplicationError(
+    if (!updated) {
+      throw new ApplicationError(
       'Không thể reset mint request (có thể đã chuyển CONFIRMED).',
       409,
       'CONFLICT'
     );
-  }
+    }
 
-  // Xóa pending jobs cũ trước khi enqueue mới — tránh duplicate retry job
-  const removedCount = await removePendingSbtMintJobsByRequestId(mintRequestId);
-  logger.info('Đã xóa pending jobs cũ trước khi re-run.', { mintRequestId, removedCount });
+    await recordAdminAuditLog({
+      actionId: `sbt-rerun-requested:${mintRequestId}:${updated.reRunCount ?? nextReRunCount}`,
+      actorType: 'ADMIN',
+      adminId: adminUserId,
+      adminRole: 'admin',
+      actionType: 'SBT_MINT_RERUN_REQUESTED',
+      targetId: mintRequestId,
+      targetType: 'SBT_MINT_REQUEST',
+      requestContext: auditRequestContext,
+      context: {
+        mintRequestId,
+        sbtId: updated.sbtId,
+        previousStatus: record.status,
+        previousAttemptNumber: record.attemptNumber,
+        reRunCount: updated.reRunCount ?? nextReRunCount,
+        enqueueResult: 'REQUESTED'
+      },
+      session
+    });
+    await createAdminActionOutbox({
+      eventId: outboxEventId,
+      eventType: 'SBT_MINT_RERUN',
+      payload: {
+        mintRequestId,
+        sbtId: updated.sbtId,
+        attemptNumber: 1,
+        adminId: adminUserId,
+        adminRole: 'admin',
+        previousStatus: record.status,
+        previousAttemptNumber: record.attemptNumber,
+        reRunCount: updated.reRunCount ?? nextReRunCount,
+        requestContext: auditRequestContext ?? null
+      }
+    }, session);
+    return updated;
+  });
 
-  // Enqueue attempt đầu tiên (attemptNumber = 1)
-  const enqueueResult = await enqueueSbtMint(
-    {
-      mintRequestId,
-      sbtId: updatedRecord.sbtId,
-      attemptNumber: 1,
-      enqueuedBy: 'admin_rerun'
-    },
-    { priority: 3 } // Priority cao hơn oracle_event (5 < 3)
-  );
+  // Consumer có thể dispatch ngay sau commit; nếu queue lỗi, outbox giữ PENDING để retry và ghi ENQUEUED khi thành công.
+  const enqueueResult = await runAdminActionOutboxOnce(outboxEventId).then(dispatched => ({
+    jobId: dispatched > 0 ? `${mintRequestId}-attempt1` : undefined,
+    enqueued: dispatched > 0
+  }));
 
   logger.info('Admin re-run SBT mint job.', {
     mintRequestId,

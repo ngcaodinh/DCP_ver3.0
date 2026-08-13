@@ -60,6 +60,18 @@ vi.mock('../../services/sbtMetadataCacheService', () => ({
   invalidateSbtGalleryTotalCache: vi.fn()
 }));
 
+vi.mock('../../services/audit-log.service', () => ({
+  recordAdminAuditLog: vi.fn().mockResolvedValue({})
+}));
+
+vi.mock('../../models/adminActionOutboxModel', () => ({
+  createAdminActionOutbox: vi.fn().mockResolvedValue({})
+}));
+
+vi.mock('../../workers/adminActionOutboxWorker', () => ({
+  runAdminActionOutboxOnce: vi.fn().mockResolvedValue(1)
+}));
+
 vi.mock('../../utils/applicationError', () => ({
   ApplicationError: class ApplicationError extends Error {
     public statusCode: number;
@@ -90,6 +102,8 @@ import { enqueueSbtMint, getSbtMintJobIndexByRequestId, countPendingSbtMintJobsB
 import { sbtEvents } from '../../events/sbtEvents';
 import { invalidateSbtGalleryTotalCache } from '../../services/sbtMetadataCacheService';
 import { ApplicationError } from '../../utils/applicationError';
+import * as adminActionOutboxModel from '../../models/adminActionOutboxModel';
+import { runAdminActionOutboxOnce } from '../../workers/adminActionOutboxWorker';
 import {
   createSbtMintRequest,
   executeSbtMint,
@@ -711,15 +725,20 @@ describe('sbtMintService - rerunSbtMintJob', () => {
       reRunBy: 'admin-1',
       reRunAt: expect.any(Date)
     }));
-    expect(enqueueSbtMint).toHaveBeenCalledWith(
+    expect(enqueueSbtMint).not.toHaveBeenCalled();
+    expect(adminActionOutboxModel.createAdminActionOutbox).toHaveBeenCalledWith(
       expect.objectContaining({
-        mintRequestId: 'SBT-MINT-rerun',
-        sbtId: 'SBT-rerun',
-        attemptNumber: 1,
-        enqueuedBy: 'admin_rerun'
+        eventType: 'SBT_MINT_RERUN',
+        payload: expect.objectContaining({
+          mintRequestId: 'SBT-MINT-rerun',
+          sbtId: 'SBT-rerun',
+          adminId: 'admin-1',
+          reRunCount: expect.anything()
+        })
       }),
-      expect.objectContaining({ priority: 3 })
+      undefined
     );
+    expect(runAdminActionOutboxOnce).toHaveBeenCalledWith(expect.stringContaining('sbt-rerun-dispatch:SBT-MINT-rerun:'));
     expect(result.record.status).toBe('PENDING');
   });
 });

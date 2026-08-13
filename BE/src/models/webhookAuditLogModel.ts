@@ -45,7 +45,7 @@ webhookAuditLogSchema.index({ action: 1, timestamp: -1 });
 webhookAuditLogSchema.index({ orderCode: 1 });
 
 export const WebhookAuditLogModel = mongoose.models.WebhookAuditLog
-  || mongoose.model<WebhookAuditLog>('WebhookAuditLog', webhookAuditLogSchema, 'admin_audit_logs');
+  || mongoose.model<WebhookAuditLog>('WebhookAuditLog', webhookAuditLogSchema, 'webhook_audit_logs');
 
 /**
  * Ham tao ma audit log duy nhat.

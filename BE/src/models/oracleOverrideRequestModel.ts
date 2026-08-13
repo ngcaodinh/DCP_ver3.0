@@ -1,4 +1,5 @@
 import mongoose, { Schema } from 'mongoose';
+import type { ClientSession } from 'mongoose';
 import type { GpsCoordinate } from './projectGeofenceModel';
 
 /**
@@ -149,9 +150,12 @@ export async function findCommissionerInSnapshot(
 
 /** Lấy override request theo ID. */
 export async function findOverrideRequestById(
-  overrideRequestId: string
+  overrideRequestId: string,
+  session?: ClientSession
 ): Promise<OracleOverrideRequestRecord | null> {
-  return OracleOverrideRequestMongoModel.findOne({ overrideRequestId }).lean().exec();
+  const query = OracleOverrideRequestMongoModel.findOne({ overrideRequestId });
+  if (session) query.session(session);
+  return query.lean().exec();
 }
 
 /** Lấy danh sách override request đang PENDING (dùng cho B2 admin UI). */
@@ -213,7 +217,8 @@ export type AddVoteResult = 'OK' | 'ALREADY_VOTED' | 'NOT_PENDING';
  */
 export async function addVoteToOverrideRequest(
   overrideRequestId: string,
-  vote: CommissionerVote
+  vote: CommissionerVote,
+  session?: ClientSession
 ): Promise<AddVoteResult> {
   const updated = await OracleOverrideRequestMongoModel.findOneAndUpdate(
     {
@@ -222,13 +227,15 @@ export async function addVoteToOverrideRequest(
       'votes.commissionerId': { $ne: vote.commissionerId } // Atomic check: chặn trùng ngay tại DB
     },
     { $push: { votes: vote } },
-    { returnDocument: 'after' }
+    { returnDocument: 'after', ...(session ? { session } : {}) }
   ).lean<OracleOverrideRequestRecord>().exec();
 
   if (updated) return 'OK';
 
   // Phân biệt nguyên nhân null: cần query lại để xác định
-  const current = await OracleOverrideRequestMongoModel.findOne({ overrideRequestId }).lean().exec();
+  const currentQuery = OracleOverrideRequestMongoModel.findOne({ overrideRequestId });
+  if (session) currentQuery.session(session);
+  const current = await currentQuery.lean().exec();
   if (!current || current.status !== 'PENDING') return 'NOT_PENDING';
   return 'ALREADY_VOTED';
 }
@@ -240,12 +247,13 @@ export async function addVoteToOverrideRequest(
 export async function resolveOverrideRequest(
   overrideRequestId: string,
   newStatus: 'APPROVED' | 'REJECTED',
-  resolvedAt: Date
+  resolvedAt: Date,
+  session?: ClientSession
 ): Promise<OracleOverrideRequestRecord | null> {
   const updated = await OracleOverrideRequestMongoModel.findOneAndUpdate(
     { overrideRequestId, status: 'PENDING' },
     { $set: { status: newStatus, resolvedAt } },
-    { returnDocument: 'after' }
+    { returnDocument: 'after', ...(session ? { session } : {}) }
   ).lean<OracleOverrideRequestRecord>().exec();
   return updated ?? null;
 }
@@ -256,12 +264,13 @@ export async function resolveOverrideRequest(
  */
 export async function expireOverrideRequest(
   overrideRequestId: string,
-  expiredAt: Date
+  expiredAt: Date,
+  session?: ClientSession
 ): Promise<OracleOverrideRequestRecord | null> {
   const updated = await OracleOverrideRequestMongoModel.findOneAndUpdate(
     { overrideRequestId, status: 'PENDING' },
     { $set: { status: 'EXPIRED', expiredAt } },
-    { returnDocument: 'after' }
+    { returnDocument: 'after', ...(session ? { session } : {}) }
   ).lean<OracleOverrideRequestRecord>().exec();
   return updated ?? null;
 }

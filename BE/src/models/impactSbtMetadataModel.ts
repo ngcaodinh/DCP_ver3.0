@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import mongoose, { Schema } from 'mongoose';
+import mongoose, { Schema, type ClientSession } from 'mongoose';
 import { ethers } from 'ethers';
 import {
   SBT_HIDDEN_FROM_GALLERY_STATUSES,
@@ -553,7 +553,8 @@ export async function markImpactSbtAsDlq(
  */
 export async function resetImpactSbtForReRun(
   mintRequestId: string,
-  payload: { reRunBy: string; reRunAt: Date }
+  payload: { reRunBy: string; reRunAt: Date },
+  session?: ClientSession
 ): Promise<ImpactSbtMetadataRecord | null> {
   return ImpactSbtMetadataMongoModel.findOneAndUpdate(
     { mintRequestId, status: { $in: ['DLQ', 'FAILED'] } },
@@ -570,7 +571,7 @@ export async function resetImpactSbtForReRun(
       },
       $inc: { reRunCount: 1 }
     },
-    { returnDocument: 'after' }
+    { returnDocument: 'after', ...(session ? { session } : {}) }
   ).lean().exec();
 }
 

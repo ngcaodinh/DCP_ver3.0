@@ -6,6 +6,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import request from 'supertest';
 
+const authModelMocks = vi.hoisted(() => ({
+  findUserById: vi.fn()
+}));
+
 interface JsonResponse {
   status: (code: number) => JsonResponse;
   json: (body: unknown) => unknown;
@@ -35,20 +39,28 @@ vi.mock('../../middleware/authenticationMiddleware', () => ({
       : '';
     const roleByToken: Record<string, string> = {
       'test-token-admin': 'admin',
+      'test-token-admin-stale': 'admin',
+      'test-token-admin-demoted': 'admin',
       'test-token-regulatory': 'regulatory',
       'test-token-organization': 'organizations',
       'test-token-donor': 'donor'
     };
+    const userIdByToken: Record<string, string> = {
+      'test-token-admin-demoted': 'admin-demoted-1'
+    };
     const role = roleByToken[token];
     if (role) {
-      (req as unknown as { authenticatedUser?: { userId: string; role: string } }).authenticatedUser = {
-        userId: `${role}-1`,
-        role
+      (req as unknown as { authenticatedUser?: { userId: string; role: string; authVersion: number } }).authenticatedUser = {
+        userId: userIdByToken[token] ?? `${role}-1`,
+        role,
+        authVersion: token === 'test-token-admin-stale' ? 1 : 2
       };
     }
     next();
   }
 }));
+
+vi.mock('../../models/authModel', () => authModelMocks);
 
 vi.mock('../../middleware/rateLimitMiddleware', () => ({
   createRateLimitMiddleware: () => (_req: Request, _res: Response, next: NextFunction): void => next()
@@ -76,6 +88,12 @@ function createTestApp() {
 describe('oracleRoutes — override request detail RBAC', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    authModelMocks.findUserById.mockImplementation(async (userId: string) => ({
+      id: userId,
+      role: userId === 'admin-demoted-1' ? 'donor' : userId.startsWith('regulatory') ? 'regulatory' : 'admin',
+      accountStatus: 'ACTIVE',
+      authVersion: 2
+    }));
   });
 
   it.each([
@@ -104,6 +122,54 @@ describe('oracleRoutes — override request detail RBAC', () => {
 
     expect(response.status).toBe(403);
     expect(oracleControllerMocks.handleGetOverrideRequestById).not.toHaveBeenCalled();
+  });
+});
+
+describe('oracleRoutes — override vote fresh authorization', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    authModelMocks.findUserById.mockImplementation(async (userId: string) => ({
+      id: userId,
+      role: userId === 'admin-demoted-1' ? 'donor' : userId.startsWith('regulatory') ? 'regulatory' : 'admin',
+      accountStatus: 'ACTIVE',
+      authVersion: 2
+    }));
+  });
+
+  it('cho phép commissioner có authVersion hiện tại vote qua route', async () => {
+    const app = createTestApp();
+
+    const response = await request(app)
+      .post('/api/oracle/override-requests/req-001/vote')
+      .set('Authorization', 'Bearer test-token-admin')
+      .send({ vote: 'APPROVE', reason: 'Reason đủ dài cho vote' });
+
+    expect(response.status).toBe(200);
+    expect(oracleControllerMocks.handleVoteOverrideRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it('chặn JWT stale trước khi gọi controller vote', async () => {
+    const app = createTestApp();
+
+    const response = await request(app)
+      .post('/api/oracle/override-requests/req-001/vote')
+      .set('Authorization', 'Bearer test-token-admin-stale')
+      .send({ vote: 'APPROVE', reason: 'Reason đủ dài cho vote' });
+
+    expect(response.status).toBe(401);
+    expect(oracleControllerMocks.handleVoteOverrideRequest).not.toHaveBeenCalled();
+  });
+
+  it('chặn commissioner đã bị demote trước khi gọi controller vote', async () => {
+    const app = createTestApp();
+
+    const response = await request(app)
+      .post('/api/oracle/override-requests/req-001/vote')
+      .set('Authorization', 'Bearer test-token-admin-demoted')
+      .send({ vote: 'APPROVE', reason: 'Reason đủ dài cho vote' });
+
+    expect(response.status).toBe(403);
+    expect(oracleControllerMocks.handleVoteOverrideRequest).not.toHaveBeenCalled();
   });
 });
 

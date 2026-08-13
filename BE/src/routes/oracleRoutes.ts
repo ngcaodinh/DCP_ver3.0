@@ -1,7 +1,10 @@
 import { Router } from 'express';
 import multer from 'multer';
 import { createAuthenticationMiddleware } from '../middleware/authenticationMiddleware';
-import { createRoleAuthorizationMiddleware } from '../middleware/roleAuthorizationMiddleware';
+import {
+  createFreshRoleAuthorizationMiddleware,
+  createRoleAuthorizationMiddleware
+} from '../middleware/roleAuthorizationMiddleware';
 import { createRateLimitMiddleware } from '../middleware/rateLimitMiddleware';
 import { createUploadValidationMiddleware, createBatchUploadValidationMiddleware } from '../middleware/upload-validation.middleware';
 import {
@@ -32,6 +35,7 @@ export function createOracleRoutes(): Router {
   const authMiddleware = createAuthenticationMiddleware();
   const orgMiddleware = createRoleAuthorizationMiddleware(['organizations']);
   const adminMiddleware = createRoleAuthorizationMiddleware(['admin', 'regulatory']);
+  const freshCommissionerMiddleware = createFreshRoleAuthorizationMiddleware(['admin', 'regulatory']);
   const orgOrAdminMiddleware = createRoleAuthorizationMiddleware(['organizations', 'admin', 'regulatory']);
 
   // Rate limit tách riêng: verify (write) vs geofence read vs geofence write
@@ -105,7 +109,7 @@ export function createOracleRoutes(): Router {
   router.post(
     '/override-requests/:overrideRequestId/vote',
     authMiddleware,
-    adminMiddleware,
+    freshCommissionerMiddleware,
     voteRateLimit,
     handleVoteOverrideRequest
   );

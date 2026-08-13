@@ -28,6 +28,7 @@ import {
 import { findVerificationById } from '../models/oracleVerificationResultModel';
 import { findProjectById, findProjectsByIdList } from '../repositories/projectRepository';
 import { validateGeofenceRequestBody } from '../validators/geofenceValidator';
+import { extractAuditRequestContext } from '../utils/auditRequestContext';
 
 const logger = getLogger();
 
@@ -475,7 +476,10 @@ export async function handleVoteOverrideRequest(
       return;
     }
 
-    const outcome = await submitOverrideVote(overrideRequestId, userId, role, vote, reason.trim());
+    const auditRequestContext = extractAuditRequestContext(request);
+    const outcome = auditRequestContext.ipAddress || auditRequestContext.userAgent
+      ? await submitOverrideVote(overrideRequestId, userId, role, vote, reason.trim(), auditRequestContext)
+      : await submitOverrideVote(overrideRequestId, userId, role, vote, reason.trim());
 
     switch (outcome.outcome) {
       case 'VOTE_RECORDED':

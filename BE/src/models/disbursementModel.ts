@@ -1,4 +1,4 @@
-import mongoose, { Schema } from 'mongoose';
+import mongoose, { Schema, type ClientSession } from 'mongoose';
 
 /**
  * Trạng thái yêu cầu giải ngân.
@@ -162,8 +162,13 @@ function buildDisbursementUpdatePayload(payload: Partial<DisbursementRecord>): P
 }
 
 /** Tìm bản ghi theo requestId. Mục đích: truy vấn chi tiết một yêu cầu giải ngân. */
-export async function findDisbursementByRequestId(requestId: string): Promise<DisbursementRecord | null> {
-  return DisbursementMongoModel.findOne({ requestId }).lean<DisbursementRecord>().exec();
+export async function findDisbursementByRequestId(
+  requestId: string,
+  session?: ClientSession
+): Promise<DisbursementRecord | null> {
+  const query = DisbursementMongoModel.findOne({ requestId });
+  if (session) query.session(session);
+  return query.lean<DisbursementRecord>().exec();
 }
 
 /** Tìm nhiều bản ghi giải ngân theo requestId để tránh N+1 query khi render queue admin. */
@@ -310,12 +315,13 @@ export async function updateDisbursementByRequestId(
 export async function updateDisbursementByRequestIdWithCondition(
   requestId: string,
   condition: Record<string, unknown>,
-  payload: Partial<DisbursementRecord>
+  payload: Partial<DisbursementRecord>,
+  session?: ClientSession
 ): Promise<DisbursementRecord | null> {
   const updated = await DisbursementMongoModel.findOneAndUpdate(
     { requestId, ...condition },
     { $set: buildDisbursementUpdatePayload(payload) },
-    { returnDocument: 'after' }
+    { returnDocument: 'after', ...(session ? { session } : {}) }
   ).exec();
 
   return updated ? (updated.toObject() as DisbursementRecord) : null;

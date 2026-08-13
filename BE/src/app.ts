@@ -22,6 +22,7 @@ import { createVerificationRoutes } from './routes/verification.routes';
 import { createFeedbackRoutes } from './routes/feedback.routes';
 import { createPublicFeedbackRoutes } from './routes/public-feedback.routes';
 import { createTileProxyRoutes } from './routes/tileProxyRoutes';
+import { createAuditLogRoutes } from './routes/audit-log.routes';
 import { validateGuestJwtConfig } from './config/guestJsonWebToken';
 import { applySeoAndCacheHeaders } from './middleware/seoCacheMiddleware';
 import { API_GUEST_PREFIX } from './config/apiPrefixes';
@@ -132,6 +133,7 @@ function registerRoutes(): void {
   application.use('/api/sybil', createSybilRoutes());
   application.use('/api/disbursement', createDisbursementRoutes());
   application.use('/api/admin/dashboard', createAdminDashboardRoutes());
+  application.use('/api/audit-logs', createAuditLogRoutes());
   application.use('/api/disbursements', createManualReviewRoutes());
   application.use('/api/oracle', createOracleRoutes());
   application.use('/api/sbt', createSbtRoutes());
