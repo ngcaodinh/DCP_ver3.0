@@ -21,6 +21,7 @@ import { findGuestWalletSessionByWalletAddress } from '../repositories/guestWall
 import { findGuestDonationRiskByWalletAddress } from '../repositories/guestDonationRiskRepository';
 import { updateAuditByTransactionHash } from '../repositories/anonymousDonationAuditRepository';
 import { incrementSessionDonationCounters } from '../repositories/guestWalletSessionRepository';
+import { recordDonationMetrics } from '../utils/donationMetrics';
 
 const logger = getLogger();
 
@@ -451,6 +452,9 @@ export async function handleDonationPostIndex(
     trustMultiplier
   );
 
+  // Quy ước hiện tại là 1 token = 1 VND (đối chiếu depositService.ts:124-125); nếu đổi tỷ lệ, metric _vnd phải đổi theo.
+  recordDonationMetrics(donationEvent.amount);
+
   logger.info(`Donation post-indexed. isGuest=${isGuestDonation} sessionId=${guestSession?.sessionId ?? 'n/a'} projectId=${donationEvent.projectId} trustMultiplier=${trustMultiplier}`);
   return isGuestDonation;
 }
@@ -666,8 +670,8 @@ export async function recordDonationFromTransactionHash(authenticatedUserId: str
   //   hoặc không cần thiết (donation qua UC3.1 khác flow).
   // - Session counters chỉ áp dụng cho guest wallets, không có guest session ở đây.
   // - Chỉ cần cập nhật metrics với trustMultiplier = 1.0 (registered user).
-  // Nếu thêm handleDonationPostIndex vào đây → double-count metrics vì audit lookup
-  // sẽ không match (registered user không có audit record với onChainTxHash từ path này).
+  // Nếu thêm handleDonationPostIndex vào đây → double-count cả ranking metrics và Prometheus metrics
+  // vì audit lookup sẽ không match (registered user không có audit record với onChainTxHash từ path này).
   await applyDonationToMetrics(
     donationEventRecord.projectId,
     donationEventRecord.amount,

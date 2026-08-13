@@ -4,6 +4,7 @@ import express, { NextFunction, Request, Response } from 'express';
 import helmet from 'helmet';
 import { createAuthRoutes } from './routes/authRoutes';
 import { createHealthRoutes } from './routes/healthRoutes';
+import { createMetricsRoutes } from './routes/metrics.routes';
 import { createDepositRoutes } from './routes/depositRoutes';
 import { createProjectRoutes } from './routes/projectRoutes';
 import { createDonationRoutes } from './routes/donationRoutes';
@@ -28,6 +29,8 @@ import { applySeoAndCacheHeaders } from './middleware/seoCacheMiddleware';
 import { API_GUEST_PREFIX } from './config/apiPrefixes';
 import { getLogger } from './config/logger';
 import { getCacheHmacKey } from './utils/cacheIntegrity';
+import { metricsMiddleware } from './middleware/metrics.middleware';
+import { validateMetricsAuthConfig } from './config/metricsAuthConfig';
 
 const application = express();
 
@@ -55,6 +58,7 @@ function validateCacheHmacConfig(): void {
 }
 
 validateCacheHmacConfig();
+validateMetricsAuthConfig();
 
 /** Hàm cấu hình middleware chính cho ứng dụng. Mục đích: áp dụng bảo mật, tối ưu hiệu năng và parse request body cho toàn hệ thống. */
 function configureMiddlewares(): void {
@@ -95,6 +99,7 @@ function configureMiddlewares(): void {
   );
   application.use(compression());
   application.use(applyApiResponseTimeHeader);
+  application.use(metricsMiddleware);
   application.use(applySeoAndCacheHeaders);
 
   // Logic này giữ giới hạn body thống nhất giữa local và production để tránh OOM trên VPS ít RAM.
@@ -126,6 +131,7 @@ function applyApiResponseTimeHeader(request: Request, response: Response, next: 
 function registerRoutes(): void {
   application.use('/auth', createAuthRoutes());
   application.use(createHealthRoutes()); // → /health, /ready, /live
+  application.use(createMetricsRoutes());
   application.use('/api/deposit', createDepositRoutes());
   application.use('/projects', createProjectRoutes());
   application.use('/donations', createDonationRoutes());
@@ -159,6 +165,9 @@ registerRoutes();
 application.use((err: Error, _req: Request, res: Response, _next: NextFunction): void => {
   void _next;
   const logger = getLogger();
+  const errorWithStatus = err as Error & { status?: number; type?: string };
+  const isPayloadTooLarge = errorWithStatus.status === 413 || errorWithStatus.type === 'entity.too.large';
+  const responseStatusCode = isPayloadTooLarge ? 413 : 500;
   logger.error('Unhandled error in request', {
     errorMessage: err.message,
     errorStack: err.stack
@@ -166,10 +175,13 @@ application.use((err: Error, _req: Request, res: Response, _next: NextFunction):
 
   // Không leak stack trace ở production
   const isDevelopment = process.env.NODE_ENV === 'development';
-  res.status(500).json({
+  // Giữ mã lỗi 413 chuẩn để client và metrics phân biệt payload quá lớn với lỗi server nội bộ.
+  res.status(responseStatusCode).json({
     success: false,
-    message: 'Đã xảy ra lỗi nội bộ. Vui lòng thử lại sau.',
-    errorCode: 'INTERNAL_ERROR',
+    message: isPayloadTooLarge
+      ? 'Payload vượt quá giới hạn cho phép.'
+      : 'Đã xảy ra lỗi nội bộ. Vui lòng thử lại sau.',
+    errorCode: isPayloadTooLarge ? 'PAYLOAD_TOO_LARGE' : 'INTERNAL_ERROR',
     details: isDevelopment && err.stack ? [{ field: 'stack', message: err.stack }] : []
   });
 });

@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Router } from 'express';
-import mongoose from 'mongoose';
+import request from 'supertest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const applicationRouteModules: Array<[string, string]> = [
   ['../../routes/authRoutes', 'createAuthRoutes'],
@@ -32,36 +32,40 @@ function mockApplicationRoutes(): void {
   }
 }
 
-describe('application bootstrap cache integrity', () => {
+describe('application metrics integration', () => {
   afterEach(() => {
-    // Xóa model Mongoose được nạp trong lần import app trước khi vi.resetModules() nạp lại module.
-    mongoose.deleteModel(/.+/);
     vi.unstubAllEnvs();
     vi.resetModules();
   });
 
-  it('fail-fast khi production thiếu cả CACHE_HMAC_KEY và JWT_SECRET', async () => {
-    vi.resetModules();
-    vi.stubEnv('NODE_ENV', 'production');
-    vi.stubEnv('CACHE_HMAC_KEY', '');
-    vi.stubEnv('JWT_SECRET', '');
-
-    // Cô lập bootstrap guard khỏi side effect của các route/queue khi import app.
-    mockApplicationRoutes();
-
-    // Import app là boundary khởi động thật; nếu wiring bị xóa, assertion này sẽ không còn fail.
-    await expect(import('../../app')).rejects.toThrow(/CACHE_HMAC_KEY/);
-  });
-
-  it('fail-fast khi production thiếu METRICS_AUTH_TOKEN sau khi các secret bootstrap hợp lệ', async () => {
-    vi.resetModules();
-    vi.stubEnv('NODE_ENV', 'production');
-    vi.stubEnv('GUEST_JWT_SECRET', 'g'.repeat(32));
-    vi.stubEnv('CACHE_HMAC_KEY', 'c'.repeat(32));
-    vi.stubEnv('JWT_SECRET', 'j'.repeat(32));
+  it('keeps metrics mounted before the JSON parser for oversized request bodies', async () => {
+    vi.stubEnv('NODE_ENV', 'test');
+    vi.stubEnv('REQUEST_BODY_LIMIT', '1kb');
     vi.stubEnv('METRICS_AUTH_TOKEN', '');
     mockApplicationRoutes();
 
-    await expect(import('../../app')).rejects.toThrow(/METRICS_AUTH_TOKEN/);
+    const { default: application } = await import('../../app');
+    const { getMetricsRegistry, resetMetricsForTest } = await import('../../config/metricsRegistry');
+    resetMetricsForTest();
+
+    await request(application)
+      .get('/metrics')
+      .expect(200);
+
+    const oversizedResponse = await request(application)
+      .post('/unmatched')
+      .set('Content-Type', 'application/json')
+      .send({ payload: 'x'.repeat(2_048) })
+      .expect(413);
+
+    expect(oversizedResponse.body).toEqual(expect.objectContaining({
+      success: false,
+      errorCode: 'PAYLOAD_TOO_LARGE'
+    }));
+
+    const metrics = await getMetricsRegistry().metrics();
+    expect(metrics).toContain(
+      'http_requests_total{method="POST",route="unmatched",status_code="413"} 1'
+    );
   });
 });

@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ethers } from 'ethers';
 
+const recordBlockchainTransactionMock = vi.hoisted(() => vi.fn());
+
 // vi.mock hoists above imports, so ethers needs to be imported before any vi.mock calls
 // that reference it. The sbtMintService module creates SBT_MINTED_EVENT_IFACE at module
 // evaluation time, so ethers must be available. Import at top ensures this.
@@ -60,6 +62,10 @@ vi.mock('../../services/sbtMetadataCacheService', () => ({
   invalidateSbtGalleryTotalCache: vi.fn()
 }));
 
+vi.mock('../../utils/blockchainMetrics', () => ({
+  recordBlockchainTransaction: recordBlockchainTransactionMock
+}));
+
 vi.mock('../../services/audit-log.service', () => ({
   recordAdminAuditLog: vi.fn().mockResolvedValue({})
 }));
@@ -102,6 +108,7 @@ import { enqueueSbtMint, getSbtMintJobIndexByRequestId, countPendingSbtMintJobsB
 import { sbtEvents } from '../../events/sbtEvents';
 import { invalidateSbtGalleryTotalCache } from '../../services/sbtMetadataCacheService';
 import { ApplicationError } from '../../utils/applicationError';
+import { recordBlockchainTransaction } from '../../utils/blockchainMetrics';
 import * as adminActionOutboxModel from '../../models/adminActionOutboxModel';
 import { runAdminActionOutboxOnce } from '../../workers/adminActionOutboxWorker';
 import {
@@ -354,6 +361,10 @@ describe('sbtMintService - executeSbtMint', () => {
       pendingRecord.tokenUri,
       { gasLimit: expect.any(BigInt) }
     );
+    expect(recordBlockchainTransaction).toHaveBeenCalledWith(expect.objectContaining({
+      operation: 'mint_sbt',
+      receipt: expect.objectContaining({ status: 1 })
+    }));
     expect(markImpactSbtAsSubmitted).toHaveBeenCalledWith('SBT-MINT-pending', expect.objectContaining({
       transactionHash: '0xtxhash456',
       attemptNumber: 1
@@ -404,6 +415,10 @@ describe('sbtMintService - executeSbtMint', () => {
 
     await expect(executeSbtMint('SBT-MINT-revert', 1))
       .rejects.toThrow('revert on-chain');
+    expect(recordBlockchainTransaction).toHaveBeenCalledWith(expect.objectContaining({
+      operation: 'mint_sbt',
+      receipt: expect.objectContaining({ status: 0 })
+    }));
   });
 
   it('throw "Không tìm thấy SBTMinted event" khi logs không chứa event', async () => {

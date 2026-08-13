@@ -1,4 +1,5 @@
 import { ethers } from 'ethers';
+import { recordBlockchainTransaction } from '../utils/blockchainMetrics';
 
 const mintAbi = [
   'function mintFromBackend(address receiver, uint256 amount, string orderCode) external returns (bool)'
@@ -25,6 +26,7 @@ export async function mintTokenForDeposit(walletAddress: string, amountToken: nu
   const signer = new ethers.Wallet(privateKey, provider);
   const tokenContract = new ethers.Contract(tokenContractAddress, mintAbi, signer);
 
+  const submittedAtMs = Date.now();
   const mintTransaction = await tokenContract.mintFromBackend(walletAddress, amountToken, orderCode);
   const transactionReceipt = await mintTransaction.wait(2);
 
@@ -32,8 +34,17 @@ export async function mintTokenForDeposit(walletAddress: string, amountToken: nu
     throw new Error('Không lấy được transaction hash sau khi mint token.');
   }
 
+  recordBlockchainTransaction({
+    operation: 'mint_deposit',
+    receipt: transactionReceipt,
+    startedAtMs: submittedAtMs
+  });
+
+  if (transactionReceipt.status !== 1) {
+    throw new Error(`Mint token nạp tiền bị revert on-chain (hash=${transactionReceipt.hash}, status=${transactionReceipt.status}).`);
+  }
+
   return {
     transactionHash: transactionReceipt.hash
   };
 }
-

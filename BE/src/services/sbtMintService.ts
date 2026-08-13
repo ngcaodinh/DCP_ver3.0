@@ -80,6 +80,7 @@ import type { AuditRequestContext } from '../utils/auditRequestContext';
 import { runMongoTransaction } from '../utils/mongoTransaction';
 import { createAdminActionOutbox } from '../models/adminActionOutboxModel';
 import { runAdminActionOutboxOnce } from '../workers/adminActionOutboxWorker';
+import { recordBlockchainTransaction } from '../utils/blockchainMetrics';
 
 
 /**
@@ -410,6 +411,12 @@ export async function executeSbtMint(
   if (!receipt) {
     throw new Error(`Không nhận được receipt cho tx mint SBT (hash=${txHash}).`);
   }
+
+  recordBlockchainTransaction({
+    operation: 'mint_sbt',
+    receipt,
+    startedAtMs: submittedAt.getTime()
+  });
 
   if (receipt.status !== 1) {
     // Tx đã được mine nhưng revert

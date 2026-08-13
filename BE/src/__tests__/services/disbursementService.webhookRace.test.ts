@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { DisbursementRecord } from '../../models/disbursementModel';
 
 const mockFinalizeDisbursement = vi.hoisted(() => vi.fn());
+const mockRecordBlockchainTransaction = vi.hoisted(() => vi.fn());
 const mockFindDisbursementByRequestId = vi.hoisted(() => vi.fn());
 const mockUpdateDisbursementByRequestIdWithCondition = vi.hoisted(() => vi.fn());
 const mockRemovePendingJobsByRequestId = vi.hoisted(() => vi.fn());
@@ -24,6 +25,10 @@ vi.mock('../../config/logger', () => ({
     warn: vi.fn(),
     error: vi.fn()
   })
+}));
+
+vi.mock('../../utils/blockchainMetrics', () => ({
+  recordBlockchainTransaction: mockRecordBlockchainTransaction
 }));
 
 vi.mock('../../models/disbursementModel', () => ({
@@ -74,6 +79,7 @@ vi.mock('../../services/zeroDevService', () => ({
 }));
 
 import { processDisbursementTransferWebhook } from '../../services/disbursementService';
+import { recordBlockchainTransaction } from '../../utils/blockchainMetrics';
 
 /** Tạo disbursement fixture đủ field cho webhook transfer race tests. */
 function makeDisbursement(overrides: Partial<DisbursementRecord> = {}): DisbursementRecord {
@@ -151,6 +157,10 @@ describe('processDisbursementTransferWebhook race guards', () => {
       }),
       expect.objectContaining({ status: 'COMPLETED', payosTransferStatus: 'SUCCESS' })
     );
+    expect(recordBlockchainTransaction).toHaveBeenCalledWith(expect.objectContaining({
+      operation: 'finalize_disbursement',
+      receipt: expect.objectContaining({ status: 1 })
+    }));
     expect(mockRemovePendingJobsByRequestId).not.toHaveBeenCalled();
   });
 
@@ -201,5 +211,57 @@ describe('processDisbursementTransferWebhook race guards', () => {
     expect(result.payosTransferStatus).toBe('PROCESSING');
     expect(mockFinalizeDisbursement).not.toHaveBeenCalled();
     expect(mockUpdateDisbursementByRequestIdWithCondition).not.toHaveBeenCalled();
+  });
+
+  it('moves the webhook to manual review when finalize returns no receipt', async () => {
+    const approved = makeDisbursement();
+    const manualReview = makeDisbursement({ payosTransferStatus: 'MANUAL_REVIEW' });
+    mockFinalizeDisbursement.mockResolvedValue({
+      hash: '0xmissing-receipt',
+      wait: vi.fn().mockResolvedValue(null)
+    });
+    mockFindDisbursementByRequestId.mockResolvedValueOnce(approved);
+    mockUpdateDisbursementByRequestIdWithCondition.mockResolvedValue(manualReview);
+
+    const result = await processDisbursementTransferWebhook(
+      { requestId: 'DS-RACE-001', status: 'SUCCESS' },
+      { skipChecksumVerify: true }
+    );
+
+    expect(result.payosTransferStatus).toBe('MANUAL_REVIEW');
+    expect(mockUpdateDisbursementByRequestIdWithCondition).toHaveBeenCalledWith(
+      'DS-RACE-001',
+      expect.objectContaining({
+        status: { $nin: ['COMPLETED', 'REJECTED', 'CANCELLED'] },
+        payosTransferStatus: { $nin: ['SUCCESS', 'FAILED'] }
+      }),
+      expect.objectContaining({ payosTransferStatus: 'MANUAL_REVIEW' })
+    );
+    expect(recordBlockchainTransaction).not.toHaveBeenCalled();
+    expect(mockOpenManualReviewQueueForDisbursement).toHaveBeenCalledTimes(1);
+  });
+
+  it('records a reverted finalize receipt and moves the webhook to manual review', async () => {
+    const approved = makeDisbursement();
+    const manualReview = makeDisbursement({ payosTransferStatus: 'MANUAL_REVIEW' });
+    const revertedReceipt = { status: 0, gasUsed: 21000n };
+    mockFinalizeDisbursement.mockResolvedValue({
+      hash: '0xreverted-finalize',
+      wait: vi.fn().mockResolvedValue(revertedReceipt)
+    });
+    mockFindDisbursementByRequestId.mockResolvedValueOnce(approved);
+    mockUpdateDisbursementByRequestIdWithCondition.mockResolvedValue(manualReview);
+
+    const result = await processDisbursementTransferWebhook(
+      { requestId: 'DS-RACE-001', status: 'SUCCESS' },
+      { skipChecksumVerify: true }
+    );
+
+    expect(result.payosTransferStatus).toBe('MANUAL_REVIEW');
+    expect(recordBlockchainTransaction).toHaveBeenCalledWith(expect.objectContaining({
+      operation: 'finalize_disbursement',
+      receipt: revertedReceipt
+    }));
+    expect(mockOpenManualReviewQueueForDisbursement).toHaveBeenCalledTimes(1);
   });
 });

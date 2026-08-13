@@ -29,6 +29,7 @@ import {
 import { removePendingJobsByRequestId } from '../queues/disbursementTransferQueue';
 import { triggerPayosTransferForApprovedDisbursement } from '../workers/payosTransferWorker';
 import { openManualReviewQueueForDisbursement } from './manualReviewService';
+import { recordBlockchainTransaction } from '../utils/blockchainMetrics';
 
 // ============ ABI ============
 
@@ -902,10 +903,21 @@ async function finalizeDisbursementOnChain(onChainRequestId: number, providerTra
   const { contract } = getAdminWritableMultisigContract();
   const transactionIdAsUint256 = mapProviderTransactionIdToUint256(providerTransactionId);
 
+  const submittedAtMs = Date.now();
   const finalizeTransaction = await contract.finalizeDisbursement(BigInt(onChainRequestId), transactionIdAsUint256);
   const finalizeReceipt = await finalizeTransaction.wait();
 
-  if (finalizeReceipt && Number(finalizeReceipt.status) !== 1) {
+  if (!finalizeReceipt) {
+    throw new Error(`Finalize disbursement không trả về transaction receipt. txHash=${finalizeTransaction.hash}`);
+  }
+
+  recordBlockchainTransaction({
+    operation: 'finalize_disbursement',
+    receipt: finalizeReceipt,
+    startedAtMs: submittedAtMs
+  });
+
+  if (Number(finalizeReceipt.status) !== 1) {
     throw new Error(`Finalize disbursement thất bại. txHash=${finalizeTransaction.hash}`);
   }
 
