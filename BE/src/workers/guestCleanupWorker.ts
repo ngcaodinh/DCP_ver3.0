@@ -9,6 +9,7 @@
  * - Task 4: Anti-farming check — flag nếu guest donations > 60% total donations
  */
 import { getLogger } from '../config/logger';
+import { getRequestContext, runWithWorkerContext } from '../config/requestContext';
 import {
   expireGuestSessions,
   purgeOldGuestSessions,
@@ -405,7 +406,11 @@ export async function detectSessionVelocity(
       totalMarked += marked;
       handledSessionIds.add(prev.sessionId);
       handledSessionIds.add(curr.sessionId);
-      logger.info(`[GuestCleanup] Task3c: Velocity cluster ${clusterId} → marked ${marked} sessions (${prev.sessionId} ↔ ${curr.sessionId}, ${(timeDiffMs / 1000).toFixed(0)}s).`);
+      logger.info('[GuestCleanup] Task3c: Velocity cluster marked sessions.', {
+        clusterId,
+        marked,
+        durationMs: timeDiffMs
+      });
     }
   }
 
@@ -542,7 +547,7 @@ export async function taskDetectClusters(now: Date = new Date()): Promise<number
  *
  * @returns Object chứa kết quả của từng task
  */
-export async function runGuestCleanup(): Promise<{
+async function runGuestCleanupInternal(): Promise<{
   expired: number;
   purged: number;
   clusters: number;
@@ -569,9 +574,20 @@ export async function runGuestCleanup(): Promise<{
   return { expired, purged, clusters, farmingDetected };
 }
 
+/** Chạy guest cleanup trong correlation context riêng của scheduled worker. */
+export async function runGuestCleanup(): Promise<{
+  expired: number;
+  purged: number;
+  clusters: number;
+  farmingDetected: boolean;
+}> {
+  return runWithWorkerContext('guest-cleanup', () => runGuestCleanupInternal());
+}
+
 /**
  * Hàm chạy guest cleanup một lần (dùng bởi rankingReconcileWorker).
  * Cleanup worker chạy định kỳ 00:00 mỗi ngày thông qua rankingReconcileWorker.
+ * Nếu được gọi từ worker cha, hàm giữ nguyên correlation context của lần chạy đó.
  *
  * @returns Object chứa kết quả của từng task
  */
@@ -581,5 +597,9 @@ export async function runGuestCleanupOnce(): Promise<{
   clusters: number;
   farmingDetected: boolean;
 }> {
+  if (getRequestContext()?.workerRunId) {
+    return runGuestCleanupInternal();
+  }
+
   return runGuestCleanup();
 }

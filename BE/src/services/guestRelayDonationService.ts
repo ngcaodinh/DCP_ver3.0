@@ -235,9 +235,6 @@ export async function executeGuestRelayedDonation(
   }
 
   // === Bước 5 & 6: Decrypt owner key + Create kernel client không paymaster ===
-  // #region agent debug log
-  fetch('http://127.0.0.1:7710/ingest/fa15d132-717d-4b5a-8ef1-2fdf5f966e4c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'e5a964'},body:JSON.stringify({sessionId:'e5a964',location:'guestRelayDonationService.ts:251',message:'Relay: step 5-6 about to create kernel client',data:{sessionId,hasEncryptedKey:!!session.smartAccountOwnerEncryptedPrivateKey,bundlerUrl:getZeroDevConfig().bundlerUrl},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let kernelClient: Awaited<ReturnType<typeof createKernelClientFromEncryptedOwnerKey>>;
   try {
@@ -301,9 +298,6 @@ export async function executeGuestRelayedDonation(
   });
 
   // === Bước 9: Send transaction ===
-  // #region agent debug log
-  fetch('http://127.0.0.1:7710/ingest/fa15d132-717d-4b5a-8ef1-2fdf5f966e4c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'e5a964'},body:JSON.stringify({sessionId:'e5a964',location:'guestRelayDonationService.ts:313',message:'Relay: step 9 about to send tx',data:{sessionId,callListLength:callList.length,calls:callList.map(c=>({to:c.to,data:c.data.substring(0,20)})),entryPointAddress:zeroDevConfig.entryPointAddress,bundlerUrl:zeroDevConfig.bundlerUrl},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
   let transactionHash: string;
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -314,9 +308,6 @@ export async function executeGuestRelayedDonation(
   } catch (txError) {
     // Reset pending flag khi blockchain tx that bai.
     await incrementSessionDonationCounters(sessionId, 0);
-    // #region agent debug log
-    fetch('http://127.0.0.1:7710/ingest/fa15d132-717d-4b5a-8ef1-2fdf5f966e4c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'e5a964'},body:JSON.stringify({sessionId:'e5a964',location:'guestRelayDonationService.ts:325',message:'Relay: sendTransaction error',data:{sessionId,errorName:txError instanceof Error?txError.name:'Unknown',errorMessage:txError instanceof Error?txError.message:String(txError),errorStack:txError instanceof Error?txError.stack?.split('\n').slice(0,5).join('|'):'no stack'},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     logger.error('Relay donation transaction failed.', {
       sessionId,
       projectId,

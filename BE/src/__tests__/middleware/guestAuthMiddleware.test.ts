@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { Request, Response, NextFunction } from 'express';
+import { getRequestContext, runWithRequestContext } from '../../config/requestContext';
+import { Response, NextFunction } from 'express';
 import { createGuestAuthMiddleware, GuestSessionRequest } from '../../middleware/guestAuthMiddleware';
 import * as guestJsonWebToken from '../../config/guestJsonWebToken';
 import * as guestWalletSessionRepository from '../../repositories/guestWalletSessionRepository';
@@ -344,6 +345,35 @@ describe('guestAuthMiddleware', () => {
         expiresAt
       });
       expect(mockResponse.status).not.toHaveBeenCalled();
+    });
+
+    it('đặt guest log user ID dạng hash thay vì session ID nguyên bản', async () => {
+      const expiresAt = new Date(Date.now() + 86400000);
+      mockRequest.headers = { authorization: 'Bearer valid.token' };
+      (guestJsonWebToken.verifyGuestSessionToken as ReturnType<typeof vi.fn>).mockReturnValue({
+        sessionId: 'session-123',
+        walletAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f5C21a'
+      });
+      (guestWalletSessionRepository.findGuestWalletSessionById as ReturnType<typeof vi.fn>).mockResolvedValue({
+        sessionId: 'session-123',
+        walletAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f5C21a',
+        status: 'ACTIVE',
+        expiresAt
+      });
+
+      const middleware = createGuestAuthMiddleware();
+      let requestContextUserId: string | null | undefined;
+      await runWithRequestContext({ requestId: 'request-guest-test', userId: null }, async () => {
+        await middleware(
+          mockRequest as GuestSessionRequest,
+          mockResponse as Response,
+          nextFunction
+        );
+        requestContextUserId = getRequestContext()?.userId;
+      });
+
+      expect(requestContextUserId).toMatch(/^guest_[0-9a-f]{16}$/);
+      expect(requestContextUserId).not.toContain('session-123');
     });
 
     it('whitespace trong token được trim đúng cách', async () => {

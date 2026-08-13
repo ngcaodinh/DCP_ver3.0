@@ -1,5 +1,6 @@
 import { Job } from 'bull';
 import { getLogger } from '../config/logger';
+import { runWithWorkerContext } from '../config/requestContext';
 import {
   getNotificationQueue,
   enqueueNotification,
@@ -120,7 +121,7 @@ async function dispatchChannel(
  *
  * @throws Error khi tất cả channel fail → Bull retry/DLQ.
  */
-export async function processNotificationJob(job: Job<NotificationJobData>): Promise<{
+async function processNotificationJobInternal(job: Job<NotificationJobData>): Promise<{
   notificationId: string;
   deliveryState: NotificationDeliveryState;
   deliveredChannels: NotificationChannel[];
@@ -261,6 +262,20 @@ export async function processNotificationJob(job: Job<NotificationJobData>): Pro
   return { notificationId, deliveryState, deliveredChannels, failedChannels };
 }
 
+/** Chạy processor notification trong correlation context riêng của queue job. */
+export async function processNotificationJob(job: Job<NotificationJobData>): Promise<{
+  notificationId: string;
+  deliveryState: NotificationDeliveryState;
+  deliveredChannels: NotificationChannel[];
+  failedChannels: NotificationChannel[];
+}> {
+  return runWithWorkerContext(
+    'notification',
+    () => processNotificationJobInternal(job),
+    job.id
+  );
+}
+
 /**
  * Hàm schedule retry attempt tiếp theo với exponential backoff.
  * Mục đích: thay vì dùng Bull built-in attempts (vì cần control delay cụ thể),
@@ -343,48 +358,56 @@ export function startNotificationWorker(): void {
   }
 
   queue.process(NOTIFICATION_WORKER_CONCURRENCY, async (job: Job<NotificationJobData>) => {
-    try {
-      return await processNotificationJob(job);
-    } catch (error) {
-      const errorMessage = extractErrorMessage(error);
-      logger.warn('Notification job fail — xử lý retry/DLQ.', {
-        notificationId: job.data.notificationId,
-        userId: job.data.userId,
-        attemptNumber: job.data.attemptNumber,
-        errorMessage
-      });
-      await scheduleNextAttempt(job, errorMessage);
-      // Return SUCCESS token để Bull không catch lại error này — error đã được handle.
-      return { success: SUCCESS_RESULT_TOKEN } as never;
-    }
+    return runWithWorkerContext('notification', async () => {
+      try {
+        return await processNotificationJobInternal(job);
+      } catch (error) {
+        const errorMessage = extractErrorMessage(error);
+        logger.warn('Notification job fail — xử lý retry/DLQ.', {
+          notificationId: job.data.notificationId,
+          userId: job.data.userId,
+          attemptNumber: job.data.attemptNumber,
+          errorMessage
+        });
+        await scheduleNextAttempt(job, errorMessage);
+        // Return SUCCESS token để Bull không catch lại error này — error đã được handle.
+        return { success: SUCCESS_RESULT_TOKEN } as never;
+      }
+    }, job.id);
   });
 
   queue.on('completed', (job: Job<NotificationJobData>) => {
-    logger.info('Notification job completed event.', {
-      notificationId: job.data.notificationId,
-      userId: job.data.userId,
-      attemptNumber: job.data.attemptNumber,
-      jobId: job.id
-    });
+    runWithWorkerContext('notification', () => {
+      logger.info('Notification job completed event.', {
+        notificationId: job.data.notificationId,
+        userId: job.data.userId,
+        attemptNumber: job.data.attemptNumber,
+        jobId: job.id
+      });
+    }, job.id);
   });
 
   queue.on('failed', (job, error) => {
-    logger.error('Notification job failed event (DLQ).', {
-      notificationId: job.data.notificationId,
-      userId: job.data.userId,
-      attemptNumber: job.data.attemptNumber,
-      attemptsMade: job.attemptsMade,
-      jobId: job.id,
-      errorMessage: extractErrorMessage(error)
-    });
+    runWithWorkerContext('notification', () => {
+      logger.error('Notification job failed event (DLQ).', {
+        notificationId: job.data.notificationId,
+        userId: job.data.userId,
+        attemptNumber: job.data.attemptNumber,
+        attemptsMade: job.attemptsMade,
+        jobId: job.id,
+        errorMessage: extractErrorMessage(error)
+      });
+    }, job.id);
   });
 
   queue.on('stalled', (job: Job<NotificationJobData>) => {
-    logger.warn('Notification job bị stalled.', {
-      notificationId: job.data.notificationId,
-      userId: job.data.userId,
-      jobId: job.id
-    });
+    runWithWorkerContext('notification', () => {
+      logger.warn('Notification job bị stalled.', {
+        notificationId: job.data.notificationId,
+        userId: job.data.userId,
+        jobId: job.id
+      });
+    }, job.id);
   });
 
   logger.info(`Notification worker đã khởi động (concurrency=${NOTIFICATION_WORKER_CONCURRENCY}, maxAttempts=${NOTIFICATION_MAX_ATTEMPTS}).`);

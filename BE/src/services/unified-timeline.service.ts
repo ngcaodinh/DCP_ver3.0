@@ -53,7 +53,7 @@ const MAX_PAGE_SIZE = 50;
 
 /** Escape ký tự glob của Redis để projectId không thể mở rộng phạm vi SCAN. */
 function escapeRedisScanPattern(value: string): string {
-  return value.replace(/[\\*?\[\]]/g, '\\$&');
+  return value.replace(/[\\*?[\]]/g, '\\$&');
 }
 
 export type TimelineEvent = {
@@ -315,7 +315,7 @@ export async function buildUnifiedTimeline(
       canonicalWalletAddress = query.walletAddress.toLowerCase();
     } else {
       logger.warn('Invalid wallet address format, skipping filter.', {
-        walletAddress: `${query.walletAddress.substring(0, 6)}...[REDACTED]`
+        walletAddress: query.walletAddress
       });
       canonicalWalletAddress = undefined;
     }
@@ -363,8 +363,6 @@ export async function buildUnifiedTimeline(
     logger.info('Unified collection empty, using fallback.', {
       projectId: query.projectId,
       walletAddress: canonicalWalletAddress
-        ? `${canonicalWalletAddress.substring(0, 6)}...[REDACTED]`
-        : undefined
     });
     events = await fallbackFromBlockchain(query, limit);
     isFallbackMode = true;

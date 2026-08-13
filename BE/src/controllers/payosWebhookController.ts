@@ -87,7 +87,7 @@ export async function handlePayosWebhook(request: Request, response: Response): 
     // Kiểm tra payload có trống không
     const rawPayload = request.body || {};
     if (Object.keys(rawPayload).length === 0) {
-      logger.warn('Nhận webhook PayOS với payload trống. IP=${clientIp}', { ipAddress: clientIp });
+      logger.warn('Nhận webhook PayOS với payload trống.', { ipAddress: clientIp });
       response.status(200).json({
         message: 'Webhook URL hoạt động.'
       });
@@ -106,7 +106,7 @@ export async function handlePayosWebhook(request: Request, response: Response): 
     );
 
     if (!hasBusinessIdentifier) {
-      logger.warn('Webhook PayOS thiếu thông tin định danh. IP=${clientIp}', { ipAddress: clientIp });
+      logger.warn('Webhook PayOS thiếu thông tin định danh.', { ipAddress: clientIp });
       response.status(200).json({
         message: 'Webhook URL hoạt động.'
       });
@@ -118,7 +118,7 @@ export async function handlePayosWebhook(request: Request, response: Response): 
 
     if (result.isDuplicate) {
       // Webhook trùng lặp - trả về thành công (idempotent)
-      logger.info('Webhook PayOS trùng lặp đã được bỏ qua. IP=${clientIp}', { ipAddress: clientIp });
+      logger.info('Webhook PayOS trùng lặp đã được bỏ qua.', { ipAddress: clientIp });
       response.status(200).json({
         message: result.message,
         isDuplicate: true
@@ -127,7 +127,7 @@ export async function handlePayosWebhook(request: Request, response: Response): 
     }
 
     // Webhook xử lý thành công
-    logger.info('Webhook PayOS đã xử lý thành công. IP=${clientIp}', { ipAddress: clientIp });
+    logger.info('Webhook PayOS đã xử lý thành công.', { ipAddress: clientIp });
     response.status(200).json({
       message: result.message,
       isDuplicate: false,
@@ -139,7 +139,7 @@ export async function handlePayosWebhook(request: Request, response: Response): 
     const errorMessage = (error as Error)?.message || 'Webhook không hợp lệ.';
 
     // Log lỗi chi tiết
-    logger.error('Xử lý webhook PayOS thất bại. IP=${clientIp}', {
+    logger.error('Xử lý webhook PayOS thất bại.', {
       ipAddress: clientIp,
       errorMessage
     });

@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { Job } from 'bull';
 import { getLogger } from '../config/logger';
+import { runWithWorkerContext } from '../config/requestContext';
 import {
   getOracleQueue,
   enqueueOracleVerification,
@@ -37,7 +38,7 @@ async function fetchBufferFromIpfs(cid: string): Promise<Buffer> {
  * Flow: validate buffer size → decode → verifyEvidenceImage (EXIF + Haversine) → trả kết quả.
  * Idempotent: cùng evidenceCid + projectId có thể chạy lại — tạo thêm record nhưng không gây lỗi.
  */
-export async function processOracleVerificationJob(
+async function processOracleVerificationJobInternal(
   job: Job<OracleVerificationJobData>
 ): Promise<OracleVerificationJobResult> {
   const { jobId, projectId, organizationId, evidenceCid, fileSizeBytes, disbursementRequestId } = job.data;
@@ -86,6 +87,17 @@ export async function processOracleVerificationJob(
   };
 }
 
+/** Chạy processor Oracle trong correlation context riêng của queue job. */
+export async function processOracleVerificationJob(
+  job: Job<OracleVerificationJobData>
+): Promise<OracleVerificationJobResult> {
+  return runWithWorkerContext(
+    'oracle-verification',
+    () => processOracleVerificationJobInternal(job),
+    job.id
+  );
+}
+
 /**
  * Khởi động oracle worker — đăng ký processor với Bull queue.
  * Lắng nghe event evidence.uploaded để tự động enqueue job khi có ảnh mới.
@@ -101,44 +113,50 @@ export function startOracleWorker(): void {
   queue.process(ORACLE_WORKER_CONCURRENCY, processOracleVerificationJob);
 
   queue.on('failed', (job, error) => {
-    logger.error('Oracle verification job thất bại.', {
-      queueJobId: job.id,
-      jobId: job.data.jobId,
-      projectId: job.data.projectId,
-      evidenceCid: job.data.evidenceCid,
-      attemptsMade: job.attemptsMade,
-      errorMessage: (error as Error)?.message
-    });
+    runWithWorkerContext('oracle-verification', () => {
+      logger.error('Oracle verification job thất bại.', {
+        queueJobId: job.id,
+        jobId: job.data.jobId,
+        projectId: job.data.projectId,
+        evidenceCid: job.data.evidenceCid,
+        attemptsMade: job.attemptsMade,
+        errorMessage: (error as Error)?.message
+      });
+    }, job.id);
   });
 
   queue.on('stalled', (job) => {
-    logger.warn('Oracle verification job bị stall.', {
-      queueJobId: job.id,
-      jobId: job.data.jobId,
-      projectId: job.data.projectId
-    });
+    runWithWorkerContext('oracle-verification', () => {
+      logger.warn('Oracle verification job bị stall.', {
+        queueJobId: job.id,
+        jobId: job.data.jobId,
+        projectId: job.data.projectId
+      });
+    }, job.id);
   });
 
   // Lắng nghe evidence.uploaded để trigger verification tự động khi tổ chức upload ảnh.
   // Pattern giống notificationBridge.service.ts lắng nghe webhookEvents.
   oracleEvents.on('evidence.uploaded', async (payload: EvidenceUploadedEventPayload) => {
-    try {
-      const jobData: OracleVerificationJobData = {
-        jobId: randomUUID(),
-        projectId: payload.projectId,
-        organizationId: payload.organizationId,
-        evidenceCid: payload.evidenceCid,
-        fileSizeBytes: payload.fileSizeBytes,
-        disbursementRequestId: payload.disbursementRequestId ?? null
-      };
-      await enqueueOracleVerification(jobData);
-    } catch (error) {
-      logger.error('Không thể enqueue oracle verification từ evidence.uploaded event.', {
-        projectId: payload.projectId,
-        evidenceCid: payload.evidenceCid,
-        errorMessage: (error as Error)?.message
-      });
-    }
+    await runWithWorkerContext('oracle-enqueue', async () => {
+      try {
+        const jobData: OracleVerificationJobData = {
+          jobId: randomUUID(),
+          projectId: payload.projectId,
+          organizationId: payload.organizationId,
+          evidenceCid: payload.evidenceCid,
+          fileSizeBytes: payload.fileSizeBytes,
+          disbursementRequestId: payload.disbursementRequestId ?? null
+        };
+        await enqueueOracleVerification(jobData);
+      } catch (error) {
+        logger.error('Không thể enqueue oracle verification từ evidence.uploaded event.', {
+          projectId: payload.projectId,
+          evidenceCid: payload.evidenceCid,
+          errorMessage: (error as Error)?.message
+        });
+      }
+    });
   });
 
   logger.info(`Oracle worker đã khởi động (concurrency=${ORACLE_WORKER_CONCURRENCY}).`);

@@ -372,7 +372,10 @@ export async function streamNotificationsController(request: AuthenticatedReques
       response.write(`event: unread-count\n`);
       response.write(`data: ${JSON.stringify({ unreadCount })}\n\n`);
     } catch (error) {
-      logger.warn(`Không thể gửi unread count SSE. userId=${authenticatedUserId} error=${(error as Error).message}`);
+      logger.warn('Không thể gửi unread count SSE.', {
+        userId: authenticatedUserId,
+        errorMessage: (error as Error).message
+      });
       response.write(`event: heartbeat\n`);
       response.write(`data: {}\n\n`);
     }

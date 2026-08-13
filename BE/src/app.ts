@@ -30,6 +30,7 @@ import { API_GUEST_PREFIX } from './config/apiPrefixes';
 import { getLogger } from './config/logger';
 import { getCacheHmacKey } from './utils/cacheIntegrity';
 import { metricsMiddleware } from './middleware/metrics.middleware';
+import { requestContextMiddleware } from './middleware/requestContext.middleware';
 import { validateMetricsAuthConfig } from './config/metricsAuthConfig';
 
 const application = express();
@@ -68,6 +69,9 @@ function configureMiddlewares(): void {
 
   application.disable('x-powered-by');
   application.set('trust proxy', 1);
+
+  // Đăng ký đầu tiên để cả request bị CORS reject cũng có correlation ID.
+  application.use(requestContextMiddleware);
 
   application.use(
     cors({
@@ -168,6 +172,9 @@ application.use((err: Error, _req: Request, res: Response, _next: NextFunction):
   const errorWithStatus = err as Error & { status?: number; type?: string };
   const isPayloadTooLarge = errorWithStatus.status === 413 || errorWithStatus.type === 'entity.too.large';
   const responseStatusCode = isPayloadTooLarge ? 413 : 500;
+
+  // Seam cho E7: chỉ lỗi 5xx mới capture vào Sentry; 413 chỉ cần Winston.
+  // E7 sẽ gắn requestId từ ALS và tiếp tục redact metadata trước khi gửi đi.
   logger.error('Unhandled error in request', {
     errorMessage: err.message,
     errorStack: err.stack

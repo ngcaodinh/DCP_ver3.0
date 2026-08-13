@@ -46,11 +46,13 @@ import {
   taskPurgeOldSessions,
   taskAntiFarmingCheck,
   runGuestCleanup,
+  runGuestCleanupOnce,
   detectFingerprintReuse,
   detectSubnetBurst,
   detectSessionVelocity,
   taskDetectClusters
 } from '../../workers/guestCleanupWorker';
+import { getRequestContext, runWithWorkerContext } from '../../config/requestContext';
 import * as guestWalletSessionRepo from '../../repositories/guestWalletSessionRepository';
 import * as guestDonationRiskRepo from '../../repositories/guestDonationRiskRepository';
 import * as anonymousDonationAuditRepo from '../../repositories/anonymousDonationAuditRepository';
@@ -247,6 +249,12 @@ describe('guestCleanupWorker', () => {
 
   describe('runGuestCleanup', () => {
     it('should execute all tasks and return results', async () => {
+      let observedWorkerContext: ReturnType<typeof getRequestContext>;
+
+      vi.mocked(guestWalletSessionRepo.expireGuestSessions).mockImplementationOnce(async () => {
+        observedWorkerContext = getRequestContext();
+        return 2;
+      });
       vi.mocked(guestWalletSessionRepo.expireGuestSessions).mockResolvedValue(2);
       vi.mocked(guestWalletSessionRepo.purgeOldGuestSessions).mockResolvedValue(1);
       vi.mocked(guestDonationRiskRepo.findAllClusterSuspects).mockResolvedValue([]);
@@ -258,6 +266,45 @@ describe('guestCleanupWorker', () => {
       expect(result.purged).toBe(1);
       expect(result.clusters).toBe(0);
       expect(result.farmingDetected).toBe(false);
+      expect(observedWorkerContext).toMatchObject({
+        workerName: 'guest-cleanup',
+        workerRunId: expect.stringMatching(/^guest-cleanup:/)
+      });
+      expect(observedWorkerContext?.requestId).toBe(observedWorkerContext?.workerRunId);
+    });
+
+    it('should create a guest context when run once outside a worker scope', async () => {
+      let observedWorkerContext: ReturnType<typeof getRequestContext>;
+
+      vi.mocked(guestWalletSessionRepo.expireGuestSessions).mockImplementationOnce(async () => {
+        observedWorkerContext = getRequestContext();
+        return 0;
+      });
+
+      await runGuestCleanupOnce();
+
+      expect(observedWorkerContext).toMatchObject({
+        workerName: 'guest-cleanup',
+        workerRunId: expect.stringMatching(/^guest-cleanup:/)
+      });
+      expect(observedWorkerContext?.requestId).toBe(observedWorkerContext?.workerRunId);
+    });
+
+    it('should inherit the parent worker context when ranking reconcile runs it', async () => {
+      let observedWorkerContext: ReturnType<typeof getRequestContext>;
+
+      vi.mocked(guestWalletSessionRepo.expireGuestSessions).mockImplementationOnce(async () => {
+        observedWorkerContext = getRequestContext();
+        return 0;
+      });
+
+      await runWithWorkerContext('ranking-reconcile', () => runGuestCleanupOnce());
+
+      expect(observedWorkerContext).toMatchObject({
+        workerName: 'ranking-reconcile',
+        workerRunId: expect.stringMatching(/^ranking-reconcile:/)
+      });
+      expect(observedWorkerContext?.requestId).toBe(observedWorkerContext?.workerRunId);
     });
   });
 

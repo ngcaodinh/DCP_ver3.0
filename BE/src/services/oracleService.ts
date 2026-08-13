@@ -85,7 +85,9 @@ export function extractExifGps(buffer: Buffer): GpsCoordinate | null {
     if (tags.GPSLongitudeRef === 'W') lng = -Math.abs(lng);
 
     if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
-      logger.warn('EXIF GPS ngoài phạm vi hợp lệ.', { errorMessage: `lat=${lat}, lng=${lng}` });
+      logger.warn('EXIF GPS ngoài phạm vi hợp lệ.', {
+        gpsCoordinates: `lat=${lat}, lng=${lng}`
+      });
       return null;
     }
 

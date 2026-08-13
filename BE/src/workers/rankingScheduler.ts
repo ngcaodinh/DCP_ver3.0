@@ -1,4 +1,5 @@
 import { getLogger } from '../config/logger';
+import { runWithWorkerContext } from '../config/requestContext';
 import { findCurrentRankingSnapshot } from '../repositories/rankingRepository';
 
 const logger = getLogger();
@@ -62,24 +63,26 @@ export function startRankingScheduler(): void {
 
   const runWithInterval = (): void => {
     setTimeout(async () => {
-      try {
-        const needInvalidate = await shouldInvalidateRankingCache();
-        if (!needInvalidate) {
-          runWithInterval();
-          return;
+      await runWithWorkerContext('ranking-scheduler', async () => {
+        try {
+          const needInvalidate = await shouldInvalidateRankingCache();
+          if (!needInvalidate) {
+            runWithInterval();
+            return;
+          }
+
+          const { invalidateRankingCache } = await import('../services/rankingCacheService');
+          await invalidateRankingCache();
+
+          logger.info('Scheduled ranking cache invalidated.');
+        } catch (error) {
+          logger.error('Scheduled ranking cache invalidation thất bại.', {
+            errorMessage: (error as Error).message
+          });
         }
 
-        const { invalidateRankingCache } = await import('../services/rankingCacheService');
-        await invalidateRankingCache();
-
-        logger.info('Scheduled ranking cache invalidated.');
-      } catch (error) {
-        logger.error('Scheduled ranking cache invalidation thất bại.', {
-          errorMessage: (error as Error).message
-        });
-      }
-
-      runWithInterval();
+        runWithInterval();
+      });
     }, SCHEDULE_INTERVAL_MS);
   };
 

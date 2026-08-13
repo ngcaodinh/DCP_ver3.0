@@ -185,9 +185,6 @@ export async function createKernelClientFromEncryptedOwnerKey(encryptedOwnerPriv
 export async function createKernelClientFromEncryptedOwnerKeyWithoutPaymaster(
   encryptedOwnerPrivateKey: string
 ): Promise<ReturnType<typeof createKernelClientFromOwnerPrivateKey>> {
-  // #region agent debug log
-  fetch('http://127.0.0.1:7710/ingest/fa15d132-717d-4b5a-8ef1-2fdf5f966e4c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'e5a964'},body:JSON.stringify({sessionId:'e5a964',location:'zeroDevService.ts:182',message:'ZeroDev: creating kernel client WITHOUT paymaster',data:{usePaymaster:false,bundlerUrl:zeroDevConfig.bundlerUrl,paymasterUrl:zeroDevConfig.paymasterUrl},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
   const ownerPrivateKey = decryptOwnerPrivateKey(encryptedOwnerPrivateKey);
   return createKernelClientFromOwnerPrivateKey(ownerPrivateKey, false);
 }

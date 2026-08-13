@@ -1,4 +1,5 @@
 import { getLogger } from '../config/logger';
+import { runWithWorkerContext } from '../config/requestContext';
 import { recoverStuckSbtMints } from '../services/sbtMintService';
 
 /**
@@ -59,44 +60,46 @@ export function startSbtMintRecoveryScheduler(): void {
 
   const scheduleNextRecovery = (): void => {
     setTimeout(async () => {
-      try {
-        const now = Date.now();
+      await runWithWorkerContext('sbt-mint-recovery', async () => {
+        try {
+          const now = Date.now();
 
-        // Idempotency guard: đảm bảo 2 lần chạy cách nhau ít nhất MIN_RUN_INTERVAL_MS
-        if (now - lastRunTimestamp < MIN_RUN_INTERVAL_MS) {
-          logger.info('SBT mint recovery scheduler bị skip do chạy quá gần đây.', {
-            lastRunAgoMs: now - lastRunTimestamp,
-            minIntervalMs: MIN_RUN_INTERVAL_MS
+          // Idempotency guard: đảm bảo 2 lần chạy cách nhau ít nhất MIN_RUN_INTERVAL_MS
+          if (now - lastRunTimestamp < MIN_RUN_INTERVAL_MS) {
+            logger.info('SBT mint recovery scheduler bị skip do chạy quá gần đây.', {
+              lastRunAgoMs: now - lastRunTimestamp,
+              minIntervalMs: MIN_RUN_INTERVAL_MS
+            });
+            scheduleNextRecovery();
+            return;
+          }
+
+          // Kiểm tra Redis sẵn sàng
+          const redisReady = await isRedisReady();
+          if (!redisReady) {
+            logger.warn('Redis chưa sẵn sàng — bỏ qua recovery cycle.');
+            scheduleNextRecovery();
+            return;
+          }
+
+          lastRunTimestamp = now;
+          logger.info('SBT mint recovery scheduler bắt đầu kiểm tra stuck jobs.');
+
+          const result = await recoverStuckSbtMints(STUCK_THRESHOLD_MINUTES);
+
+          logger.info('SBT mint recovery scheduler hoàn tất cycle.', {
+            candidatesFound: result.recovered,
+            enqueued: result.enqueued > 0,
+            thresholdMinutes: STUCK_THRESHOLD_MINUTES
           });
-          scheduleNextRecovery();
-          return;
+        } catch (error) {
+          logger.error('SBT mint recovery scheduler thất bại.', {
+            errorMessage: (error as Error).message
+          });
         }
 
-        // Kiểm tra Redis sẵn sàng
-        const redisReady = await isRedisReady();
-        if (!redisReady) {
-          logger.warn('Redis chưa sẵn sàng — bỏ qua recovery cycle.');
-          scheduleNextRecovery();
-          return;
-        }
-
-        lastRunTimestamp = now;
-        logger.info('SBT mint recovery scheduler bắt đầu kiểm tra stuck jobs.');
-
-        const result = await recoverStuckSbtMints(STUCK_THRESHOLD_MINUTES);
-
-        logger.info('SBT mint recovery scheduler hoàn tất cycle.', {
-          candidatesFound: result.recovered,
-          enqueued: result.enqueued > 0,
-          thresholdMinutes: STUCK_THRESHOLD_MINUTES
-        });
-      } catch (error) {
-        logger.error('SBT mint recovery scheduler thất bại.', {
-          errorMessage: (error as Error).message
-        });
-      }
-
-      scheduleNextRecovery();
+        scheduleNextRecovery();
+      });
     }, SBT_MINT_RECOVERY_INTERVAL_MS);
   };
 

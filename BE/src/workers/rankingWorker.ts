@@ -1,5 +1,6 @@
 import { Job } from 'bull';
 import { getLogger } from '../config/logger';
+import { runWithWorkerContext } from '../config/requestContext';
 import { getRankingQueue } from '../queues/rankingQueue';
 import { recalculateRankingSnapshot } from '../services/rankingService';
 import { invalidateRankingCache } from '../services/rankingCacheService';
@@ -28,33 +29,39 @@ export function startRankingWorker(): void {
   }
 
   rankingQueue.process(async (job: Job<{ windowHours: number }>) => {
-    const windowHours = job.data.windowHours ?? 720;
-    logger.info('Ranking worker bắt đầu xử lý job.');
+    return runWithWorkerContext('ranking', async () => {
+      const windowHours = job.data.windowHours ?? 720;
+      logger.info('Ranking worker bắt đầu xử lý job.');
 
-    try {
-      // Ghi chú logic phức tạp: gọi recalculate trực tiếp từ service để đảm bảo tái sử dụng business logic đã có.
-      await recalculateRankingSnapshot(windowHours);
+      try {
+        // Ghi chú logic phức tạp: gọi recalculate trực tiếp từ service để đảm bảo tái sử dụng business logic đã có.
+        await recalculateRankingSnapshot(windowHours);
 
-      // Ghi chú logic phức tạp: sau recalculate thành công, xóa cache để GET /rankings trả dữ liệu mới.
-      await invalidateRankingCache();
+        // Ghi chú logic phức tạp: sau recalculate thành công, xóa cache để GET /rankings trả dữ liệu mới.
+        await invalidateRankingCache();
 
-      logger.info('Ranking worker hoàn thành xử lý job.');
-    } catch (error) {
-      logger.error('Ranking worker xử lý job thất bại.', {
-        errorMessage: extractErrorMessage(error)
-      });
-      throw error;
-    }
+        logger.info('Ranking worker hoàn thành xử lý job.');
+      } catch (error) {
+        logger.error('Ranking worker xử lý job thất bại.', {
+          errorMessage: extractErrorMessage(error)
+        });
+        throw error;
+      }
+    }, job.id);
   });
 
   rankingQueue.on('failed', (job: Job<{ windowHours: number }> | null, error: Error) => {
-    logger.error('Ranking job thất bại sau khi retry.', {
-      errorMessage: error.message
-    });
+    runWithWorkerContext('ranking', () => {
+      logger.error('Ranking job thất bại sau khi retry.', {
+        errorMessage: error.message
+      });
+    }, job?.id);
   });
 
   rankingQueue.on('completed', (job: Job<{ windowHours: number }>) => {
-    logger.info('Ranking job hoàn thành.');
+    runWithWorkerContext('ranking', () => {
+      logger.info('Ranking job hoàn thành.');
+    }, job.id);
   });
 
   logger.info('Ranking worker đã khởi động.');

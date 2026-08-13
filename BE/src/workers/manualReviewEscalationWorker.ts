@@ -1,4 +1,5 @@
 import { getLogger } from '../config/logger';
+import { runWithWorkerContext } from '../config/requestContext';
 import { findUserById } from '../models/authModel';
 import { createUserNotification } from '../services/notificationService';
 import { getSocketServer } from '../config/socketServer';
@@ -24,10 +25,10 @@ let intervalId: ReturnType<typeof setInterval> | null = null;
 export function startManualReviewEscalationWorker(): void {
   if (intervalId) return;
 
-  void checkAndEscalate();
+  void runManualReviewEscalationOnce();
 
   intervalId = setInterval(() => {
-    void checkAndEscalate();
+    void runManualReviewEscalationOnce();
   }, POLL_INTERVAL_MS);
 
   logger.info('Manual Review Escalation Worker đã khởi động.', {
@@ -50,7 +51,7 @@ export function stopManualReviewEscalationWorker(): void {
  */
 /** Chạy một vòng escalation thủ công để test và job scheduler có thể tái sử dụng cùng logic. */
 export async function runManualReviewEscalationOnce(): Promise<void> {
-  await checkAndEscalate();
+  await runWithWorkerContext('manual-review-escalation', () => checkAndEscalate());
 }
 
 /** Kiểm tra queue quá SLA và gửi escalation đúng một lần mỗi review cycle. */

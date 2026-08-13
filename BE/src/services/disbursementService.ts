@@ -2,6 +2,7 @@ import { ethers } from 'ethers';
 import { encodeFunctionData } from 'viem';
 import { randomUUID } from 'crypto';
 import { getLogger } from '../config/logger';
+import { runWithWorkerContext } from '../config/requestContext';
 import { ApplicationError } from '../utils/applicationError';
 import { sanitizeProviderError } from '../utils/sanitizeProviderError';
 import {
@@ -734,7 +735,10 @@ async function getKernelClientForUser(user: AuthUser) {
   try {
     return await createKernelClientFromEncryptedOwnerKey(encryptedOwnerPrivateKey);
   } catch (error) {
-    logger.error(`Không thể tạo Kernel client cho userId=${user.id}. error=${(error as Error)?.message}`);
+    logger.error('Không thể tạo Kernel client.', {
+      userId: user.id,
+      errorMessage: (error as Error)?.message
+    });
     throw new ApplicationError('Không thể khởi tạo Smart Account để ký giao dịch.', 500, 'INTERNAL_ERROR');
   }
 }
@@ -771,7 +775,11 @@ async function syncUserWalletAddressWithKernelAccount(
     updatedAt: new Date()
   });
 
-  logger.warn(`Đồng bộ walletAddress do SMART_ACCOUNT_MISMATCH. userId=${user.id} old=${normalizedUserWalletAddress} new=${normalizedKernelAccountAddress}`);
+  logger.warn('Đồng bộ walletAddress do SMART_ACCOUNT_MISMATCH.', {
+    userId: user.id,
+    fallbackWalletAddress: normalizedUserWalletAddress,
+    smartAccountAddress: normalizedKernelAccountAddress
+  });
 
   return {
     kernelClient,
@@ -853,12 +861,20 @@ async function ensureDisbursementSignerRoleOnChain(userRole: string, signerWalle
 
     const hasSignerRoleAfterGrant = await contract.hasRole(roleHash, normalizedSignerWalletAddress);
     if (!hasSignerRoleAfterGrant) {
-      throw new Error(`Cấp quyền signer thất bại sau khi mined. role=${userRole} walletAddress=${normalizedSignerWalletAddress}`);
+      throw new Error(`Cấp quyền signer thất bại sau khi mined. role=${userRole}`);
     }
 
-    logger.info(`Đã auto-grant signer role on-chain. role=${userRole} walletAddress=${normalizedSignerWalletAddress} txHash=${grantRoleTransaction.hash}`);
+    logger.info('Đã auto-grant signer role on-chain.', {
+      role: userRole,
+      walletAddress: normalizedSignerWalletAddress,
+      transactionHash: grantRoleTransaction.hash
+    });
   } catch (error) {
-    logger.error(`Không thể cấp signer role on-chain. role=${userRole} walletAddress=${normalizedSignerWalletAddress} error=${(error as Error)?.message}`);
+    logger.error('Không thể cấp signer role on-chain.', {
+      role: userRole,
+      walletAddress: normalizedSignerWalletAddress,
+      errorMessage: (error as Error)?.message
+    });
     throw new ApplicationError('Không thể cấp quyền giải ngân trên blockchain. Vui lòng liên hệ quản trị viên.', 502, 'INTERNAL_ERROR');
   }
 }
@@ -1041,13 +1057,21 @@ export function startDisbursementTransferStatusSweepPolling(): void {
     transferStatusSweepIntervalMilliseconds
   );
 
-  void sweepExecutingDisbursementsOnce().catch(error => {
-    logger.error(`Sweep transfer trạng thái thất bại. error=${(error as Error)?.message}`);
+  void runWithWorkerContext('disbursement-transfer-sweep', async () => {
+    try {
+      await sweepExecutingDisbursementsOnce();
+    } catch (error) {
+      logger.error('Sweep transfer trạng thái thất bại.', { errorMessage: (error as Error)?.message });
+    }
   });
 
   setInterval(() => {
-    void sweepExecutingDisbursementsOnce().catch(error => {
-      logger.error(`Sweep transfer định kỳ thất bại. error=${(error as Error)?.message}`);
+    void runWithWorkerContext('disbursement-transfer-sweep', async () => {
+      try {
+        await sweepExecutingDisbursementsOnce();
+      } catch (error) {
+        logger.error('Sweep transfer định kỳ thất bại.', { errorMessage: (error as Error)?.message });
+      }
     });
   }, sweepIntervalMilliseconds);
 }
@@ -1368,7 +1392,7 @@ export async function createDisbursementRequest(
       throw mappedError;
     }
 
-    logger.error(`Tạo disbursement on-chain thất bại. error=${(error as Error)?.message}`);
+    logger.error('Tạo disbursement on-chain thất bại.', { errorMessage: (error as Error)?.message });
     throw new ApplicationError('Không thể tạo yêu cầu rút tiền trên blockchain.', 502, 'INTERNAL_ERROR');
   }
 
@@ -1477,7 +1501,7 @@ export async function signDisbursementRequest(
       throw mappedError;
     }
 
-    logger.error(`Ký duyệt disbursement on-chain thất bại. error=${(error as Error)?.message}`);
+    logger.error('Ký duyệt disbursement on-chain thất bại.', { errorMessage: (error as Error)?.message });
     throw new ApplicationError('Không thể ký duyệt trên blockchain.', 502, 'INTERNAL_ERROR');
   }
 
@@ -1491,7 +1515,7 @@ export async function signDisbursementRequest(
     syncedRequiredApprovals = Number(onChainRequestData[17]);
     syncedTimeoutDeadline = new Date(Number(onChainRequestData[14]) * 1000);
   } catch {
-    logger.warn(`Không thể đọc trạng thái on-chain sau khi ký. requestId=${requestId}`);
+    logger.warn('Không thể đọc trạng thái on-chain sau khi ký.', { requestId });
   }
 
   const updatedApprovals = [
@@ -1523,7 +1547,10 @@ export async function signDisbursementRequest(
   if (updatedRecord.status === 'APPROVED') {
     void triggerPayosTransferForApprovedDisbursement(updatedRecord.requestId)
       .catch(error => {
-        logger.error(`Trigger auto-transfer thất bại. requestId=${updatedRecord.requestId} error=${(error as Error)?.message}`);
+        logger.error('Trigger auto-transfer thất bại.', {
+          requestId: updatedRecord.requestId,
+          errorMessage: (error as Error)?.message
+        });
       });
   }
 
@@ -1592,7 +1619,7 @@ export async function rejectDisbursementRequest(
       throw mappedError;
     }
 
-    logger.error(`Từ chối disbursement on-chain thất bại. error=${(error as Error)?.message}`);
+    logger.error('Từ chối disbursement on-chain thất bại.', { errorMessage: (error as Error)?.message });
     throw new ApplicationError('Không thể từ chối trên blockchain.', 502, 'INTERNAL_ERROR');
   }
 

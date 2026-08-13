@@ -67,7 +67,10 @@ export async function applyDonationToMetrics(
     return;
   }
   if (amount < 0 || !Number.isFinite(amount)) {
-    logger.warn(`applyDonationToMetrics skipped: invalid amount=${amount} for project=${projectId}`);
+    logger.warn('applyDonationToMetrics skipped: invalid amount.', {
+      amount,
+      projectId
+    });
     return;
   }
   // trustMultiplier phải nằm trong khoảng [0, 1] — clamp về 1.0 nếu invalid
@@ -98,7 +101,13 @@ export async function applyDonationToMetrics(
     }
   });
 
-  logger.info(`Incremental metrics updated for project=${projectId}, amount=${amount}, donor=${lowerCaseAddress}, trustMultiplier=${safeMultiplier}, isGuestDonation=${isGuestDonation}`);
+  logger.info('Incremental metrics updated.', {
+    projectId,
+    amount,
+    donorAddress: lowerCaseAddress,
+    trustMultiplier: safeMultiplier,
+    isGuestDonation
+  });
 }
 
 /**
@@ -161,7 +170,10 @@ export async function recomputeProjectMetrics(
   for (const donation of donations) {
     // Validate amount >= 0 trước khi tính sqrt
     if (donation.amount < 0) {
-      logger.warn(`Skipping invalid donation amount=${donation.amount} for project=${projectId}`);
+      logger.warn('Skipping invalid donation amount.', {
+        amount: donation.amount,
+        projectId
+      });
       continue;
     }
 
@@ -201,8 +213,14 @@ export async function recomputeProjectMetrics(
     }
   });
 
-  logger.info(`Project ${projectId} full recomputed: totalRaised=${totalRaisedAmount}, donors=${donorSet.size}, ` +
-    `donations=${donations.length}, weightedSqrt=${weightedSumSqrtDonations}, guestCount=${guestDonationCount}`);
+  logger.info('Project full recomputed.', {
+    projectId,
+    totalAmount: totalRaisedAmount,
+    totalDonors: donorSet.size,
+    totalDonationRecords: donations.length,
+    weightedSumSqrtDonations,
+    guestDonationCount
+  });
   return updatedMetrics;
 }
 

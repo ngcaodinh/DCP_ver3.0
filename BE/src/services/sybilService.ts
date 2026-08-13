@@ -699,7 +699,10 @@ export async function toggleSybilStatus(payload: SybilTogglePayload): Promise<Sy
   await addSybilAuditLog(auditLogEntry);
 
   // Ghi log thành công
-  logger.info(`Sybil status changed for user ${user.walletAddress}: ${previousValue} -> ${newIsSybilValue} by ${performedBy}`, {
+  logger.info('Sybil status changed.', {
+    walletAddress: user.walletAddress,
+    previousValue,
+    newIsSybilValue,
     performedBy,
     reason,
     correlationId: user.correlationId

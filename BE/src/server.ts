@@ -88,7 +88,7 @@ async function startServer(): Promise<void> {
 
   // Capture HTTP server để Socket.io attach vào cùng port (không mở port riêng)
   const httpServer = application.listen(serverPort, () => {
-    console.log(`Server running on port ${serverPort}`);
+    logger.info(`Server running on port ${serverPort}`);
   });
 
   // Khởi tạo Socket.io sau khi HTTP server sẵn sàng
@@ -120,6 +120,6 @@ async function startServer(): Promise<void> {
 }
 
 startServer().catch((error: Error) => {
-  console.error('Server failed to start.', error.message);
+  logger.error('Server failed to start.', { errorMessage: error.message });
 });
 

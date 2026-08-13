@@ -308,6 +308,8 @@ export async function prepareClaimEOA(
   ipAddress: string,
   userAgent: string
 ): Promise<PrepareClaimResult> {
+  // Giữ input tương thích với caller/audit flow; E6 không ghi userAgent vào application log.
+  void userAgent;
   const session = await findGuestWalletSessionById(sessionId);
   if (!session) {
     throw new ApplicationError('Guest session không tồn tại.', 404, 'GUEST_SESSION_NOT_FOUND');
@@ -381,10 +383,9 @@ export async function prepareClaimEOA(
 
   logger.info('Claim EOA prepared.', {
     claimNonce: '[CLAIM_NONCE_REDACTED]',
-    sessionId: '[SESSION_REDACTED]',
-    claimEOAAddress: claimEOAAddress ? `${claimEOAAddress.substring(0, 6)}...[REDACTED]` : undefined,
-    ipAddress: ipAddress ? `${ipAddress.substring(0, 6)}...[REDACTED]` : undefined,
-    userAgent
+    sessionId,
+    claimEOAAddress,
+    ipAddress
   });
 
   return {
@@ -480,7 +481,7 @@ export async function executeKeylessClaim(
     }
     // Lỗi không xác định — log và throw generic message
     logger.error('Failed to submit UserOp to bundler.', {
-      sessionId: '[SESSION_REDACTED]',
+      sessionId,
       claimNonce: '[CLAIM_NONCE_REDACTED]',
       errorMessage: error instanceof Error ? error.message : String(error)
     });
@@ -546,8 +547,8 @@ export async function executeKeylessClaim(
 
   logger.info('Keyless claim executed successfully.', {
     claimId,
-    sessionId: '[SESSION_REDACTED]',
-    guestWalletAddress: guestWalletAddress ? `${guestWalletAddress.substring(0, 6)}...[REDACTED]` : undefined,
+    sessionId,
+    guestWalletAddress,
     claimType,
     changeOwnerTxHash: changeOwnerTxHash ? `${changeOwnerTxHash.substring(0, 10)}...[REDACTED]` : undefined,
     donationsMerged: auditsLinked
@@ -788,8 +789,8 @@ export async function handlePartialClaim(
 
   logger.info('Partial claim executed (donation history only).', {
     claimId,
-    sessionId: '[SESSION_REDACTED]',
-    guestWalletAddress: guestWalletAddress ? `${guestWalletAddress.substring(0, 6)}...[REDACTED]` : undefined,
+    sessionId,
+    guestWalletAddress,
     donationsMerged: auditsLinked
   });
 

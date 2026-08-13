@@ -5,6 +5,7 @@ import {
   getReadOnlyImpactSbtProvider
 } from '../config/sbtContract';
 import { getLogger } from '../config/logger';
+import { runWithWorkerContext } from '../config/requestContext';
 import { SBT_MINT_CONFIRMATION_BLOCKS } from '../constants/sbtMint';
 import { toSbtTokenStatusName } from '../constants/sbtTokenStatus';
 import { findEarliestConfirmedImpactSbtBlock } from '../models/impactSbtMetadataModel';
@@ -99,7 +100,7 @@ async function reconcilePendingSbtTokenStatusEvents(scope: SbtStatusProjectionSc
 }
 
 /** Reconcile TokenStatusUpdated đã đủ confirmation vào Mongo, checkpoint theo chunk để restart không bỏ log. */
-export async function reconcileSbtTokenStatusProjection(): Promise<void> {
+async function reconcileSbtTokenStatusProjectionInternal(): Promise<void> {
   if (isProjectionRunning) return;
   isProjectionRunning = true;
 
@@ -188,6 +189,14 @@ export async function reconcileSbtTokenStatusProjection(): Promise<void> {
   } finally {
     isProjectionRunning = false;
   }
+}
+
+/** Chạy một vòng SBT status projection trong correlation context riêng của worker. */
+export async function reconcileSbtTokenStatusProjection(): Promise<void> {
+  await runWithWorkerContext(
+    'sbt-status-projection',
+    () => reconcileSbtTokenStatusProjectionInternal()
+  );
 }
 
 /** Khởi động polling projector với confirmation depth để không ghi state từ block chưa final. */

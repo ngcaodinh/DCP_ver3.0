@@ -14,6 +14,7 @@
  */
 import { ethers } from 'ethers';
 import { getLogger } from '../config/logger';
+import { runWithWorkerContext } from '../config/requestContext';
 import { getRedisClientIfReady } from '../config/redis';
 import {
   upsertUnifiedTransactionByCorrelationId,
@@ -933,7 +934,7 @@ async function detectAndMarkReorgs(): Promise<ReorgSyncResult> {
  * 4. Correlate PayOS với blockchain
  * 5. Invalidate Redis cache của D1 và D3
  */
-export async function runDataMapperCycle(): Promise<{
+async function runDataMapperCycleInternal(): Promise<{
   blockchainSynced: number;
   payosSynced: number;
   correlated: number;
@@ -997,25 +998,40 @@ export async function runDataMapperCycle(): Promise<{
 }
 
 /**
+ * Chạy một chu kỳ Data Mapper trong correlation scope riêng của worker.
+ * @returns Thống kê đồng bộ của chu kỳ hiện tại.
+ */
+export async function runDataMapperCycle(): Promise<{
+  blockchainSynced: number;
+  payosSynced: number;
+  correlated: number;
+  reorged: number;
+}> {
+  return runWithWorkerContext('data-mapper', () => runDataMapperCycleInternal());
+}
+
+/**
  * Hàm chính: chạy một chu kỳ sync hoàn chỉnh (có lock).
  * Sử dụng bởi startDataMapperWorker cho cả initial run và recurring runs.
  */
 async function runDataMapperCycleWithLock(): Promise<void> {
-  const lockAcquired = await acquireDistributedLock();
-  if (!lockAcquired) {
-    logger.info('[DataMapper] Lock không acquired, bỏ qua run này.');
-    return;
-  }
+  return runWithWorkerContext('data-mapper', async () => {
+    const lockAcquired = await acquireDistributedLock();
+    if (!lockAcquired) {
+      logger.info('[DataMapper] Lock không acquired, bỏ qua run này.');
+      return;
+    }
 
-  try {
-    await runDataMapperCycle();
-  } catch (err) {
-    logger.error('[DataMapper] Data mapper cycle thất bại.', {
-      errorMessage: (err as Error).message
-    });
-  } finally {
-    await releaseDistributedLock();
-  }
+    try {
+      await runDataMapperCycleInternal();
+    } catch (err) {
+      logger.error('[DataMapper] Data mapper cycle thất bại.', {
+        errorMessage: (err as Error).message
+      });
+    } finally {
+      await releaseDistributedLock();
+    }
+  });
 }
 
 /**
@@ -1031,7 +1047,7 @@ export function startDataMapperWorker(): void {
 
   const runWithInterval = (): void => {
     setTimeout(() => {
-      runDataMapperCycleWithLock().catch((err) => logger.error('[DataMapper] Data mapper cycle failed', err));
+      void runDataMapperCycleWithLock();
       runWithInterval();
     }, SYNC_INTERVAL_MS);
   };

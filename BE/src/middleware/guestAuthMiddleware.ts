@@ -9,13 +9,24 @@
  * - GUEST_SESSION_EXPIRED: session đã hết hạn hoặc bị vô hiệu hóa
  */
 import { NextFunction, Request, Response } from 'express';
+import { createHash } from 'node:crypto';
 import { verifyGuestSessionToken, type GuestSessionClaims } from '../config/guestJsonWebToken';
 import { findGuestWalletSessionById, updateGuestWalletSession } from '../repositories/guestWalletSessionRepository';
 import { sendErrorResponse } from '../utils/apiResponse';
 import { extractBearerToken } from '../utils/tokenExtractor';
 import { getLogger } from '../config/logger';
+import { setRequestUser } from '../config/requestContext';
 
 const logger = getLogger();
+const GUEST_LOG_USER_ID_LENGTH = 16;
+
+/**
+ * Tạo định danh guest ổn định nhưng không ghi session ID nguyên bản vào request context.
+ * Mục đích: correlation log vẫn phân biệt được một guest mà không làm lộ credential-like identifier.
+ */
+function createGuestLogUserId(sessionId: string): string {
+  return `guest_${createHash('sha256').update(sessionId).digest('hex').slice(0, GUEST_LOG_USER_ID_LENGTH)}`;
+}
 
 /** Request type mở rộng để chứa guest session data.
  * Bao gồm các fields cần thiết cho pending donation controller,
@@ -112,6 +123,7 @@ export function createGuestAuthMiddleware() {
       expiresAt: session.expiresAt,
       deviceFingerprintHash: session.deviceFingerprintHash
     };
+    setRequestUser(createGuestLogUserId(claims.sessionId));
 
     next();
   };

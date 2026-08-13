@@ -254,7 +254,10 @@ async function ensureProjectManagerRolePermission(
 
   const grantRoleTransaction = await donationRankingAdminContract.grantProjectManagerRole(walletAddress);
   await grantRoleTransaction.wait();
-  logger.info(`Auto-granted PROJECT_MANAGER_ROLE for relayer wallet. walletAddress=${walletAddress} txHash=${grantRoleTransaction.hash}`);
+  logger.info('Auto-granted PROJECT_MANAGER_ROLE for relayer wallet.', {
+    walletAddress,
+    transactionHash: grantRoleTransaction.hash
+  });
 
   // Ghi chú logic phức tạp: cần verify lại role sau khi grant để tránh trạng thái mined nhưng không cấp quyền thành công.
   const hasProjectManagerPermissionAfterGrant = await donationRankingContract.hasRole(projectManagerRoleHash, walletAddress);
@@ -287,7 +290,10 @@ async function createProjectOnBlockchain(projectId: string): Promise<void> {
     await createProjectTransaction.wait();
     logger.info(`Project synced to blockchain successfully. projectId=${normalizedProjectId} txHash=${createProjectTransaction.hash}`);
   } catch (error) {
-    logger.error(`Create project on blockchain failed. projectId=${normalizedProjectId} errorMessage=${(error as Error)?.message || 'Unknown error'}`);
+    logger.error('Create project on blockchain failed.', {
+      projectId: normalizedProjectId,
+      errorMessage: (error as Error)?.message || 'Unknown error'
+    });
     throw new ApplicationError('Không thể đồng bộ dự án lên blockchain. Vui lòng thử lại sau.', 502, 'INTERNAL_ERROR');
   }
 }

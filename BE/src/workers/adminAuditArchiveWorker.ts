@@ -1,4 +1,5 @@
 import { getLogger } from '../config/logger';
+import { runWithWorkerContext } from '../config/requestContext';
 import {
   archiveAdminAuditLogs,
   createConfiguredAuditArchiveStore,
@@ -42,7 +43,7 @@ export function stopAdminAuditArchiveWorker(): void {
   logger.info('Admin audit archive worker đã dừng.');
 }
 
-export async function runAdminAuditArchiveOnce(store: AuditArchiveStore): Promise<ArchiveAdminAuditLogsResult> {
+async function runAdminAuditArchiveOnceInternal(store: AuditArchiveStore): Promise<ArchiveAdminAuditLogsResult> {
   try {
     const result = await archiveAdminAuditLogs({
       store,
@@ -78,6 +79,11 @@ export async function runAdminAuditArchiveOnce(store: AuditArchiveStore): Promis
     });
     throw error;
   }
+}
+
+/** Chạy một vòng archive trong correlation context riêng của background worker. */
+export async function runAdminAuditArchiveOnce(store: AuditArchiveStore): Promise<ArchiveAdminAuditLogsResult> {
+  return runWithWorkerContext('admin-audit-archive', () => runAdminAuditArchiveOnceInternal(store));
 }
 
 /** Không cho hai chu kỳ archive chồng lên nhau khi storage chậm hơn lịch poll. */

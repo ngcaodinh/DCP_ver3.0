@@ -1,6 +1,7 @@
 import { Job } from 'bull';
 import { randomUUID } from 'crypto';
 import { getLogger } from '../config/logger';
+import { runWithWorkerContext } from '../config/requestContext';
 import {
   getDisbursementTransferQueue,
   enqueueDisbursementTransfer,
@@ -336,7 +337,7 @@ export async function pollTransferUntilFinal(
  * Hàm xử lý một job transfer.
  * Mục đích: gọi PayOS API, ghi log, retry nếu fail, chuyển manual review nếu hết retry.
  */
-export async function processTransferJob(job: Job<DisbursementTransferJobData>): Promise<void> {
+async function processTransferJobInternal(job: Job<DisbursementTransferJobData>): Promise<void> {
   const { requestId, attemptNumber, idempotencyKey } = job.data;
   const startTime = Date.now();
 
@@ -639,6 +640,11 @@ export async function processTransferJob(job: Job<DisbursementTransferJobData>):
   }
 }
 
+/** Chạy processor PayOS transfer trong correlation context riêng của queue job. */
+export async function processTransferJob(job: Job<DisbursementTransferJobData>): Promise<void> {
+  return runWithWorkerContext('payos-transfer', () => processTransferJobInternal(job), job.id);
+}
+
 /**
  * Hàm khởi động PayOS Transfer Worker.
  * Mục đích: consume job từ Bull queue và xử lý PayOS transfer.
@@ -652,36 +658,40 @@ export function startPayosTransferWorker(): void {
 
   // Retry với exponential backoff: 1m → 5m → 30m
   queue.process(async (job: Job<DisbursementTransferJobData>) => {
-    try {
-      await processTransferJob(job);
-    } catch (error) {
-      const { requestId, attemptNumber } = job.data;
-      const errorMessage = sanitizeProviderError(extractErrorMessage(error)) || 'PayOS transfer failed.';
+    return runWithWorkerContext('payos-transfer', async () => {
+      try {
+        await processTransferJobInternal(job);
+      } catch (error) {
+        const { requestId, attemptNumber } = job.data;
+        const errorMessage = sanitizeProviderError(extractErrorMessage(error)) || 'PayOS transfer failed.';
 
-      logger.error('PayOS transfer job thất bại trong process handler.', {
-        requestId,
-        attemptNumber,
-        jobId: job.id,
-        errorMessage
-      });
+        logger.error('PayOS transfer job thất bại trong process handler.', {
+          requestId,
+          attemptNumber,
+          jobId: job.id,
+          errorMessage
+        });
 
-      if (attemptNumber < MAX_TRANSFER_RETRY_COUNT) {
-        await scheduleNextTransferRetry(requestId, attemptNumber, job.data.idempotencyKey);
-      } else {
-        await moveToManualReview(requestId, errorMessage, undefined, job.data.idempotencyKey);
+        if (attemptNumber < MAX_TRANSFER_RETRY_COUNT) {
+          await scheduleNextTransferRetry(requestId, attemptNumber, job.data.idempotencyKey);
+        } else {
+          await moveToManualReview(requestId, errorMessage, undefined, job.data.idempotencyKey);
+        }
+
+        throw error;
       }
-
-      throw error;
-    }
+    }, job.id);
   });
 
   // Xử lý job complete
   queue.on('completed', (job: Job<DisbursementTransferJobData>) => {
-    logger.info('Disbursement transfer job hoàn thành.', {
-      requestId: job.data.requestId,
-      attemptNumber: job.data.attemptNumber,
-      jobId: job.id
-    });
+    runWithWorkerContext('payos-transfer', () => {
+      logger.info('Disbursement transfer job hoàn thành.', {
+        requestId: job.data.requestId,
+        attemptNumber: job.data.attemptNumber,
+        jobId: job.id
+      });
+    }, job.id);
   });
 
   logger.info('PayOS Transfer Worker đã khởi động.');

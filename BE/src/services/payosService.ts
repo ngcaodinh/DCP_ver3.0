@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { getLogger } from '../config/logger';
 import { sanitizeProviderError } from '../utils/sanitizeProviderError';
 
 type CreatePaymentLinkInput = {
@@ -13,6 +14,8 @@ type CreatePaymentLinkResult = {
   paymentUrl: string;
   orderCode: string;
 };
+
+const logger = getLogger();
 
 /** Tạo lỗi PayOS chỉ giữ status và body đã sanitize, không đưa raw provider response vào log chain. */
 function createSafePayosProviderError(operation: string, statusCode: number, responseText: string): Error {
@@ -611,7 +614,9 @@ export async function createPayosTransfer(input: CreatePayosTransferInput): Prom
     );
 
     if (transferId === input.idempotencyKey && providerTransactionId === input.idempotencyKey) {
-      console.warn('PayOS payout response thiếu định danh giao dịch thật.', maskPayosSensitivePayload(responsePayload));
+      logger.warn('PayOS payout response thiếu định danh giao dịch thật.', {
+        errorMessage: sanitizeProviderError(maskPayosSensitivePayload(responsePayload)) ?? '[RESPONSE_REDACTED]'
+      });
     }
 
     return {

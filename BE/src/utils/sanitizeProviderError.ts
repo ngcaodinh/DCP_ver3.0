@@ -11,9 +11,17 @@ function maskProviderErrorText(errorMessage: string): string {
     .replace(/https?:\/\/[^\s"'<>]+/gi, '[REDACTED_URL]')
     .replace(/(https?:\/\/)([^/\s:@]+):([^@\s/]+)@/gi, '$1[REDACTED]@')
     .replace(/([?&](?:api[-_]?key|access[-_]?token|authorization|key|password|secret|token)=)[^&#\s]+/gi, '$1[REDACTED]')
+    .replace(/(["']?)(api[-_]?key|access[-_]?token|authorization|password|private[-_]?key|secret(?:[-_]?key)?|token)\1\s*:\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^,;}\s]+)/gi, '$1$2$1:"[REDACTED]"')
+    .replace(/\b(api[-_]?key|access[-_]?token|authorization|password|private[-_]?key|secret(?:[-_]?key)?|token)\s*[:=]\s*[^\s,;}&]+/gi, '$1=[REDACTED]')
     .replace(/(Bearer\s+)[A-Za-z0-9._~-]+/gi, '$1[REDACTED]')
-    .replace(/\b0x[a-f0-9]{40}\b/gi, '0x[REDACTED]')
+    .replace(/\b0x[a-f0-9]{40,64}\b/gi, '0x[REDACTED]')
+    .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, '[IP_REDACTED]')
+    .replace(/-?\d{1,3}\.\d+\s*,\s*-?\d{1,3}\.\d+/g, '[GPS_REDACTED]')
     .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[REDACTED]')
+    .replace(
+      /\b(user[-_]?agent|reason|rejection[-_]?reason)\s*[:=]\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^,;}\n]+)/gi,
+      '$1=[REDACTED]'
+    )
     .replace(
       /((?:["']?)(?:to)?(?:account|bank|recipient|holder|phone|mobile|name)[A-Za-z0-9_-]*(?:["']?\s*[:=]\s*))("[^"]*"|'[^']*'|[^,;|}\n]+)/gi,
       '$1[REDACTED]'
@@ -38,7 +46,11 @@ function sanitizeProviderValue(value: unknown, depth: number = 0): unknown {
       const normalizedKey = key.replace(/[-_]/g, '').toLowerCase();
       if (
         /(account|bank|recipient|holder|phone|mobile|name)/i.test(key)
-        || ['accesstoken', 'apikey', 'authorization', 'password', 'secret', 'token']
+        || [
+          'accesstoken', 'apikey', 'authorization', 'password', 'privatekey', 'secret', 'secretkey', 'token',
+          'ip', 'ipaddress', 'clientip', 'sourceip', 'gps', 'gpscoordinates',
+          'latitude', 'longitude'
+        ]
           .includes(normalizedKey)
       ) {
         return [key, '[REDACTED]'];
@@ -83,4 +95,9 @@ export function sanitizeProviderError(errorMessage: unknown): string | null {
     .slice(0, PROVIDER_ERROR_MAX_LENGTH);
 
   return sanitizedMessage || null;
+}
+
+/** Sanitize message log nhưng không áp giới hạn 240 ký tự dành riêng cho provider error. */
+export function sanitizeProviderLogMessage(message: string): string {
+  return maskProviderErrorText(message);
 }

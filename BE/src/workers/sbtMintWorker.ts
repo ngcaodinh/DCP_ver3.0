@@ -2,6 +2,7 @@ import { Job } from 'bull';
 import { z } from 'zod';
 import { ethers } from 'ethers';
 import { getLogger } from '../config/logger';
+import { runWithWorkerContext } from '../config/requestContext';
 import {
   getSbtMintQueue,
   SBT_MINT_MAX_ATTEMPTS
@@ -189,7 +190,7 @@ function attachOracleEventListener(): void {
  *
  * Pattern này tách biệt "thực thi" và "xử lý lỗi" để dễ test riêng từng phần.
  */
-export async function processSbtMintJob(
+async function processSbtMintJobInternal(
   job: Job<{ mintRequestId: string; sbtId: string; attemptNumber: number; enqueuedBy: string }>
 ): Promise<{
   onChainTokenId: number | null;
@@ -263,6 +264,19 @@ export async function processSbtMintJob(
   }
 }
 
+/** Chạy processor SBT mint trong correlation context riêng của queue job. */
+export async function processSbtMintJob(
+  job: Job<{ mintRequestId: string; sbtId: string; attemptNumber: number; enqueuedBy: string }>
+): Promise<{
+  onChainTokenId: number | null;
+  transactionHash: string | null;
+  blockNumber: number | null;
+  status: 'CONFIRMED' | 'SUBMITTED' | 'FAILED' | 'DLQ';
+  attemptNumber: number;
+}> {
+  return runWithWorkerContext('sbt-mint', () => processSbtMintJobInternal(job), job.id);
+}
+
 /**
  * Khởi động SBT mint worker — đăng ký processor với Bull queue + lắng nghe oracle event.
  * Mục đích: bridge giữa Oracle signal (B1) và on-chain mint (C1).
@@ -278,32 +292,38 @@ export function startSbtMintWorker(): void {
   queue.process(SBT_MINT_WORKER_CONCURRENCY, processSbtMintJob);
 
   queue.on('failed', (job, error) => {
-    logger.error('SBT mint job failed event.', {
-      queueJobId: job.id,
-      mintRequestId: job.data.mintRequestId,
-      sbtId: job.data.sbtId,
-      attemptNumber: job.data.attemptNumber,
-      errorMessage: (error as Error)?.message
-    });
+    runWithWorkerContext('sbt-mint', () => {
+      logger.error('SBT mint job failed event.', {
+        queueJobId: job.id,
+        mintRequestId: job.data.mintRequestId,
+        sbtId: job.data.sbtId,
+        attemptNumber: job.data.attemptNumber,
+        errorMessage: (error as Error)?.message
+      });
+    }, job.id);
   });
 
   queue.on('stalled', (job) => {
-    logger.warn('SBT mint job bị stall.', {
-      queueJobId: job.id,
-      mintRequestId: job.data.mintRequestId,
-      sbtId: job.data.sbtId
-    });
+    runWithWorkerContext('sbt-mint', () => {
+      logger.warn('SBT mint job bị stall.', {
+        queueJobId: job.id,
+        mintRequestId: job.data.mintRequestId,
+        sbtId: job.data.sbtId
+      });
+    }, job.id);
   });
 
   queue.on('completed', (job, result) => {
-    logger.info('SBT mint job completed event.', {
-      queueJobId: job.id,
-      mintRequestId: job.data.mintRequestId,
-      sbtId: job.data.sbtId,
-      onChainTokenId: result?.onChainTokenId ?? undefined,
-      transactionHash: result?.transactionHash ?? undefined,
-      status: result?.status
-    });
+    runWithWorkerContext('sbt-mint', () => {
+      logger.info('SBT mint job completed event.', {
+        queueJobId: job.id,
+        mintRequestId: job.data.mintRequestId,
+        sbtId: job.data.sbtId,
+        onChainTokenId: result?.onChainTokenId ?? undefined,
+        transactionHash: result?.transactionHash ?? undefined,
+        status: result?.status
+      });
+    }, job.id);
   });
 
   // Lắng nghe oracle.verified để tự động tạo mint request

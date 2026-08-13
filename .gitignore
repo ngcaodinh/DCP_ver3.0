@@ -20,6 +20,9 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# E6 — Winston log files
+BE/logs/
+
 # OS / Editor
 .DS_Store
 Thumbs.db
@@ -79,7 +82,8 @@ dcp-terms-of-service.md
 \production-deployment-plan.md
 \beginner-docker-vps-deploy-guide.md
 
-docs
+docs/*
+!docs/elk-integration.md
 # môi trường framework kiểm thử tự động bằng NUnit + Selenium.
 E2E.Tests
 

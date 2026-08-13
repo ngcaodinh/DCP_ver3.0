@@ -18,12 +18,14 @@ import {
   type TimelineEvent
 } from '../../services/unified-timeline.service';
 
+const mockTimelineLogger = vi.hoisted(() => ({
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn()
+}));
+
 vi.mock('../../config/logger', () => ({
-  getLogger: vi.fn(() => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn()
-  }))
+  getLogger: vi.fn(() => mockTimelineLogger)
 }));
 
 vi.mock('../../config/redis', () => ({
@@ -457,10 +459,17 @@ describe('unified-timeline.service', () => {
       };
       vi.mocked(findDonationsByProjectIdWithDateFilter).mockResolvedValue([blockchainDonation]);
 
-      const result = await getUnifiedTimeline({ projectId: 'project-001' }, 50);
+      const result = await getUnifiedTimeline({
+        projectId: 'project-001',
+        walletAddress: blockchainDonation.walletAddress
+      }, 50);
 
       expect(findDonationsByProjectIdWithDateFilter).toHaveBeenCalled();
       expect(result.timeline.length).toBeGreaterThan(0);
+      expect(mockTimelineLogger.info).toHaveBeenCalledWith('Unified collection empty, using fallback.', {
+        projectId: 'project-001',
+        walletAddress: blockchainDonation.walletAddress
+      });
     });
 
     it('invalid wallet address khong lam crash service', async () => {
@@ -488,6 +497,9 @@ describe('unified-timeline.service', () => {
 
       expect(result).toBeDefined();
       expect(result.timeline).toEqual([]);
+      expect(mockTimelineLogger.warn).toHaveBeenCalledWith('Invalid wallet address format, skipping filter.', {
+        walletAddress: 'invalid-address'
+      });
     });
 
     it('cache duoc set sau khi fetch', async () => {

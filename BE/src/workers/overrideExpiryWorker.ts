@@ -1,4 +1,5 @@
 import { getLogger } from '../config/logger';
+import { runWithWorkerContext } from '../config/requestContext';
 import {
   findPendingOverrideRequestsExpiredBefore,
   expireOverrideRequest
@@ -32,10 +33,10 @@ export function startOverrideExpiryWorker(): void {
   if (intervalId) return; // Tránh double-start
 
   // Run ngay khi khởi động để phát hiện request tồn đọng từ trước khi restart
-  void checkAndExpireOverdueRequests();
+  void runOverrideExpiryCycle();
 
   intervalId = setInterval(() => {
-    void checkAndExpireOverdueRequests();
+    void runOverrideExpiryCycle();
   }, POLL_INTERVAL_MS);
 
   logger.info('Override Expiry Worker đã khởi động.', {
@@ -120,6 +121,11 @@ async function checkAndExpireOverdueRequests(): Promise<void> {
       errorMessage: (err as Error)?.message
     });
   }
+}
+
+/** Chạy một vòng override expiry trong correlation context riêng của scheduler. */
+function runOverrideExpiryCycle(): Promise<void> {
+  return runWithWorkerContext('override-expiry', () => checkAndExpireOverdueRequests());
 }
 
 /**

@@ -13,12 +13,15 @@ const mockInterfaceGetEvent = vi.hoisted(() => vi.fn());
 const mockInterfaceParseLog = vi.hoisted(() => vi.fn());
 const mockCreateUnifiedTransactionFromBlockchain = vi.hoisted(() => vi.fn());
 const mockUpsertDonationByTransactionHash = vi.hoisted(() => vi.fn());
+const mockLoggerInfo = vi.hoisted(() => vi.fn());
+const mockLoggerWarn = vi.hoisted(() => vi.fn());
+const mockLoggerError = vi.hoisted(() => vi.fn());
 
 vi.mock('../../config/logger', () => ({
   getLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
+    info: mockLoggerInfo,
+    warn: mockLoggerWarn,
+    error: mockLoggerError,
   }),
 }));
 
@@ -104,6 +107,7 @@ vi.mock('ethers', () => ({
 }));
 
 import { getRedisClientIfReady } from '../../config/redis';
+import { getRequestContext } from '../../config/requestContext';
 import { DepositTransactionModel } from '../../models/depositModel';
 import {
   findUnifiedTransactionByCorrelationId,
@@ -233,6 +237,25 @@ describe('runDataMapperCycle', () => {
     expect(result).toHaveProperty('payosSynced');
     expect(result).toHaveProperty('correlated');
     expect(result).toHaveProperty('reorged');
+  });
+
+  it('ghi log trong worker context co run ID on dinh cho ca chu ky', async () => {
+    mockLoggerInfo.mockReset();
+    const observedContexts: Array<ReturnType<typeof getRequestContext>> = [];
+    mockLoggerInfo.mockImplementation(() => {
+      observedContexts.push(getRequestContext());
+    });
+
+    await runDataMapperCycle();
+
+    const workerContext = observedContexts.find(context => Boolean(context?.workerRunId));
+    expect(workerContext).toMatchObject({
+      requestId: expect.stringMatching(/^data-mapper:/),
+      userId: null,
+      workerName: 'data-mapper',
+      workerRunId: expect.stringMatching(/^data-mapper:/)
+    });
+    expect(workerContext?.requestId).toBe(workerContext?.workerRunId);
   });
 
   it('tra ve so lieu la number', async () => {

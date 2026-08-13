@@ -144,7 +144,7 @@ export async function handleCreateDisbursementRequest(req: Request, res: Respons
     if (error instanceof ApplicationError) {
       res.status(error.statusCode).json({ error: error.message, code: error.errorCode });
     } else {
-      logger.error(`handleCreateDisbursementRequest failed. error=${(error as Error)?.message}`);
+      logger.error('handleCreateDisbursementRequest failed.', { errorMessage: (error as Error)?.message });
       res.status(500).json({ error: 'Lỗi server khi tạo yêu cầu rút tiền.' });
     }
   }
@@ -188,7 +188,7 @@ export async function handleSignDisbursementRequest(req: Request, res: Response)
     if (error instanceof ApplicationError) {
       res.status(error.statusCode).json({ error: error.message, code: error.errorCode });
     } else {
-      logger.error(`handleSignDisbursementRequest failed. error=${(error as Error)?.message}`);
+      logger.error('handleSignDisbursementRequest failed.', { errorMessage: (error as Error)?.message });
       res.status(500).json({ error: 'Lỗi server khi ký duyệt.' });
     }
   }
@@ -233,7 +233,7 @@ export async function handleRejectDisbursementRequest(req: Request, res: Respons
     if (error instanceof ApplicationError) {
       res.status(error.statusCode).json({ error: error.message, code: error.errorCode });
     } else {
-      logger.error(`handleRejectDisbursementRequest failed. error=${(error as Error)?.message}`);
+      logger.error('handleRejectDisbursementRequest failed.', { errorMessage: (error as Error)?.message });
       res.status(500).json({ error: 'Lỗi server khi từ chối.' });
     }
   }
@@ -260,7 +260,7 @@ export async function handleGetMyDisbursements(req: Request, res: Response): Pro
     if (error instanceof ApplicationError) {
       res.status(error.statusCode).json({ error: error.message, code: error.errorCode });
     } else {
-      logger.error(`handleGetMyDisbursements failed. error=${(error as Error)?.message}`);
+      logger.error('handleGetMyDisbursements failed.', { errorMessage: (error as Error)?.message });
       res.status(500).json({ error: 'Lỗi server khi lấy danh sách.' });
     }
   }
@@ -285,7 +285,7 @@ export async function handleGetPendingDisbursements(req: Request, res: Response)
     if (error instanceof ApplicationError) {
       res.status(error.statusCode).json({ error: error.message, code: error.errorCode });
     } else {
-      logger.error(`handleGetPendingDisbursements failed. error=${(error as Error)?.message}`);
+      logger.error('handleGetPendingDisbursements failed.', { errorMessage: (error as Error)?.message });
       res.status(500).json({ error: 'Lỗi server khi lấy danh sách.' });
     }
   }
@@ -310,7 +310,7 @@ export async function handleGetDisbursementRequestSummaries(req: Request, res: R
     if (error instanceof ApplicationError) {
       res.status(error.statusCode).json({ error: error.message, code: error.errorCode });
     } else {
-      logger.error(`handleGetDisbursementRequestSummaries failed. error=${(error as Error)?.message}`);
+      logger.error('handleGetDisbursementRequestSummaries failed.', { errorMessage: (error as Error)?.message });
       res.status(500).json({ error: 'Lỗi server khi lấy danh sách tóm tắt giải ngân.' });
     }
   }
@@ -340,7 +340,7 @@ export async function handleGetDisbursementApprovalLogs(req: Request, res: Respo
     if (error instanceof ApplicationError) {
       res.status(error.statusCode).json({ error: error.message, code: error.errorCode });
     } else {
-      logger.error(`handleGetDisbursementApprovalLogs failed. error=${(error as Error)?.message}`);
+      logger.error('handleGetDisbursementApprovalLogs failed.', { errorMessage: (error as Error)?.message });
       res.status(500).json({ error: 'Lỗi server khi lấy nhật ký ký duyệt.' });
     }
   }
@@ -371,7 +371,7 @@ export async function handleGetDisbursementDetail(req: Request, res: Response): 
     if (error instanceof ApplicationError) {
       res.status(error.statusCode).json({ error: error.message, code: error.errorCode });
     } else {
-      logger.error(`handleGetDisbursementDetail failed. error=${(error as Error)?.message}`);
+      logger.error('handleGetDisbursementDetail failed.', { errorMessage: (error as Error)?.message });
       res.status(500).json({ error: 'Lỗi server khi lấy chi tiết.' });
     }
   }
@@ -396,7 +396,7 @@ export async function handleGetDisbursementsByProject(req: Request, res: Respons
     if (error instanceof ApplicationError) {
       res.status(error.statusCode).json({ error: error.message, code: error.errorCode });
     } else {
-      logger.error(`handleGetDisbursementsByProject failed. error=${(error as Error)?.message}`);
+      logger.error('handleGetDisbursementsByProject failed.', { errorMessage: (error as Error)?.message });
       res.status(500).json({ error: 'Lỗi server khi lấy lịch sử giải ngân.' });
     }
   }
@@ -421,7 +421,7 @@ export async function handleGetMaxWithdrawable(req: Request, res: Response): Pro
     if (error instanceof ApplicationError) {
       res.status(error.statusCode).json({ error: error.message, code: error.errorCode });
     } else {
-      logger.error(`handleGetMaxWithdrawable failed. error=${(error as Error)?.message}`);
+      logger.error('handleGetMaxWithdrawable failed.', { errorMessage: (error as Error)?.message });
       res.status(500).json({ error: 'Lỗi server khi lấy số dư.' });
     }
   }

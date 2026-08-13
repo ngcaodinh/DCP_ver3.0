@@ -1,4 +1,5 @@
 import { getLogger } from '../config/logger';
+import { runWithWorkerContext } from '../config/requestContext';
 import {
   claimAdminActionOutbox,
   markAdminActionOutboxDispatched,
@@ -22,7 +23,7 @@ let isRunning = false;
 type OutboxDispatchResult = { enqueued: boolean; jobId?: string | number };
 
 /** Dispatch outbox sau commit; lỗi queue chỉ retry event, không rollback business decision. */
-export async function runAdminActionOutboxOnce(eventId?: string): Promise<number> {
+async function runAdminActionOutboxOnceInternal(eventId?: string): Promise<number> {
   let dispatched = 0;
   const now = new Date();
   for (;;) {
@@ -44,6 +45,11 @@ export async function runAdminActionOutboxOnce(eventId?: string): Promise<number
     }
   }
   return dispatched;
+}
+
+/** Chạy một vòng dispatch outbox trong correlation context riêng của worker. */
+export async function runAdminActionOutboxOnce(eventId?: string): Promise<number> {
+  return runWithWorkerContext('admin-action-outbox', () => runAdminActionOutboxOnceInternal(eventId));
 }
 
 export function startAdminActionOutboxWorker(): void {

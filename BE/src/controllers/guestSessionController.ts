@@ -19,13 +19,12 @@ import {
 } from '../services/guestClaimService';
 import { sendErrorResponse, sendSuccessResponse, sendErrorFromUnknown } from '../utils/apiResponse';
 import { GuestSessionRequest } from '../middleware/guestAuthMiddleware';
-import { createAuthenticationMiddleware, AuthenticatedRequest } from '../middleware/authenticationMiddleware';
+import { AuthenticatedRequest } from '../middleware/authenticationMiddleware';
 import { getLogger } from '../config/logger';
 import { verifyGuestSessionToken } from '../config/guestJsonWebToken';
 import { findGuestWalletSessionById } from '../repositories/guestWalletSessionRepository';
 import { ApplicationError } from '../utils/applicationError';
 import { generateServerSaltForGuest } from '../services/guestSessionService';
-import crypto from 'crypto';
 
 const logger = getLogger();
 
@@ -416,7 +415,7 @@ export async function handlePrepareGuestClaim(
   } catch (error: unknown) {
     logger.error('Unexpected error during session pre-validation.', {
       errorMessage: error instanceof Error ? error.message : String(error),
-      sessionId: '[SESSION_REDACTED]'
+      sessionId: decodedToken.sessionId
     });
     sendErrorResponse(response, 500, 'Lỗi khi xác thực session. Vui lòng thử lại.', 'INTERNAL_ERROR');
     return;

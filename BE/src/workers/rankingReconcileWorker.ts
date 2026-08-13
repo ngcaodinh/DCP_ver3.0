@@ -1,4 +1,5 @@
 import { getLogger } from '../config/logger';
+import { runWithWorkerContext } from '../config/requestContext';
 import { reconcileAllProjectMetrics } from '../services/rankingIncrementalService';
 import { runGuestCleanupOnce } from './guestCleanupWorker';
 
@@ -29,18 +30,6 @@ const logger = getLogger();
  * Dùng để đảm bảo idempotency: không chạy 2 lần trong khoảng MIN_RUN_INTERVAL_MS.
  */
 let lastRunTimestamp = 0;
-
-/**
- * Kiểm tra xem đã đến thời điểm chạy reconcile chưa (window-based).
- * Thay vì so sánh chính xác hours === 0 && minutes === 0,
- * hàm này kiểm tra trong khoảng [00:00, 00:01) — tức 60 giây đầu tiên của ngày.
- *
- * @returns true nếu đang trong window reconcile
- */
-function isInReconcileWindow(): boolean {
-  const now = new Date();
-  return now.getHours() === RECONCILE_SCHEDULE_HOUR && now.getMinutes() === RECONCILE_SCHEDULE_MINUTE;
-}
 
 /**
  * Tính toán thời gian chờ (miligiây) đến thời điểm reconcile tiếp theo.
@@ -90,44 +79,49 @@ export function startRankingReconcileWorker(): void {
   const scheduleNextReconcile = (): void => {
     const delay = calculateDelayUntilReconcileTime();
 
-    setTimeout(async () => {
-      try {
-        const now = Date.now();
+    setTimeout(() => {
+      // Giữ toàn bộ Promise của một lần reconcile trong cùng ALS scope để log hai worker con có chung run ID.
+      void runWithWorkerContext('ranking-reconcile', async () => {
+        try {
+          const now = Date.now();
 
-        // Idempotency guard: đảm bảo 2 lần chạy cách nhau ít nhất 12 giờ
-        // Chống early-fire double-run và late-fire skip
-        if (now - lastRunTimestamp >= MIN_RUN_INTERVAL_MS) {
-          lastRunTimestamp = now;
-          logger.info('Ranking reconcile worker bắt đầu reconcile ngày.');
+          // Idempotency guard: đảm bảo 2 lần chạy cách nhau ít nhất 12 giờ
+          // Chống early-fire double-run và late-fire skip
+          if (now - lastRunTimestamp >= MIN_RUN_INTERVAL_MS) {
+            lastRunTimestamp = now;
+            logger.info('Ranking reconcile worker bắt đầu reconcile ngày.');
 
-          // Dùng Promise.allSettled để cả 2 workers đều hoàn thành dù có lỗi
-          const results = await Promise.allSettled([
-            reconcileAllProjectMetrics(DEFAULT_WINDOW_HOURS),
-            runGuestCleanupOnce()
-          ]);
+            // Dùng Promise.allSettled để cả 2 workers đều hoàn thành dù có lỗi
+            const results = await Promise.allSettled([
+              reconcileAllProjectMetrics(DEFAULT_WINDOW_HOURS),
+              runGuestCleanupOnce()
+            ]);
 
-          // Log riêng kết quả success/failure của từng worker
-          for (const result of results) {
-            if (result.status === 'fulfilled') {
-              logger.info(`Worker completed successfully: ${JSON.stringify(result.value)}`);
-            } else {
-              logger.error(`Worker failed: ${result.reason}`);
+            // Log riêng kết quả success/failure của từng worker
+            for (const result of results) {
+              if (result.status === 'fulfilled') {
+                logger.info('Worker completed successfully.', { result: result.value });
+              } else {
+                logger.error('Worker failed.', {
+                  errorMessage: result.reason instanceof Error ? result.reason.message : String(result.reason)
+                });
+              }
             }
+
+            logger.info('Ranking reconcile worker hoàn tất reconcile ngày.');
+          } else {
+            // Đã chạy gần đây (early-fire hoặc double trigger) → bỏ qua
+            logger.info(`Ranking reconcile worker bị skip (last run: ${now - lastRunTimestamp}ms ago, min interval: ${MIN_RUN_INTERVAL_MS}ms).`);
           }
-
-          logger.info('Ranking reconcile worker hoàn tất reconcile ngày.');
-        } else {
-          // Đã chạy gần đây (early-fire hoặc double trigger) → bỏ qua
-          logger.info(`Ranking reconcile worker bị skip (last run: ${now - lastRunTimestamp}ms ago, min interval: ${MIN_RUN_INTERVAL_MS}ms).`);
+        } catch (error) {
+          logger.error('Ranking reconcile worker thất bại.', {
+            errorMessage: (error as Error).message
+          });
         }
-      } catch (error) {
-        logger.error('Ranking reconcile worker thất bại.', {
-          errorMessage: (error as Error).message
-        });
-      }
 
-      // Lên lịch cho lần tiếp theo
-      scheduleNextReconcile();
+        // Lên lịch cho lần tiếp theo sau khi execution hiện tại đã kết thúc.
+        scheduleNextReconcile();
+      });
     }, delay);
   };
 

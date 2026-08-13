@@ -406,7 +406,10 @@ export async function handleDonationPostIndex(
 ): Promise<boolean> {
   // Validate amount để tránh NaN/Infinity từ lỗi parse event blockchain
   if (!Number.isFinite(donationEvent.amount) || donationEvent.amount <= 0) {
-    logger.error(`Giá trị amount không hợp lệ từ event. txHash=${donationEvent.transactionHash} amount=${donationEvent.amount}`);
+    logger.error('Giá trị amount không hợp lệ từ event.', {
+      transactionHash: donationEvent.transactionHash,
+      amount: donationEvent.amount
+    });
     throw new ApplicationError(
       'Giá trị donation không hợp lệ từ blockchain event.',
       500,
@@ -455,7 +458,12 @@ export async function handleDonationPostIndex(
   // Quy ước hiện tại là 1 token = 1 VND (đối chiếu depositService.ts:124-125); nếu đổi tỷ lệ, metric _vnd phải đổi theo.
   recordDonationMetrics(donationEvent.amount);
 
-  logger.info(`Donation post-indexed. isGuest=${isGuestDonation} sessionId=${guestSession?.sessionId ?? 'n/a'} projectId=${donationEvent.projectId} trustMultiplier=${trustMultiplier}`);
+  logger.info('Donation post-indexed.', {
+    isGuestDonation,
+    sessionId: guestSession?.sessionId,
+    projectId: donationEvent.projectId,
+    trustMultiplier
+  });
   return isGuestDonation;
 }
 
@@ -632,7 +640,12 @@ export async function recordDonationFromTransactionHash(authenticatedUserId: str
 
     // Ghi chú logic phức tạp: bắt buộc ví người ký on-chain trùng ví đã xác thực để chặn giả mạo txHash giữa các tài khoản.
     if (!authenticatedUserWalletAddress || donorAddressOnChain !== authenticatedUserWalletAddress) {
-      logger.warn(`Donation record bị chặn vì donor không khớp user. userId=${normalizedAuthenticatedUserId} donorOnChain=${donorAddressOnChain} userWallet=${authenticatedUserWalletAddress} transactionHash=${normalizedTransactionHash}`);
+      logger.warn('Donation record bị chặn vì donor không khớp user.', {
+        userId: normalizedAuthenticatedUserId,
+        donorAddress: donorAddressOnChain,
+        walletAddress: authenticatedUserWalletAddress,
+        transactionHash: normalizedTransactionHash
+      });
       throw new ApplicationError('Ví người gửi giao dịch không khớp với ví của tài khoản đăng nhập.', 403, 'FORBIDDEN');
     }
 

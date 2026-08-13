@@ -1,5 +1,8 @@
 import mongoose from 'mongoose';
+import { getLogger } from '../config/logger';
 import { recalculateRankingSnapshot } from './rankingService';
+
+const logger = getLogger();
 
 /** Hàm tạo demo donation data đơn giản. Mục đích: cung cấp dữ liệu đủ để QF algorithm tính toán được. */
 async function createDemoDonations(): Promise<void> {
@@ -59,7 +62,7 @@ async function createDemoDonations(): Promise<void> {
   ];
 
   await DonationModel.insertMany(demoData as unknown as mongoose.Document[]);
-  console.log(`Auto-seed: đã tạo ${demoData.length} donation demo.`);
+  logger.info(`Auto-seed: đã tạo ${demoData.length} donation demo.`);
 }
 
 /** Hàm tạo demo project data. Mục đích: cung cấp project info để ranking join được. */
@@ -100,7 +103,7 @@ async function createDemoProjects(): Promise<void> {
   ];
 
   await ProjectModel.insertMany(projectList as unknown as mongoose.Document[]);
-  console.log(`Auto-seed: đã tạo ${projectList.length} project demo.`);
+  logger.info(`Auto-seed: đã tạo ${projectList.length} project demo.`);
 }
 
 /**
@@ -111,5 +114,5 @@ export async function autoSeedDemoRankingData(): Promise<void> {
   await createDemoProjects();
   await createDemoDonations();
   await recalculateRankingSnapshot(24);
-  console.log('Auto-seed: đã tạo ranking snapshot từ dữ liệu demo.');
+  logger.info('Auto-seed: đã tạo ranking snapshot từ dữ liệu demo.');
 }

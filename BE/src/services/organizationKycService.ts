@@ -618,9 +618,13 @@ export async function reviewOrganizationKycSubmission(
           : 'ORG_SIGNER_ROLE đã cấp thành công.';
         const detailMessage = `KYC approve thành công. ${projectManagerMessage} ${orgSignerMessage}`;
 
-        logger.info(
-          `KYC approve + grant role success. reviewerUserId=${reviewerUserId} organizationUserId=${updatedOrganizationUser.id} walletAddress=${updatedOrganizationUser.walletAddress} projectManagerTx=${grantRoleResult.transactionHash || 'N/A'} orgSignerTx=${grantOrgSignerResult.transactionHash || 'N/A'}`
-        );
+        logger.info('KYC approve + grant role success.', {
+          performedBy: reviewerUserId,
+          userId: updatedOrganizationUser.id,
+          walletAddress: updatedOrganizationUser.walletAddress,
+          transactionHash: grantRoleResult.transactionHash || 'N/A',
+          orgSignerTransactionHash: grantOrgSignerResult.transactionHash || 'N/A'
+        });
 
         await addOrganizationKycAuditLog({
           reviewerUserId,
@@ -640,9 +644,12 @@ export async function reviewOrganizationKycSubmission(
           accountStatus: organizationUser.accountStatus
         });
 
-        logger.error(
-          `KYC approve + grant role failed. reviewerUserId=${reviewerUserId} organizationUserId=${updatedOrganizationUser.id} walletAddress=${updatedOrganizationUser.walletAddress} errorMessage=${error instanceof Error ? error.message : 'Unknown error'}`
-        );
+        logger.error('KYC approve + grant role failed.', {
+          performedBy: reviewerUserId,
+          userId: updatedOrganizationUser.id,
+          walletAddress: updatedOrganizationUser.walletAddress,
+          errorMessage: error instanceof Error ? error.message : 'Unknown error'
+        });
 
         await addOrganizationKycAuditLog({
           reviewerUserId,
@@ -660,9 +667,11 @@ export async function reviewOrganizationKycSubmission(
     }
 
     if (normalizedAction === 'reject') {
-      logger.info(
-        `KYC reject success. reviewerUserId=${reviewerUserId} organizationUserId=${updatedOrganizationUser.id} walletAddress=${updatedOrganizationUser.walletAddress}`
-      );
+      logger.info('KYC reject success.', {
+        performedBy: reviewerUserId,
+        userId: updatedOrganizationUser.id,
+        walletAddress: updatedOrganizationUser.walletAddress
+      });
 
       await addOrganizationKycAuditLog({
         reviewerUserId,

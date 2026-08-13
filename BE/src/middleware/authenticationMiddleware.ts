@@ -3,6 +3,7 @@ import jsonWebToken from 'jsonwebtoken';
 import { getJsonWebTokenConfig, getJsonWebTokenSecret } from '../config/jsonWebToken';
 import { sendErrorResponse } from '../utils/apiResponse';
 import { extractBearerToken } from '../utils/tokenExtractor';
+import { setRequestUser } from '../config/requestContext';
 
 type JwtClaims = {
   userId: string;
@@ -40,6 +41,7 @@ export function createAuthenticationMiddleware() {
         role: decodedPayload.role,
         authVersion: decodedPayload.authVersion ?? 1
       };
+      setRequestUser(decodedPayload.userId);
       next();
     } catch {
       sendErrorResponse(response, 401, 'Access token không hợp lệ hoặc đã hết hạn.', 'UNAUTHENTICATED');

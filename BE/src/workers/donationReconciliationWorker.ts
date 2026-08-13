@@ -16,6 +16,7 @@
  */
 import { ethers } from 'ethers';
 import { getLogger } from '../config/logger';
+import { runWithWorkerContext } from '../config/requestContext';
 import { getRedisClientIfReady } from '../config/redis';
 import {
   findUnindexedAudits,
@@ -331,7 +332,7 @@ export async function reconcileSession(
   audits?: Awaited<ReturnType<typeof findAuditsBySessionId>>
 ): Promise<boolean> {
   if (!session) {
-    logger.info(`[DonationReconciliation] Session ${sessionId} không tìm thấy trong DB.`);
+    logger.info('[DonationReconciliation] Session không tìm thấy trong DB.', { sessionId });
     return false;
   }
 
@@ -365,9 +366,9 @@ export async function reconcileSession(
         updatedAt: new Date()
       });
 
-      logger.info(
-        `[DonationReconciliation] Session ${sessionId} có pending donation. Flag đã được set.`
-      );
+      logger.info('[DonationReconciliation] Session có pending donation. Flag đã được set.', {
+        sessionId
+      });
       return true;
     }
   }
@@ -428,7 +429,7 @@ export class Semaphore {
  *
  * @returns Số session đã được set flag pending donation
  */
-export async function runReconciliation(): Promise<number> {
+async function runReconciliationCycle(): Promise<number> {
   logger.info('[DonationReconciliation] Bắt đầu reconciliation worker.');
 
   // =========================================================
@@ -490,7 +491,8 @@ export async function runReconciliation(): Promise<number> {
       try {
         return await reconcileSession(item.sessionId, item.session, item.audits);
       } catch (error) {
-        logger.error(`[DonationReconciliation] Lỗi khi reconcile session ${item.sessionId}.`, {
+        logger.error('[DonationReconciliation] Lỗi khi reconcile session.', {
+          sessionId: item.sessionId,
           errorMessage: extractErrorMessage(error)
         });
         return false;
@@ -503,6 +505,14 @@ export async function runReconciliation(): Promise<number> {
   const flaggedCount = results.filter(Boolean).length;
   logger.info(`[DonationReconciliation] Hoàn tất reconciliation. Đã flag ${flaggedCount} sessions có pending donation.`);
   return flaggedCount;
+}
+
+/**
+ * Chạy một lần reconciliation trong correlation scope riêng của worker.
+ * @returns Số session đã được set flag pending donation.
+ */
+export async function runReconciliation(): Promise<number> {
+  return runWithWorkerContext('donation-reconciliation', () => runReconciliationCycle());
 }
 
 /**
@@ -523,24 +533,27 @@ export function startDonationReconciliationWorker(): void {
   logger.info('Donation reconciliation worker khởi động (chạy mỗi 15 phút).');
 
   const runWithInterval = (): void => {
-    setTimeout(async () => {
-      // Thử acquire distributed lock trước khi chạy reconciliation
-      const lockAcquired = await acquireDistributedLock();
-      if (!lockAcquired) {
-        logger.info('[DonationReconciliation] Lock không acquired, bỏ qua run này.');
-      } else {
-        try {
-          await runReconciliation();
-        } catch (error) {
-          logger.error('[DonationReconciliation] Reconciliation worker thất bại.', {
-            errorMessage: extractErrorMessage(error)
-          });
-        } finally {
-          await releaseDistributedLock();
+    setTimeout(() => {
+      // Bao phủ cả lock và reconciliation để mọi log của scheduled run có cùng correlation ID.
+      void runWithWorkerContext('donation-reconciliation', async () => {
+        // Thử acquire distributed lock trước khi chạy reconciliation
+        const lockAcquired = await acquireDistributedLock();
+        if (!lockAcquired) {
+          logger.info('[DonationReconciliation] Lock không acquired, bỏ qua run này.');
+        } else {
+          try {
+            await runReconciliationCycle();
+          } catch (error) {
+            logger.error('[DonationReconciliation] Reconciliation worker thất bại.', {
+              errorMessage: extractErrorMessage(error)
+            });
+          } finally {
+            await releaseDistributedLock();
+          }
         }
-      }
 
-      runWithInterval();
+        runWithInterval();
+      });
     }, RECONCILIATION_INTERVAL_MS);
   };
 
