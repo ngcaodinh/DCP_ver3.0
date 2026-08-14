@@ -44,6 +44,12 @@ jobs:
           context: ./BE
           file: ./BE/Dockerfile
           push: true
+          build-args: |
+            SENTRY_RELEASE=${{ github.sha }}
+            SENTRY_ORG=${{ vars.SENTRY_ORG }}
+            SENTRY_PROJECT=${{ vars.SENTRY_PROJECT_BACKEND }}
+          secrets: |
+            sentry_auth_token=${{ secrets.SENTRY_AUTH_TOKEN }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
@@ -84,5 +90,12 @@ jobs:
             NEXT_PUBLIC_CHARITY_TOKEN_ADDRESS=${{ vars.NEXT_PUBLIC_CHARITY_TOKEN_ADDRESS }}
             NEXT_PUBLIC_DONATION_RANKING_ADDRESS=${{ vars.NEXT_PUBLIC_DONATION_RANKING_ADDRESS }}
             NEXT_PUBLIC_DONATION_RANKING_CONTRACT_ADDRESS=${{ vars.NEXT_PUBLIC_DONATION_RANKING_CONTRACT_ADDRESS }}
+            NEXT_PUBLIC_SENTRY_DSN=${{ vars.NEXT_PUBLIC_SENTRY_DSN }}
+            NEXT_PUBLIC_SENTRY_ENVIRONMENT=${{ vars.NEXT_PUBLIC_SENTRY_ENVIRONMENT }}
+            SENTRY_RELEASE=${{ github.sha }}
+            SENTRY_ORG=${{ vars.SENTRY_ORG }}
+            SENTRY_PROJECT=${{ vars.SENTRY_PROJECT_FRONTEND }}
+          secrets: |
+            sentry_auth_token=${{ secrets.SENTRY_AUTH_TOKEN }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

@@ -11,6 +11,7 @@ import { oracleEvents } from '../events/oracleEvents';
 import { executeSbtMint, handleSbtMintFailure, createSbtMintRequest, extractErrorMessage } from '../services/sbtMintService';
 import { sbtEvents, type SbtMintBlockedEventPayload } from '../events/sbtEvents';
 import { createBlockedImpactSbtMetadata } from '../models/impactSbtMetadataModel';
+import { reportTerminalError } from '../utils/sentryReporter';
 
 const logger = getLogger();
 
@@ -239,8 +240,22 @@ async function processSbtMintJobInternal(
     const failureResult = await handleSbtMintFailure(mintRequestId, attemptNumber, errorMessage);
 
     if (failureResult.movedToDlq) {
-      // Đã vào DLQ → throw để Bull ghi failed log, không retry tiếp
-      throw new Error(`SBT mint moved to DLQ after ${attemptNumber} attempts: ${errorMessage}`);
+      // Đã vào DLQ → terminal, ghi Winston và capture Sentry theo bảng E6.
+      const dlqError = new Error(
+        `SBT mint moved to DLQ after ${attemptNumber} attempts: ${errorMessage}`
+      );
+      reportTerminalError('SBT mint job đã vào DLQ.', dlqError, {
+        errorSource: 'job-dlq',
+        metadata: {
+          mintRequestId,
+          sbtId: job.data.sbtId,
+          attemptNumber,
+          durationMs,
+          errorMessage
+        }
+      });
+      // Throw để Bull ghi failed log và không retry tiếp.
+      throw dlqError;
     }
 
     if (failureResult.willRetry) {

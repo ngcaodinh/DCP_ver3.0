@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // Dùng vi.hoisted để mock emit function nằm trong cùng scope với factory
 const mockOracleEmit = vi.hoisted(() => vi.fn());
+const reportTerminalErrorMock = vi.hoisted(() => vi.fn());
 
 // Mock oracleEvents before importing the worker
 vi.mock('../../events/oracleEvents', () => ({
@@ -17,6 +18,10 @@ vi.mock('../../config/logger', () => ({
   getLogger: () => ({
     info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn()
   })
+}));
+
+vi.mock('../../utils/sentryReporter', () => ({
+  reportTerminalError: reportTerminalErrorMock
 }));
 
 vi.mock('../../queues/sbtMintQueue', () => ({
@@ -112,8 +117,22 @@ describe('sbtMintWorker - processSbtMintJob', () => {
       }
     } as unknown as Job<{ mintRequestId: string; sbtId: string; attemptNumber: number; enqueuedBy: string }>;
 
-    await expect(processSbtMintJob(mockJob))
-      .rejects.toThrow('SBT mint moved to DLQ after 6 attempts');
+    let thrownError: unknown;
+    try {
+      await processSbtMintJob(mockJob);
+    } catch (error) {
+      thrownError = error;
+    }
+
+    expect(thrownError).toBeInstanceOf(Error);
+    expect(thrownError).toMatchObject({
+      message: 'SBT mint moved to DLQ after 6 attempts: contract revert'
+    });
+    expect(reportTerminalErrorMock).toHaveBeenCalledWith(
+      expect.any(String),
+      thrownError,
+      expect.objectContaining({ errorSource: 'job-dlq' })
+    );
   });
 
   it('trả về FAILED status khi failure willRetry=true (Bull không retry lại)', async () => {
@@ -140,6 +159,7 @@ describe('sbtMintWorker - processSbtMintJob', () => {
 
     expect(result.status).toBe('FAILED');
     expect(result.attemptNumber).toBe(2);
+    expect(reportTerminalErrorMock).not.toHaveBeenCalled();
   });
 
   it('re-throws original error khi failure không retry và không DLQ', async () => {

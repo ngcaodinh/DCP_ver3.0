@@ -24,6 +24,7 @@ import { findUserNotificationContext } from '../models/authModel';
 import { dispatchNotification } from '../services/notificationDispatcher.service';
 import type { NotificationChannel, NotificationDeliveryState } from '../models/notificationModel';
 import { extractErrorMessage } from '../utils/extractErrorMessage';
+import { reportTerminalError } from '../utils/sentryReporter';
 
 const logger = getLogger();
 
@@ -289,12 +290,21 @@ async function scheduleNextAttempt(
 
   if (attemptNumber >= NOTIFICATION_MAX_ATTEMPTS) {
     // Đã hết retry → move to DLQ.
-    logger.error('Notification job đã hết retry — chuyển sang DLQ.', {
-      notificationId,
-      userId: job.data.userId,
-      attempts: attemptNumber,
-      errorMessage
-    });
+    // Terminal: ghi Winston và capture Sentry theo bảng E6.
+    reportTerminalError(
+      'Notification job đã hết retry — chuyển sang DLQ.',
+      new Error(errorMessage),
+      {
+        errorSource: 'job-dlq',
+        metadata: {
+          notificationId,
+          userId: job.data.userId,
+          attempts: attemptNumber,
+          jobId: job.id,
+          errorMessage
+        }
+      }
+    );
 
     await updateNotificationDeliveryStatus({
       notificationId,

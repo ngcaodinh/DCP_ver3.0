@@ -45,6 +45,8 @@ services:
     build:
       context: ./BE
       dockerfile: Dockerfile
+      args:
+        SENTRY_RELEASE: ${SENTRY_RELEASE:-local}
     container_name: dcp-backend
     restart: unless-stopped
     mem_limit: 768m
@@ -76,6 +78,8 @@ services:
     build:
       context: ./BE
       dockerfile: Dockerfile
+      args:
+        SENTRY_RELEASE: ${SENTRY_RELEASE:-local}
     container_name: dcp-backend-worker
     restart: unless-stopped
     mem_limit: 512m
@@ -108,6 +112,9 @@ services:
         NEXT_PUBLIC_CHARITY_TOKEN_ADDRESS: ${NEXT_PUBLIC_CHARITY_TOKEN_ADDRESS}
         NEXT_PUBLIC_DONATION_RANKING_ADDRESS: ${NEXT_PUBLIC_DONATION_RANKING_ADDRESS}
         NEXT_PUBLIC_DONATION_RANKING_CONTRACT_ADDRESS: ${NEXT_PUBLIC_DONATION_RANKING_CONTRACT_ADDRESS}
+        NEXT_PUBLIC_SENTRY_DSN: ${NEXT_PUBLIC_SENTRY_DSN}
+        NEXT_PUBLIC_SENTRY_ENVIRONMENT: ${NEXT_PUBLIC_SENTRY_ENVIRONMENT}
+        SENTRY_RELEASE: ${SENTRY_RELEASE:-local}
     container_name: dcp-frontend
     restart: unless-stopped
     mem_limit: 512m

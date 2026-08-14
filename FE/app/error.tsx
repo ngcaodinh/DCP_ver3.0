@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { useEffect } from 'react';
+import * as Sentry from '@sentry/nextjs';
 import CyberErrorScreen, { CyberErrorLogLine } from '@/app/components/common/CyberErrorScreen';
 
 type RouteErrorPageProps = {
@@ -44,6 +45,7 @@ function createTraceMetricValue(errorDigest?: string): number {
  */
 export default function RouteErrorPage({ error, reset }: RouteErrorPageProps) {
   useEffect(() => {
+    Sentry.captureException(error);
     console.error('DCP route error boundary:', error);
   }, [error]);
 

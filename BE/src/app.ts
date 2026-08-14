@@ -32,6 +32,8 @@ import { getCacheHmacKey } from './utils/cacheIntegrity';
 import { metricsMiddleware } from './middleware/metrics.middleware';
 import { requestContextMiddleware } from './middleware/requestContext.middleware';
 import { validateMetricsAuthConfig } from './config/metricsAuthConfig';
+import { getSentryConfigWarning } from './config/sentryConfig';
+import { reportTerminalError } from './utils/sentryReporter';
 
 const application = express();
 
@@ -60,6 +62,12 @@ function validateCacheHmacConfig(): void {
 
 validateCacheHmacConfig();
 validateMetricsAuthConfig();
+
+// Sentry là tầng quan sát: thiếu DSN thì cảnh báo, không biến production thành outage.
+const sentryConfigWarning = getSentryConfigWarning();
+if (sentryConfigWarning) {
+  getLogger().error(`[Bootstrap] ${sentryConfigWarning}`);
+}
 
 /** Hàm cấu hình middleware chính cho ứng dụng. Mục đích: áp dụng bảo mật, tối ưu hiệu năng và parse request body cho toàn hệ thống. */
 function configureMiddlewares(): void {
@@ -161,24 +169,25 @@ configureMiddlewares();
 registerRoutes();
 
 /**
- * Global error handler phải được đăng ký SAU tất cả routes.
- * Express 4 không handle async errors nếu không có error handler này.
- * Nếu không có error handler, unhandled promise rejection trong route handlers
- * sẽ crash process mà không trả về response cho client.
+ * Xử lý lỗi cuối chuỗi và phân loại lỗi terminal với lỗi payload hợp lệ.
+ * Mục đích: giữ Winston-first cho 5xx và không capture lỗi 413 lên Sentry.
  */
-application.use((err: Error, _req: Request, res: Response, _next: NextFunction): void => {
+function handleApplicationError(err: Error, _req: Request, res: Response, _next: NextFunction): void {
   void _next;
-  const logger = getLogger();
   const errorWithStatus = err as Error & { status?: number; type?: string };
   const isPayloadTooLarge = errorWithStatus.status === 413 || errorWithStatus.type === 'entity.too.large';
   const responseStatusCode = isPayloadTooLarge ? 413 : 500;
 
-  // Seam cho E7: chỉ lỗi 5xx mới capture vào Sentry; 413 chỉ cần Winston.
-  // E7 sẽ gắn requestId từ ALS và tiếp tục redact metadata trước khi gửi đi.
-  logger.error('Unhandled error in request', {
-    errorMessage: err.message,
-    errorStack: err.stack
-  });
+  if (isPayloadTooLarge) {
+    // 413 là lỗi client hợp lệ: Winston có, Sentry không theo bảng E6.
+    getLogger().error('Unhandled error in request', {
+      errorMessage: err.message,
+      errorStack: err.stack
+    });
+  } else {
+    // Reporter đảm bảo Winston ghi trước rồi mới capture Sentry.
+    reportTerminalError('Unhandled error in request', err, { errorSource: 'http-5xx' });
+  }
 
   // Không leak stack trace ở production
   const isDevelopment = process.env.NODE_ENV === 'development';
@@ -191,6 +200,11 @@ application.use((err: Error, _req: Request, res: Response, _next: NextFunction):
     errorCode: isPayloadTooLarge ? 'PAYLOAD_TOO_LARGE' : 'INTERNAL_ERROR',
     details: isDevelopment && err.stack ? [{ field: 'stack', message: err.stack }] : []
   });
-});
+}
+
+// Đăng ký handler sau toàn bộ routes để Express chuyển mọi lỗi cuối chuỗi vào đây.
+application.use(handleApplicationError);
+
+export { handleApplicationError };
 
 export default application;

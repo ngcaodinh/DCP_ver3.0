@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect } from 'react';
+import * as Sentry from '@sentry/nextjs';
 import CyberErrorScreen, { CyberErrorLogLine } from '@/app/components/common/CyberErrorScreen';
 
 type GlobalErrorPageProps = {
@@ -43,6 +44,7 @@ function createHeartbeatMetricValue(errorDigest?: string): number {
  */
 export default function GlobalErrorPage({ error, reset }: GlobalErrorPageProps) {
   useEffect(() => {
+    Sentry.captureException(error);
     console.error('DCP global error boundary:', error);
   }, [error]);
 

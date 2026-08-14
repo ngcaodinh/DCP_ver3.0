@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Job } from 'bull';
 import type { NotificationJobData } from '../../queues/notificationQueue';
 
+const reportTerminalErrorMock = vi.hoisted(() => vi.fn());
+
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 vi.mock('../../config/redis', () => ({
   getRedisClientIfReady: vi.fn()
@@ -44,6 +46,10 @@ vi.mock('../../events/notificationEvents', () => ({
 
 vi.mock('../../utils/extractErrorMessage', () => ({
   extractErrorMessage: vi.fn((err) => err instanceof Error ? err.message : String(err))
+}));
+
+vi.mock('../../utils/sentryReporter', () => ({
+  reportTerminalError: reportTerminalErrorMock
 }));
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -263,6 +269,74 @@ describe('scheduleNextAttempt - DLQ Logic', () => {
       expect(isLastAttempt).toBe(shouldDLQ);
       expect(!isLastAttempt).toBe(shouldRetry);
     });
+  });
+
+  it('capture terminal notification failure truoc khi move job sang DLQ', async () => {
+    const { getNotificationQueue, moveNotificationToDLQ, isUserThrottled } = await import('../../queues/notificationQueue');
+    const { findNotificationById, updateNotificationDeliveryStatus, computeDeliveryState, getUnsubscribeTokenForUser } = await import('../../services/notificationService');
+    const { findUserNotificationContext } = await import('../../models/authModel');
+    const { dispatchNotification } = await import('../../services/notificationDispatcher.service');
+    const { startNotificationWorker } = await import('../../workers/notification.worker');
+
+    const mockQueue = { process: vi.fn(), on: vi.fn() };
+    vi.mocked(getNotificationQueue).mockReturnValue(mockQueue as never);
+    vi.mocked(isUserThrottled).mockResolvedValue(false);
+    vi.mocked(findNotificationById).mockResolvedValue({
+      notificationId: 'NOTI-001',
+      userId: 'user-1',
+      notificationType: 'LARGE_DONATION',
+      title: 'Donation lon',
+      content: 'Content',
+      isRead: false,
+      metadata: {},
+      channels: ['EMAIL'],
+      priority: 'NORMAL',
+      deliveryStatus: { IN_APP: 'PENDING', EMAIL: 'PENDING', PUSH: 'PENDING', SMS: 'PENDING' },
+      deliveryState: 'PENDING',
+      attempts: 2,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    });
+    vi.mocked(findUserNotificationContext).mockResolvedValue({
+      userId: 'user-1',
+      userEmail: 'user@example.com',
+      fcmDeviceToken: undefined,
+      phoneNumber: undefined
+    });
+    vi.mocked(getUnsubscribeTokenForUser).mockResolvedValue(null);
+    vi.mocked(dispatchNotification).mockResolvedValue({
+      notificationId: 'NOTI-001',
+      channelResults: [{
+        channel: 'EMAIL',
+        result: { success: false, channel: 'EMAIL', errorMessage: 'SMTP down', retryable: false }
+      }],
+      deliveryState: 'FAILED',
+      totalAttempts: 1
+    });
+    vi.mocked(computeDeliveryState).mockReturnValue('FAILED');
+
+    startNotificationWorker();
+    const processor = mockQueue.process.mock.calls[0]?.[1] as (
+      job: Job<NotificationJobData>
+    ) => Promise<unknown>;
+    const job = buildJob({ channels: ['EMAIL'], attemptNumber: 3 });
+
+    await processor(job);
+
+    expect(reportTerminalErrorMock).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(Error),
+      expect.objectContaining({
+        errorSource: 'job-dlq',
+        metadata: expect.objectContaining({ notificationId: 'NOTI-001', attempts: 3 })
+      })
+    );
+    expect(updateNotificationDeliveryStatus).toHaveBeenCalledWith(expect.objectContaining({
+      notificationId: 'NOTI-001',
+      deliveryState: 'FAILED',
+      attempts: 3
+    }));
+    expect(moveNotificationToDLQ).toHaveBeenCalledWith(job);
   });
 });
 

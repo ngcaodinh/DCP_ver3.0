@@ -1,3 +1,5 @@
+const { withSentryConfig } = require('@sentry/nextjs');
+
 /**
  * Parse origin từ URL string, trả về fallback nếu URL không hợp lệ hoặc không thể parse.
  * Ngăn crash build khi env var bị misconfigure (ví dụ: "localhost:4000" thiếu protocol).
@@ -79,6 +81,10 @@ const nextConfig = {
   output: 'standalone',
   poweredByHeader: false,
   compress: true,
+  // Next 14 cần cờ này để gọi instrumentation.ts.
+  experimental: {
+    instrumentationHook: true
+  },
   async headers() {
     return [
       {
@@ -121,7 +127,8 @@ const nextConfig = {
       },
       {
         // Static pages — không bao gồm /donate vì donate có wallet state (không nên cache trên CDN)
-        source: '/((?!api|_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml|donate).*)',
+        // Tunnel không được dính Cache-Control public vì đây là endpoint ingest động.
+        source: '/((?!api|_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml|donate|sentry-tunnel).*)',
         headers: [
           {
             key: 'Cache-Control',
@@ -150,4 +157,16 @@ const nextConfig = {
   }
 };
 
-module.exports = nextConfig;
+module.exports = withSentryConfig(nextConfig, {
+  org: process.env.SENTRY_ORG,
+  project: process.env.SENTRY_PROJECT,
+  authToken: process.env.SENTRY_AUTH_TOKEN,
+  // Tunnel same-origin giúp CSP /donate và ad-blocker không chặn event.
+  tunnelRoute: '/sentry-tunnel',
+  widenClientFileUpload: true,
+  sourcemaps: {
+    deleteSourcemapsAfterUpload: true
+  },
+  silent: !process.env.CI,
+  telemetry: false
+});

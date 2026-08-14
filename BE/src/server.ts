@@ -1,8 +1,13 @@
+// PHẢI đứng đầu tiên: auto-instrumentation cần patch module HTTP trước các import ứng dụng.
+import './instrumentation/sentry';
 import 'dotenv/config';
+import * as Sentry from '@sentry/node';
 import application from './app';
 import { connectToMongoDb } from './config/mongodb';
 import { connectToRedisSafely } from './config/redis';
 import { getLogger } from './config/logger';
+import { isSentryEnabled } from './config/sentryConfig';
+import { reportTerminalError } from './utils/sentryReporter';
 import { startRankingWorker } from './workers/rankingWorker';
 import { startRankingScheduler } from './workers/rankingScheduler';
 import { startRankingReconcileWorker } from './workers/rankingReconcileWorker';
@@ -114,12 +119,18 @@ async function startServer(): Promise<void> {
         errorMessage: (error as Error).message
       });
     }
+
+    // Flush trước khi process thoát; tầng quan sát không được làm shutdown treo quá lâu.
+    if (isSentryEnabled()) {
+      await Sentry.flush(2000).catch(() => undefined);
+    }
   };
   process.once('SIGTERM', () => { void handleShutdown('SIGTERM'); });
   process.once('SIGINT', () => { void handleShutdown('SIGINT'); });
 }
 
 startServer().catch((error: Error) => {
-  logger.error('Server failed to start.', { errorMessage: error.message });
+  // Bootstrap fail là terminal vì container sẽ restart loop, nên cần capture như unhandled.
+  reportTerminalError('Server failed to start.', error, { errorSource: 'bootstrap' });
 });
 

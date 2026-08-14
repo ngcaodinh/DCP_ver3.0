@@ -292,18 +292,19 @@ http://localhost:3000
 
 ### Production Deployment with Docker Compose
 
-The repository includes a production-oriented Compose file:
-
-```bash
-docker compose -f docker-compose.prod.yml up -d --build
-```
-
-Before running it, create production environment files from the templates in `deploy/env/` and adjust paths expected by `docker-compose.prod.yml`, such as:
+The repository includes a production-oriented Compose file. Before running it, create runtime environment files from the templates in `deploy/env/` and create the frontend build-time interpolation file from `deploy/compose.env.example`:
 
 ```text
 /opt/dcp/env/mongo.env
 /opt/dcp/env/backend.env
 /opt/dcp/env/frontend.env
+/opt/dcp/env/compose.env
+```
+
+Run Compose with the interpolation file so every `NEXT_PUBLIC_*` build argument, including Sentry configuration, is embedded in the frontend bundle:
+
+```bash
+docker compose --env-file /opt/dcp/env/compose.env -f docker-compose.prod.yml up -d --build
 ```
 
 The production stack includes:
