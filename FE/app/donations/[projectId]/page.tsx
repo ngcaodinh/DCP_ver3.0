@@ -1155,6 +1155,13 @@ export default function DonationProjectDetailPage() {
             <ProjectProgressSection project={projectDetail} />
             <EvidenceSection project={projectDetail} />
 
+            <Link
+              href={`/feedback/${projectDetail.projectId}`}
+              className="mb-6 flex min-h-11 w-full items-center justify-center rounded-xl border border-emerald-700 px-4 py-3 text-sm font-semibold text-emerald-700 transition-colors hover:bg-emerald-50"
+            >
+              Gửi phản hồi
+            </Link>
+
             <DonationSection
               project={projectDetail}
               donationMode={donationMode}

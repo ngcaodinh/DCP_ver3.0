@@ -40,6 +40,7 @@ Thumbs.db
 # FE (Next.js)
 # =========================
 FE/.next/
+FE/next-build-output.txt
 FE/out/
 FE/coverage/
 FE/.turbo/
@@ -84,6 +85,8 @@ dcp-terms-of-service.md
 
 docs/*
 !docs/elk-integration.md
+!docs/release/
+!docs/release/f4-feedback-release-evidence.md
 # môi trường framework kiểm thử tự động bằng NUnit + Selenium.
 E2E.Tests
 

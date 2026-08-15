@@ -26,6 +26,8 @@ export type ProjectRecord = {
   updatedAt: Date;
 };
 
+export type FeedbackProjectRecord = Pick<ProjectRecord, 'projectId' | 'organizationId' | 'name' | 'status'>;
+
 const projectSchema = new Schema<ProjectRecord>({
   projectId: { type: String, required: true, unique: true },
   organizationId: { type: String, required: true, index: true },
@@ -71,6 +73,16 @@ export async function findProjectByOrganizationIdAndName(organizationId: string,
 /** Hàm tìm dự án theo projectId. Mục đích: dùng cho submit và review dự án. */
 export async function findProjectByProjectId(projectId: string): Promise<ProjectRecord | null> {
   return ProjectMongoModel.findOne({ projectId }).lean<ProjectRecord>().exec();
+}
+
+/** Lấy đúng các trường cần cho feedback công khai, tránh đọc evidence và metadata của project. */
+export async function findFeedbackProjectByProjectId(projectId: string): Promise<FeedbackProjectRecord | null> {
+  return ProjectMongoModel.findOne(
+    { projectId },
+    { _id: 0, projectId: 1, organizationId: 1, name: 1, status: 1 }
+  )
+    .lean<FeedbackProjectRecord>()
+    .exec();
 }
 
 /** Hàm đếm số dự án ACTIVE của tổ chức. Mục đích: enforce giới hạn tối đa 5 dự án ACTIVE. */

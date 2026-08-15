@@ -5,7 +5,7 @@ import { runMongoTransaction } from '../utils/mongoTransaction';
 import {
   findBeneficiaryFeedbackById,
   transitionBeneficiaryFeedbackFlag,
-  type BeneficiaryFeedback
+  type BeneficiaryFeedbackModerationView
 } from '../models/beneficiaryFeedbackModel';
 
 export type FeedbackModerationInput = {
@@ -23,7 +23,7 @@ export type FeedbackModerationInput = {
  */
 export async function moderateBeneficiaryFeedback(
   input: FeedbackModerationInput
-): Promise<BeneficiaryFeedback> {
+): Promise<BeneficiaryFeedbackModerationView> {
   const reason = input.reason.replace(/\s+/g, ' ').trim();
   if (reason.length < 10 || reason.length > 1000) {
     throw new ApplicationError('reason phải dài từ 10 đến 1000 ký tự.', 400, 'VALIDATION_ERROR');

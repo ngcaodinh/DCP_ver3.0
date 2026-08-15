@@ -12,7 +12,7 @@ import { createInMemoryCache } from '../utils/inMemoryCache';
 const STATS_CACHE_TTL_SECONDS = 600;
 
 /**
- * Cache key prefix cho stats.
+ * Tiền tố khóa cache cho thống kê.
  */
 const STATS_CACHE_KEY_PREFIX = 'feedback:stats:';
 
@@ -22,7 +22,6 @@ const STATS_CACHE_KEY_PREFIX = 'feedback:stats:';
 export interface PublicFeedbackItem {
   feedbackId: string;
   projectId: string;
-  beneficiaryNameHash: string;
   rating: number;
   comment: string;
   submittedAt: Date;
@@ -53,9 +52,19 @@ export interface PublicFeedbackStatsResult {
 }
 
 /**
- * Cache instance cho stats (singleton pattern).
+ * Đối tượng cache thống kê dùng chung trong tiến trình.
  */
 const statsCache = createInMemoryCache<PublicFeedbackStatsResult>();
+const statsInFlight = new Map<string, Promise<PublicFeedbackStatsResult>>();
+const statsCacheGenerations = new Map<string, number>();
+
+/** Xóa cache thống kê trong bộ nhớ tiến trình sau khi project có feedback mới. */
+export function invalidatePublicFeedbackStatsCache(projectId: string): void {
+  const cacheKey = `${STATS_CACHE_KEY_PREFIX}${projectId}`;
+  statsCacheGenerations.set(cacheKey, (statsCacheGenerations.get(cacheKey) || 0) + 1);
+  statsCache.deleteByKey(cacheKey);
+  statsInFlight.delete(cacheKey);
+}
 
 /**
  * Lấy danh sách feedback công khai với pagination.
@@ -73,13 +82,13 @@ export async function getPublicFeedbackList(
 ): Promise<PublicFeedbackListResult> {
   const skip = (page - 1) * limit;
 
-  // Query chỉ lấy feedback không bị flag
+  // Chỉ truy vấn các feedback không bị gắn cờ.
   const [feedbacks, totalItems] = await Promise.all([
     BeneficiaryFeedbackModel.find({
       projectId,
       isFlagged: false
     })
-      .select('feedbackId projectId beneficiaryNameHash rating comment submittedAt location')
+      .select('-_id feedbackId projectId rating comment submittedAt location')
       .sort({ submittedAt: -1 })
       .skip(skip)
       .limit(limit)
@@ -105,25 +114,9 @@ export async function getPublicFeedbackList(
   };
 }
 
-/**
- * Lấy thống kê feedback công khai cho một dự án.
- * Kết quả được cache trong 10 phút.
- * 
- * @param projectId ID của dự án
- * @returns Thống kê: avgRating, totalCount, distribution
- */
-export async function getPublicFeedbackStats(
-  projectId: string
-): Promise<PublicFeedbackStatsResult> {
-  const cacheKey = `${STATS_CACHE_KEY_PREFIX}${projectId}`;
-
-  // Kiểm tra cache trước
-  const cachedResult = statsCache.get(cacheKey);
-  if (cachedResult !== null) {
-    return cachedResult;
-  }
-
-  // Aggregate stats từ MongoDB
+/** Tổng hợp stats từ MongoDB; tách riêng để các request đồng thời dùng chung một promise. */
+async function loadPublicFeedbackStats(projectId: string): Promise<PublicFeedbackStatsResult> {
+  // Tổng hợp thống kê trực tiếp từ MongoDB khi cache không có dữ liệu.
   const statsResult = await BeneficiaryFeedbackModel.aggregate([
     {
       $match: {
@@ -145,34 +138,66 @@ export async function getPublicFeedbackStats(
     }
   ]);
 
-  let result: PublicFeedbackStatsResult;
-
   if (statsResult.length === 0) {
-    // Không có feedback nào - trả về giá trị zero
-    result = {
+    // Không có feedback nào - trả về giá trị zero.
+    return {
       avgRating: null,
       totalCount: 0,
       distribution: {}
     };
-  } else {
-    const stats = statsResult[0];
-    // stats.totalCount luôn >= 1 vì $group đã aggregate non-empty buckets, nhưng defensive check vẫn an toàn
-    const roundedAverage = Math.round(stats.avgRating * 100) / 100;
-    result = {
-      avgRating: roundedAverage,
-      totalCount: stats.totalCount,
-      distribution: {
-        '1': stats.rating1,
-        '2': stats.rating2,
-        '3': stats.rating3,
-        '4': stats.rating4,
-        '5': stats.rating5
-      }
-    };
   }
 
-  // Lưu vào cache
-  statsCache.set(cacheKey, result, STATS_CACHE_TTL_SECONDS);
+  const stats = statsResult[0];
+  // stats.totalCount luôn >= 1 vì $group đã aggregate non-empty buckets, nhưng defensive check vẫn an toàn.
+  const roundedAverage = Math.round(stats.avgRating * 100) / 100;
+  return {
+    avgRating: roundedAverage,
+    totalCount: stats.totalCount,
+    distribution: {
+      '1': stats.rating1,
+      '2': stats.rating2,
+      '3': stats.rating3,
+      '4': stats.rating4,
+      '5': stats.rating5
+    }
+  };
+}
 
-  return result;
+/**
+ * Lấy thống kê feedback công khai cho một dự án.
+ * Kết quả được cache trong 10 phút.
+ *
+ * @param projectId ID của dự án
+ * @returns Thống kê: avgRating, totalCount, distribution
+ */
+export async function getPublicFeedbackStats(
+  projectId: string
+): Promise<PublicFeedbackStatsResult> {
+  const cacheKey = `${STATS_CACHE_KEY_PREFIX}${projectId}`;
+
+  // Ưu tiên cache trước khi thực hiện aggregate trên MongoDB.
+  const cachedResult = statsCache.get(cacheKey);
+  if (cachedResult !== null) {
+    return cachedResult;
+  }
+
+  const inFlightResult = statsInFlight.get(cacheKey);
+  if (inFlightResult) return inFlightResult;
+
+  const generationAtStart = statsCacheGenerations.get(cacheKey) || 0;
+  const statsPromise = loadPublicFeedbackStats(projectId);
+  statsInFlight.set(cacheKey, statsPromise);
+
+  try {
+    const result = await statsPromise;
+    // Không ghi đè cache bằng aggregate đã bắt đầu trước một lần submit/invalidate.
+    if ((statsCacheGenerations.get(cacheKey) || 0) === generationAtStart) {
+      statsCache.set(cacheKey, result, STATS_CACHE_TTL_SECONDS);
+    }
+    return result;
+  } finally {
+    if (statsInFlight.get(cacheKey) === statsPromise) {
+      statsInFlight.delete(cacheKey);
+    }
+  }
 }

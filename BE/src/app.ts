@@ -34,17 +34,19 @@ import { requestContextMiddleware } from './middleware/requestContext.middleware
 import { validateMetricsAuthConfig } from './config/metricsAuthConfig';
 import { getSentryConfigWarning } from './config/sentryConfig';
 import { reportTerminalError } from './utils/sentryReporter';
+import { validateFeedbackSubmissionTicketConfig } from './utils/feedbackSubmissionTicket';
+import { validatePublicFeedbackRuntimeConfig } from './config/publicFeedbackRuntimeConfig';
 
 const application = express();
+const PUBLIC_FEEDBACK_SUBMISSION_BODY_LIMIT = '32kb';
 
-// Fail-fast: kiểm tra GUEST_JWT_SECRET ngay khi app khởi động.
-// Nếu thiếu hoặc quá ngắn → crash ngay lập tức thay vì đợi request đầu tiên.
-// Giúp dev phát hiện thiếu .env sớm nhất có thể.
+// Kiểm tra GUEST_JWT_SECRET ngay khi app khởi động để phát hiện cấu hình sai sớm.
+// Nếu thiếu hoặc quá ngắn, tiến trình dừng ngay thay vì chờ request đầu tiên.
 validateGuestJwtConfig();
 
 /**
- * Kiểm tra cấu hình HMAC cache ngay khi process khởi động trong production.
- * Fail-fast giúp health check không báo xanh trong khi các endpoint transparency
+ * Kiểm tra cấu hình HMAC cache ngay khi tiến trình khởi động trong production.
+ * Dừng sớm giúp health check không báo xanh trong khi các endpoint transparency
  * chỉ có thể trả lỗi 500 khi bắt đầu đọc hoặc ghi cache.
  */
 function validateCacheHmacConfig(): void {
@@ -62,8 +64,10 @@ function validateCacheHmacConfig(): void {
 
 validateCacheHmacConfig();
 validateMetricsAuthConfig();
+validateFeedbackSubmissionTicketConfig();
+validatePublicFeedbackRuntimeConfig();
 
-// Sentry là tầng quan sát: thiếu DSN thì cảnh báo, không biến production thành outage.
+// Sentry là tầng quan sát: thiếu DSN thì cảnh báo, không biến production thành sự cố diện rộng.
 const sentryConfigWarning = getSentryConfigWarning();
 if (sentryConfigWarning) {
   getLogger().error(`[Bootstrap] ${sentryConfigWarning}`);
@@ -71,7 +75,8 @@ if (sentryConfigWarning) {
 
 /** Hàm cấu hình middleware chính cho ứng dụng. Mục đích: áp dụng bảo mật, tối ưu hiệu năng và parse request body cho toàn hệ thống. */
 function configureMiddlewares(): void {
-  const allowedOriginsEnv = process.env.CORS_ALLOWED_ORIGINS || 'http://localhost:3000';
+  // Giữ tương thích ngược với biến môi trường dạng số ít cũ; template production dùng dạng số nhiều.
+  const allowedOriginsEnv = process.env.CORS_ALLOWED_ORIGINS || process.env.CORS_ALLOWED_ORIGIN || 'http://localhost:3000';
   const allowedOriginList = allowedOriginsEnv.split(',').map(origin => origin.trim());
   const requestBodyLimit = getRequestBodyLimit();
 
@@ -84,8 +89,8 @@ function configureMiddlewares(): void {
   application.use(
     cors({
       origin: (incomingOrigin, callback) => {
-        // Cho phép null origin: mobile apps (React Native), Electron, server-to-server.
-        // Trade-off: file:// pages gửi Origin: null có thể exploit, nhưng các app này không có token nên risk thấp.
+        // Cho phép Origin null cho ứng dụng di động, Electron và kết nối server-to-server.
+        // Đánh đổi: trang file:// có thể gửi Origin null, nhưng các luồng này không dùng token nên rủi ro thấp.
         // Ref: https://portswigger.net/web-security/cors/null-origin
         if (!incomingOrigin || allowedOriginList.includes(incomingOrigin)) {
           callback(null, true);
@@ -98,10 +103,10 @@ function configureMiddlewares(): void {
   );
   application.use(
     helmet({
-      // CORP = false: không set header CORP → browser default restrictive (không cho phép cross-origin embedding).
-      // Chấp nhận trade-off: FE proxy qua /api rewrite → cùng origin → không ảnh hưởng.
+      // Không đặt header CORP để trình duyệt dùng chính sách mặc định hạn chế nhúng khác nguồn.
+      // FE proxy qua /api rewrite nên vẫn cùng origin và không bị ảnh hưởng.
       crossOriginResourcePolicy: false,
-      contentSecurityPolicy: false,  // API-only backend, không serve HTML
+      contentSecurityPolicy: false,  // Backend chỉ phục vụ API, không phục vụ HTML.
       noSniff: true,
       xFrameOptions: { action: 'deny' },
       referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
@@ -114,7 +119,14 @@ function configureMiddlewares(): void {
   application.use(metricsMiddleware);
   application.use(applySeoAndCacheHeaders);
 
-  // Logic này giữ giới hạn body thống nhất giữa local và production để tránh OOM trên VPS ít RAM.
+  // Giới hạn payload feedback public trước bộ phân tích body toàn hệ thống để tránh request 5MB vào endpoint không xác thực.
+  application.use(
+    '/api/feedback/single',
+    express.json({ limit: PUBLIC_FEEDBACK_SUBMISSION_BODY_LIMIT }),
+    express.urlencoded({ extended: false, limit: PUBLIC_FEEDBACK_SUBMISSION_BODY_LIMIT })
+  );
+
+  // Giữ giới hạn body nhất quán giữa local và production để tránh cạn bộ nhớ trên VPS ít RAM.
   application.use(express.json({ limit: requestBodyLimit }));
   application.use(express.urlencoded({ extended: true, limit: requestBodyLimit }));
 }
@@ -189,7 +201,7 @@ function handleApplicationError(err: Error, _req: Request, res: Response, _next:
     reportTerminalError('Unhandled error in request', err, { errorSource: 'http-5xx' });
   }
 
-  // Không leak stack trace ở production
+  // Không để lộ stack trace ở production.
   const isDevelopment = process.env.NODE_ENV === 'development';
   // Giữ mã lỗi 413 chuẩn để client và metrics phân biệt payload quá lớn với lỗi server nội bộ.
   res.status(responseStatusCode).json({

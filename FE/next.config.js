@@ -38,10 +38,10 @@ function buildDonateCsp(apiOrigin, siteOrigin) {
   // PayOS iframe (payment modal) + Google OAuth (claim flow)
   const frameSrcParts = ["'self'", 'https://*.payos.vn', 'https://api-merchant.payos.vn', 'https://accounts.google.com'];
 
-  // 'self' + Google (GIS scripts). unsafe-inline cho Next.js inline scripts:
+  // 'self' + Google (GIS scripts). unsafe-inline cho các script nội tuyến của Next.js:
   // __NEXT_DATA__, hydration markers được inject bởi Next.js bundler.
   // Dùng strict-dynamic + nonce là giải pháp chuẩn hơn nhưng cần middleware tạo nonce.
-  // Hiện tại dùng unsafe-inline là acceptable trade-off vì script sources được whitelist rõ ràng.
+  // Hiện tại chấp nhận đánh đổi dùng unsafe-inline vì nguồn script đã được lập danh sách cho phép rõ ràng.
   const scriptSrcParts = ["'self'", 'https://accounts.google.com'];
   if (isDev) {
     scriptSrcParts.push("'unsafe-eval'");
@@ -126,9 +126,19 @@ const nextConfig = {
         ]
       },
       {
+        // Trang feedback chứa ticket theo từng lượt mở; bắt buộc no-store để CDN không phát lại ticket cũ.
+        source: '/feedback(/:path*)?',
+        headers: [
+          {
+            key: 'Cache-Control',
+            value: 'no-store'
+          }
+        ]
+      },
+      {
         // Static pages — không bao gồm /donate vì donate có wallet state (không nên cache trên CDN)
         // Tunnel không được dính Cache-Control public vì đây là endpoint ingest động.
-        source: '/((?!api|_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml|donate|sentry-tunnel).*)',
+        source: '/((?!api|_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml|donate|feedback|sentry-tunnel).*)',
         headers: [
           {
             key: 'Cache-Control',

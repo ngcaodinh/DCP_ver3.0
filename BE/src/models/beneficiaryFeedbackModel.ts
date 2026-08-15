@@ -27,9 +27,19 @@ export interface BeneficiaryFeedback {
   uploadedByOrganizationId: string;
   /** Hash nội dung batch để phát hiện duplicate uploads (idempotency) */
   batchContentHash: string;
+  /** Nguồn tạo feedback để phân biệt batch NGO và form công khai. */
+  source: 'batch' | 'public';
+  /** Băm IP có salt, chỉ dùng cho phân tích lạm dụng nội bộ. */
+  submissionIpHash?: string;
   createdAt: Date;
   updatedAt: Date;
 }
+
+/** Dữ liệu moderation được phép đi qua service, loại bỏ các hash nhận diện nội bộ. */
+export type BeneficiaryFeedbackModerationView = Omit<
+  BeneficiaryFeedback,
+  'beneficiaryNameHash' | 'submissionIpHash'
+>;
 
 const beneficiaryFeedbackSchema = new Schema<BeneficiaryFeedback>(
   {
@@ -90,6 +100,16 @@ const beneficiaryFeedbackSchema = new Schema<BeneficiaryFeedback>(
       type: String,
       required: false,
       index: true
+    },
+    source: {
+      type: String,
+      enum: ['batch', 'public'],
+      default: 'batch',
+      index: true
+    },
+    submissionIpHash: {
+      type: String,
+      required: false
     }
   },
   {
@@ -121,10 +141,11 @@ export const BeneficiaryFeedbackModel =
 export async function findBeneficiaryFeedbackById(
   feedbackId: string,
   session?: ClientSession
-): Promise<BeneficiaryFeedback | null> {
-  const query = BeneficiaryFeedbackModel.findOne({ feedbackId });
+): Promise<BeneficiaryFeedbackModerationView | null> {
+  const query = BeneficiaryFeedbackModel.findOne({ feedbackId })
+    .select('-beneficiaryNameHash -submissionIpHash');
   if (session) query.session(session);
-  return query.lean<BeneficiaryFeedback>().exec();
+  return query.lean<BeneficiaryFeedbackModerationView>().exec();
 }
 
 /** Atomically đổi cờ moderation, chỉ một request thắng khi chạy đồng thời. */
@@ -133,11 +154,11 @@ export async function transitionBeneficiaryFeedbackFlag(
   currentValue: boolean,
   nextValue: boolean,
   session?: ClientSession
-): Promise<BeneficiaryFeedback | null> {
+): Promise<BeneficiaryFeedbackModerationView | null> {
   const updated = await BeneficiaryFeedbackModel.findOneAndUpdate(
     { feedbackId, isFlagged: currentValue },
     { $set: { isFlagged: nextValue } },
     { returnDocument: 'after', ...(session ? { session } : {}) }
-  ).exec();
-  return updated ? updated.toObject() as BeneficiaryFeedback : null;
+  ).select('-beneficiaryNameHash -submissionIpHash').exec();
+  return updated ? updated.toObject() as BeneficiaryFeedbackModerationView : null;
 }

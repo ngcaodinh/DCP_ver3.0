@@ -129,7 +129,7 @@ JWT_SECRET=your_strong_jwt_secret_min_32_chars
 JWT_ISSUER=dcp-backend
 JWT_AUDIENCE=dcp-users
 JWT_EXPIRES_IN=24h
-CORS_ALLOWED_ORIGIN=http://localhost:3000
+CORS_ALLOWED_ORIGINS=http://localhost:3000
 REQUEST_BODY_LIMIT=5mb
 RUN_WORKERS=true
 ```
@@ -299,7 +299,12 @@ The repository includes a production-oriented Compose file. Before running it, c
 /opt/dcp/env/backend.env
 /opt/dcp/env/frontend.env
 /opt/dcp/env/compose.env
+/opt/dcp/env/feedback-client-ip-hmac.key
 ```
+
+The feedback SSR identity HMAC is a single Docker secret shared read-only by the backend, worker and
+frontend. Create `/opt/dcp/env/feedback-client-ip-hmac.key` with a random value of at least 32 characters
+and set its permissions to `600`; do not duplicate it in either env file or commit it.
 
 Run Compose with the interpolation file so every `NEXT_PUBLIC_*` build argument, including Sentry configuration, is embedded in the frontend bundle:
 

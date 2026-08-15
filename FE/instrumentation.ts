@@ -4,6 +4,10 @@
  */
 export async function register(): Promise<void> {
   if (process.env.NEXT_RUNTIME === 'nodejs') {
+    const { validateFeedbackClientIdentityConfig } = await import('./app/utils/feedbackClientIdentityConfig');
+    const { validateServerApiConfig } = await import('./app/utils/serverApiClient');
+    validateFeedbackClientIdentityConfig();
+    validateServerApiConfig();
     await import('./sentry.server.config');
   }
   if (process.env.NEXT_RUNTIME === 'edge') {

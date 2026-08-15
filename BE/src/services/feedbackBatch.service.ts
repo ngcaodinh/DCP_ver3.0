@@ -22,54 +22,18 @@ import {
   InvalidCsvError,
   PayloadMustBeArrayError
 } from '../utils/feedbackBatchError';
+import { escapeFormulaInjection, hashBeneficiaryName } from '../utils/feedbackText';
+
+export { escapeFormulaInjection, hashBeneficiaryName } from '../utils/feedbackText';
 
 const logger = getLogger();
 
 /**
- * Các ký tự đầu dòng nguy hiểm trong CSV có thể kích hoạt formula injection.
- * Bao gồm: =, +, -, @, \t, \r, \n
- */
-const FORMULA_PREFIX_CHARS = ['=', '+', '-', '@', '\t', '\r', '\n'];
-
-/**
- * Kiểm tra xem string có chứa prefix nguy hiểm cho CSV formula injection không.
- * Trim leading whitespace trước khi check vì Excel vẫn nhận diện formula
- * ngay cả khi có spaces ở đầu dòng (VD: "   =HYPERLINK(...)" vẫn nguy hiểm).
- * @param value String cần kiểm tra
- * @returns true nếu có prefix nguy hiểm
- */
-function hasFormulaPrefix(value: string): boolean {
-  if (!value || value.length === 0) {
-    return false;
-  }
-  const trimmed = value.trimStart();
-  if (trimmed.length === 0) {
-    return false;
-  }
-  const firstChar = trimmed.charAt(0);
-  return FORMULA_PREFIX_CHARS.includes(firstChar);
-}
-
-/**
- * Ngăn chặn CSV formula injection bằng cách escape các prefix nguy hiểm.
- * Thêm space prefix cho các giá trị bắt đầu bằng =, +, -, @ hoặc whitespace.
- * @param value String cần escape
- * @returns String đã được escape an toàn cho CSV
- */
-function escapeFormulaInjection(value: string): string {
-  if (hasFormulaPrefix(value)) {
-    return ` ${value}`;
-  }
-  return value;
-}
-
-/**
- * Escape tất cả các formula prefixes trong một feedback row.
- * Chỉ các field free-text (comment) có nguy cơ formula injection.
- * Các field khác (projectId, beneficiaryName, rating, submittedAt) đã được
- * validate bởi Zod schema với format nghiêm ngặt nên không cần escape.
- * @param row Dòng feedback cần escape
- * @returns Dòng feedback đã được escape
+ * Xử lý tất cả tiền tố chèn công thức trong một dòng feedback.
+ * Chỉ trường văn bản tự do là comment có nguy cơ chèn công thức.
+ * Các trường còn lại đã được schema Zod kiểm tra chặt chẽ nên không cần xử lý thêm.
+ * @param row Dòng feedback cần xử lý.
+ * @returns Dòng feedback đã được xử lý.
  */
 function sanitizeFeedbackRow(row: BeneficiaryFeedbackRow): BeneficiaryFeedbackRow {
   return {
@@ -118,21 +82,12 @@ interface ProcessedFeedbackRow {
 }
 
 /**
- * Hash tên beneficiary bằng SHA-256 để bảo vệ PII.
- * @param beneficiaryName Tên beneficiary thô
- * @returns Hash SHA-256 dạng hex
- */
-export function hashBeneficiaryName(beneficiaryName: string): string {
-  return crypto.createHash('sha256').update(beneficiaryName).digest('hex');
-}
-
-/**
- * Strip UTF-8 BOM prefix from buffer to prevent column name corruption.
- * BOM (U+FEFF) at the start of a CSV can cause the first column header
- * to include the invisible BOM character, breaking validation for all rows.
+ * Loại bỏ tiền tố BOM UTF-8 khỏi buffer để tránh làm sai tên cột.
+ * BOM (U+FEFF) ở đầu CSV có thể bị gắn vào tiêu đề cột đầu tiên,
+ * khiến toàn bộ dòng không vượt qua bước kiểm tra.
  */
 function stripBom(buffer: Buffer): Buffer {
-  // UTF-8 BOM is 3 bytes: 0xEF 0xBB 0xBF
+  // BOM UTF-8 gồm 3 byte: 0xEF 0xBB 0xBF.
   if (buffer.length >= 3 && buffer[0] === 0xEF && buffer[1] === 0xBB && buffer[2] === 0xBF) {
     return buffer.subarray(3);
   }
@@ -140,7 +95,7 @@ function stripBom(buffer: Buffer): Buffer {
 }
 
 /**
- * Parse CSV buffer thành mảng objects.
+ * Phân tích buffer CSV thành mảng object.
  * @param csvBuffer Buffer chứa nội dung CSV
  * @returns Mảng objects từ CSV
  */
@@ -182,7 +137,7 @@ function processFeedbackRows(rows: unknown[]): {
 
   for (const validRow of validationResult.validRows) {
     const { data, rowNumber } = validRow;
-    // Escape formula injection characters trong comment field
+    // Xử lý các ký tự có thể chèn công thức trong trường comment.
     const sanitizedData = sanitizeFeedbackRow(data);
     const beneficiaryNameHash = hashBeneficiaryName(sanitizedData.beneficiaryName);
     const riskScore = computeRiskScore(sanitizedData.rating, sanitizedData.comment);
@@ -228,7 +183,8 @@ async function saveBatchFeedback(
       riskScore: row.riskScore,
       isFlagged: row.isFlagged,
       uploadedByOrganizationId,
-      batchContentHash
+      batchContentHash,
+      source: 'batch' as const
     };
   });
 
@@ -245,12 +201,11 @@ function computeBatchContentHash(content: Buffer | unknown[]): string {
   let rawContent: string;
 
   if (Buffer.isBuffer(content)) {
-    // Strip BOM and convert to string for consistent hashing
+    // Loại BOM và chuyển về chuỗi để việc băm luôn nhất quán.
     rawContent = content.toString('utf-8');
   } else {
-    // JSON stringify with sorted keys ensures deterministic output
-    // regardless of key order in the original object
-    // This prevents hash bypass when objects have same values but different key order
+    // Sắp xếp key trước khi stringify để cùng dữ liệu luôn cho cùng một hash,
+    // kể cả khi thứ tự thuộc tính trong object ban đầu khác nhau.
     rawContent = JSON.stringify(sortObjectKeys(content));
   }
 

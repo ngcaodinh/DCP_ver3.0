@@ -8,6 +8,7 @@ type RateLimitState = {
 
 type RateLimitOptions = {
   bucketName?: string;
+  clientIpResolver?: (request: Request) => string;
 };
 
 // Lưu ý: In-memory Map sẽ bị reset khi server restart.
@@ -35,9 +36,13 @@ setInterval(() => {
  * [I-A6] Trust proxy: hiện tại chỉ có 1 proxy (Nginx) đứng trước backend.
  * Nếu thêm proxy trong tương lai, cần update comment này và count trong x-forwarded-for parsing.
  */
-function buildRateLimitKey(request: Request, bucketName?: string): string {
-  // Express đã chuẩn hóa IP theo `trust proxy = 1`; không đọc header thô để tránh spoof bucket.
-  const clientIpAddress = request.ip || 'unknown';
+function buildRateLimitKey(
+  request: Request,
+  bucketName?: string,
+  clientIpResolver?: (request: Request) => string
+): string {
+  // Resolver riêng chỉ được dùng cho boundary đã xác minh; route khác tiếp tục dùng Express trust proxy.
+  const clientIpAddress = clientIpResolver ? clientIpResolver(request) : request.ip || 'unknown';
   const normalizedBucketName = bucketName || `${request.method}:${request.baseUrl}${request.path}`;
   return `${normalizedBucketName}:${clientIpAddress}`;
 }
@@ -45,7 +50,7 @@ function buildRateLimitKey(request: Request, bucketName?: string): string {
 /** Hàm tạo middleware rate limit. Mục đích: giới hạn số lần gọi API theo từng bucket thay vì gộp toàn bộ theo IP. */
 export function createRateLimitMiddleware(maxRequests: number, timeWindowInMs: number, options?: RateLimitOptions) {
   return (request: Request, response: Response, next: NextFunction): void => {
-    const rateLimitKey = buildRateLimitKey(request, options?.bucketName);
+    const rateLimitKey = buildRateLimitKey(request, options?.bucketName, options?.clientIpResolver);
     const currentTimestamp = Date.now();
     const existingState = rateLimitStore.get(rateLimitKey);
 

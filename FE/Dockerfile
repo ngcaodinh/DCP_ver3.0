@@ -37,13 +37,18 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY package*.json next.config.js postcss.config.js tailwind.config.js tsconfig.json ./
 COPY instrumentation.ts sentry.client.config.ts sentry.server.config.ts sentry.edge.config.ts ./
 COPY app ./app
+COPY scripts ./scripts
 RUN --mount=type=secret,id=sentry_auth_token \
     if [ -s /run/secrets/sentry_auth_token ]; then \
       export SENTRY_AUTH_TOKEN="$(cat /run/secrets/sentry_auth_token)"; \
     else \
       echo "[sentry] Thiếu SENTRY_AUTH_TOKEN — build không upload source map."; \
     fi; \
-    npm run build
+    npm run build > next-build-output.txt 2>&1; \
+    build_status=$?; \
+    cat next-build-output.txt; \
+    if [ "$build_status" -ne 0 ]; then exit "$build_status"; fi; \
+    npm run verify:feedback:build
 
 FROM node:20-alpine AS runner
 WORKDIR /app
@@ -53,5 +58,6 @@ ARG SENTRY_RELEASE
 ENV SENTRY_RELEASE=${SENTRY_RELEASE}
 COPY --from=build /app/.next/standalone ./
 COPY --from=build /app/.next/static ./.next/static
+COPY --from=build /app/scripts/check-frontend-liveness.mjs ./scripts/check-frontend-liveness.mjs
 EXPOSE 3000
 CMD ["node", "server.js"]

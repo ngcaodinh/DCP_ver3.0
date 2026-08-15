@@ -150,6 +150,14 @@ describe('DonationProjectDetailPage', () => {
     expect(routerPush).toHaveBeenCalledWith('/login?returnTo=%2Fdonations%2Fproject-001%3Fref%3Dhomepage');
   });
 
+  it('renders the feedback entry point for the current project', async () => {
+    const { container } = render(<DonationProjectDetailPage />);
+
+    await waitFor(() => {
+      expect(container.querySelector('a[href="/feedback/project-001"]')).toBeInTheDocument();
+    });
+  });
+
   it('khởi tạo PayOS cho quyên góp ẩn danh ở mức tối đa', async () => {
     vi.mocked(initPayosDonation).mockResolvedValue({
       orderCode: 'ORDER-001',

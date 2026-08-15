@@ -68,6 +68,14 @@ export const httpRequestsTotal = new Counter({
   registers: [metricsRegistry]
 });
 
+/** Counter đếm số request feedback SSR không xác minh được identity theo từng route đọc. */
+export const publicFeedbackClientIdentityFallbackTotal = new Counter({
+  name: 'public_feedback_client_identity_fallback_total',
+  help: 'Số request feedback SSR phải fallback về IP của request vì identity không được xác minh.',
+  labelNames: ['route'],
+  registers: [metricsRegistry]
+});
+
 /** Histogram ghi nhận gas đã dùng của các transaction blockchain được instrument. */
 export const blockchainTransactionGasUsed = new Histogram({
   name: 'blockchain_transaction_gas_used',

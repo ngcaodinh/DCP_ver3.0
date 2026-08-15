@@ -55,8 +55,8 @@ describe('publicFeedbackRoutes - logic tests', () => {
     it('trả về chỉ feedback không bị flag', async () => {
       (getPublicFeedbackList as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         feedbacks: [
-          { feedbackId: 'fb1', projectId: 'proj1', beneficiaryNameHash: 'hash1', rating: 5, comment: 'Good', submittedAt: new Date() },
-          { feedbackId: 'fb2', projectId: 'proj1', beneficiaryNameHash: 'hash2', rating: 4, comment: 'Nice', submittedAt: new Date() }
+          { feedbackId: 'fb1', projectId: 'proj1', rating: 5, comment: 'Good', submittedAt: new Date() },
+          { feedbackId: 'fb2', projectId: 'proj1', rating: 4, comment: 'Nice', submittedAt: new Date() }
         ],
         pagination: { page: 1, limit: 20, totalItems: 2, totalPages: 1, hasNextPage: false, hasPreviousPage: false }
       });
@@ -73,7 +73,7 @@ describe('publicFeedbackRoutes - logic tests', () => {
     it('response không bao gồm uploadedByOrganizationId, batchContentHash, riskScore', async () => {
       (getPublicFeedbackList as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         feedbacks: [
-          { feedbackId: 'fb1', projectId: 'proj1', beneficiaryNameHash: 'hash1', rating: 5, comment: 'Good', submittedAt: new Date() }
+          { feedbackId: 'fb1', projectId: 'proj1', rating: 5, comment: 'Good', submittedAt: new Date() }
         ],
         pagination: { page: 1, limit: 20, totalItems: 1, totalPages: 1, hasNextPage: false, hasPreviousPage: false }
       });
@@ -87,10 +87,10 @@ describe('publicFeedbackRoutes - logic tests', () => {
       expect(response.body.data.feedbacks[0]).not.toHaveProperty('riskScore');
     });
 
-    it('response không bao gồm plaintext name - chỉ có beneficiaryNameHash', async () => {
+    it('response không phát hành hash tên hoặc plaintext name', async () => {
       (getPublicFeedbackList as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         feedbacks: [
-          { feedbackId: 'fb1', projectId: 'proj1', beneficiaryNameHash: 'abc123def456', rating: 5, comment: 'Good', submittedAt: new Date() }
+          { feedbackId: 'fb1', projectId: 'proj1', rating: 5, comment: 'Good', submittedAt: new Date() }
         ],
         pagination: { page: 1, limit: 20, totalItems: 1, totalPages: 1, hasNextPage: false, hasPreviousPage: false }
       });
@@ -99,7 +99,7 @@ describe('publicFeedbackRoutes - logic tests', () => {
         .get('/api/feedback/public/proj1');
 
       expect(response.status).toBe(200);
-      expect(response.body.data.feedbacks[0]).toHaveProperty('beneficiaryNameHash');
+      expect(response.body.data.feedbacks[0]).not.toHaveProperty('beneficiaryNameHash');
       expect(response.body.data.feedbacks[0]).not.toHaveProperty('beneficiaryName');
     });
 
@@ -176,6 +176,7 @@ describe('publicFeedbackRoutes - logic tests', () => {
       expect(response.status).toBe(400);
       expect(response.body.success).toBe(false);
     });
+
   });
 
   describe('GET /api/feedback/stats/:projectId', () => {

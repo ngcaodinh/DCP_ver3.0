@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "next lint",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "verify:feedback:build": "node scripts/verify-feedback-build.mjs"
   },
   "dependencies": {
     "@sentry/nextjs": "^10.70.0",

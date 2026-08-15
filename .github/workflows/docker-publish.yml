@@ -54,6 +54,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 
   build-frontend:
+    needs: [verify-feedback-contract]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout source
@@ -99,3 +100,23 @@ jobs:
             sentry_auth_token=${{ secrets.SENTRY_AUTH_TOKEN }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+  verify-feedback-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: FE/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci --prefix FE
+
+      - name: Verify feedback route contract
+        run: npx vitest run src/__tests__/app/feedback/feedbackRoute.contract.test.ts
+        working-directory: FE

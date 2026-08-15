@@ -1,21 +1,26 @@
 import mongoose, { type ClientSession } from 'mongoose';
 import { MongoMemoryReplSet } from 'mongodb-memory-server';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AdminActionOutboxModel } from '../../models/adminActionOutboxModel';
 import { AdminAuditLogModel, type AdminAuditAction, type AdminAuditTargetType } from '../../models/adminAuditLogModel';
 import { BeneficiaryFeedbackModel } from '../../models/beneficiaryFeedbackModel';
 import { ManualReviewQueueMongoModel } from '../../models/manualReviewQueueModel';
+import { createProjectRecord, type ProjectRecord } from '../../models/projectModel';
 import '../../models/disbursementModel';
 import { type DisbursementRecord } from '../../models/disbursementModel';
 import '../../models/impactSbtMetadataModel';
 import { type ImpactSbtMetadataRecord } from '../../models/impactSbtMetadataModel';
 import '../../models/oracleOverrideRequestModel';
 import { type OracleOverrideRequestRecord } from '../../models/oracleOverrideRequestModel';
+import { issueSubmissionTicket } from '../../utils/feedbackSubmissionTicket';
 import { runMongoTransaction } from '../../utils/mongoTransaction';
+import { __resetSubmissionThrottleState } from '../../utils/submissionThrottle';
+import { submitSingleFeedback } from '../../services/publicFeedbackSubmit.service';
 
 const disbursementModel = mongoose.model<DisbursementRecord>('Disbursement');
 const impactSbtModel = mongoose.model<ImpactSbtMetadataRecord>('ImpactSbtMetadata');
 const overrideModel = mongoose.model<OracleOverrideRequestRecord>('OracleOverrideRequest');
+const projectModel = mongoose.model<ProjectRecord>('Project');
 
 let mongoReplicaSet: MongoMemoryReplSet;
 
@@ -54,6 +59,7 @@ async function clearE8Collections(): Promise<void> {
     AdminAuditLogModel.deleteMany({}),
     BeneficiaryFeedbackModel.deleteMany({}),
     ManualReviewQueueMongoModel.deleteMany({}),
+    projectModel.deleteMany({}),
     disbursementModel.deleteMany({}),
     impactSbtModel.deleteMany({}),
     overrideModel.deleteMany({})
@@ -76,12 +82,15 @@ describe('E8 audit transaction Mongo integration', () => {
   });
 
   beforeEach(async () => {
+    __resetSubmissionThrottleState();
     await clearE8Collections();
   });
 
   afterAll(async () => {
+    __resetSubmissionThrottleState();
+    vi.unstubAllEnvs();
     await mongoose.disconnect();
-    await mongoReplicaSet.stop();
+    if (mongoReplicaSet) await mongoReplicaSet.stop();
   });
 
   it('rolls back feedback flag when audit insert fails', async () => {
@@ -111,6 +120,91 @@ describe('E8 audit transaction Mongo integration', () => {
     const feedback = await BeneficiaryFeedbackModel.findOne({ feedbackId: 'feedback-tx-1' }).lean().exec();
     expect(feedback?.isFlagged).toBe(false);
     expect(await AdminAuditLogModel.countDocuments({ targetId: 'feedback-tx-1' })).toBe(1);
+  });
+
+  it('keeps identical public comments from the same organization as separate documents', async () => {
+    await BeneficiaryFeedbackModel.create([
+      {
+        feedbackId: 'public-duplicate-1',
+        projectId: 'project-public-1',
+        beneficiaryNameHash: 'anonymous-hash-1',
+        rating: 5,
+        comment: 'Cảm ơn chương trình',
+        submittedAt: new Date(),
+        riskScore: 0,
+        isFlagged: false,
+        uploadedByOrganizationId: 'org-public-1',
+        batchContentHash: 'pub-content-1',
+        source: 'public'
+      },
+      {
+        feedbackId: 'public-duplicate-2',
+        projectId: 'project-public-1',
+        beneficiaryNameHash: 'anonymous-hash-2',
+        rating: 5,
+        comment: 'Cảm ơn chương trình',
+        submittedAt: new Date(),
+        riskScore: 0,
+        isFlagged: false,
+        uploadedByOrganizationId: 'org-public-1',
+        batchContentHash: 'pub-content-2',
+        source: 'public'
+      }
+    ]);
+
+    expect(await BeneficiaryFeedbackModel.countDocuments({
+      source: 'public',
+      uploadedByOrganizationId: 'org-public-1',
+      comment: 'Cảm ơn chương trình',
+      rating: 5
+    })).toBe(2);
+  });
+
+  it('creates separate documents when the public submit service receives identical short comments', async () => {
+    vi.stubEnv('NODE_ENV', 'test');
+    vi.stubEnv('FEEDBACK_IP_HASH_SALT', 'e8-integration-feedback-ip-hash-salt');
+    vi.stubEnv('FEEDBACK_TICKET_HMAC_KEY', 'e8-integration-feedback-ticket-hmac-key');
+    const projectId = 'project-public-service-1';
+    const now = new Date();
+
+    await createProjectRecord({
+      projectId,
+      organizationId: 'org-public-service-1',
+      name: 'Dự án integration public feedback',
+      description: 'Fixture cho đường submit public end-to-end.',
+      goalAmount: 1,
+      deadline: new Date(now.getTime() + 86_400_000),
+      status: 'ACTIVE',
+      evidenceCids: [],
+      evidenceFiles: [],
+      submittedAt: null,
+      reviewedAt: null,
+      reviewedBy: null,
+      rejectionReason: null,
+      createdAt: now,
+      updatedAt: now
+    });
+
+    const basePayload = {
+      projectId,
+      rating: 5,
+      comment: 'Cảm ơn',
+      anonymousName: 'Người gửi',
+      redirect: '1' as const
+    };
+    await submitSingleFeedback({
+      ...basePayload,
+      submissionTicket: issueSubmissionTicket(projectId)
+    }, '203.0.113.10');
+    await submitSingleFeedback({
+      ...basePayload,
+      submissionTicket: issueSubmissionTicket(projectId)
+    }, '203.0.113.11');
+
+    const feedbackDocuments = await BeneficiaryFeedbackModel.find({ projectId }).lean().exec();
+    expect(feedbackDocuments).toHaveLength(2);
+    expect(new Set(feedbackDocuments.map(document => document.batchContentHash)).size).toBe(2);
+    expect(feedbackDocuments.map(document => document.comment)).toEqual(['Cảm ơn', 'Cảm ơn']);
   });
 
   it('rolls back override vote when per-vote audit insert fails', async () => {

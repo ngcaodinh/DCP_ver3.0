@@ -56,6 +56,7 @@ vi.mock('../../models/beneficiaryFeedbackModel', () => ({
 import {
   getPublicFeedbackList,
   getPublicFeedbackStats,
+  invalidatePublicFeedbackStatsCache,
   PublicFeedbackStatsResult
 } from '../../services/publicFeedback.service';
 
@@ -76,7 +77,6 @@ function createMockLeanDoc(overrides: Record<string, unknown> = {}) {
   return {
     feedbackId: 'fb-1',
     projectId: 'test-project-1',
-    beneficiaryNameHash: 'abc123def456',
     rating: 5,
     comment: 'Great service!',
     submittedAt: new Date('2024-06-01'),
@@ -196,25 +196,24 @@ describe('publicFeedback.service - unit tests', () => {
 
       const mockChain = mockFind();
       expect(mockChain.select).toHaveBeenCalledWith(
-        'feedbackId projectId beneficiaryNameHash rating comment submittedAt location'
+        '-_id feedbackId projectId rating comment submittedAt location'
       );
       expect(mockChain.select).not.toHaveBeenCalledWith('uploadedByOrganizationId');
       expect(mockChain.select).not.toHaveBeenCalledWith('batchContentHash');
       expect(mockChain.select).not.toHaveBeenCalledWith('riskScore');
     });
 
-    // A8: Response CÓ beneficiaryNameHash, không có beneficiaryName
-    it('A8: select bao gồm beneficiaryNameHash nhưng không có beneficiaryName', async () => {
+    // A8: Không phát hành hash tên vì không cần cho giao diện public.
+    it('A8: select không bao gồm hash tên, plaintext name hoặc Mongo _id', async () => {
       setupFindMock([]);
       mockCountDocuments.mockResolvedValue(0);
 
       await getPublicFeedbackList('test-project-1', 1, 20);
 
       const mockChain = mockFind();
-      expect(mockChain.select).toHaveBeenCalledWith(
-        expect.stringContaining('beneficiaryNameHash')
-      );
+      expect(mockChain.select).not.toHaveBeenCalledWith(expect.stringContaining('beneficiaryNameHash'));
       expect(mockChain.select).not.toHaveBeenCalledWith('beneficiaryName');
+      expect(mockChain.select).toHaveBeenCalledWith(expect.stringContaining('-_id'));
     });
 
     // A9: limit > MAX_LIMIT ở service level (service không enforce, controller enforce)
@@ -414,6 +413,36 @@ describe('publicFeedback.service - unit tests', () => {
 
       vi.useRealTimers();
     });
+
+    it('B11: invalidate xóa stats in-memory để request sau đọc lại database', async () => {
+      mockAggregate.mockResolvedValue([{ totalCount: 1, avgRating: 5, rating1: 0, rating2: 0, rating3: 0, rating4: 0, rating5: 1 }]);
+
+      await getPublicFeedbackStats('project-redis');
+      await invalidatePublicFeedbackStatsCache('project-redis');
+      await getPublicFeedbackStats('project-redis');
+
+      expect(mockAggregate).toHaveBeenCalledTimes(2);
+    });
+
+    it('không ghi lại kết quả aggregate cũ sau khi submit invalidate cache đồng thời', async () => {
+      let resolveStaleAggregate: (value: Array<Record<string, number>>) => void = () => undefined;
+      const staleAggregate = new Promise<Array<Record<string, number>>>(resolve => {
+        resolveStaleAggregate = resolve;
+      });
+      mockAggregate
+        .mockReturnValueOnce(staleAggregate)
+        .mockResolvedValueOnce([{ totalCount: 2, avgRating: 4, rating1: 0, rating2: 0, rating3: 0, rating4: 1, rating5: 1 }]);
+
+      const staleRequest = getPublicFeedbackStats('project-race');
+      invalidatePublicFeedbackStatsCache('project-race');
+      resolveStaleAggregate([{ totalCount: 1, avgRating: 5, rating1: 0, rating2: 0, rating3: 0, rating4: 0, rating5: 1 }]);
+      await staleRequest;
+
+      const freshResult = await getPublicFeedbackStats('project-race');
+
+      expect(freshResult.avgRating).toBe(4);
+      expect(mockAggregate).toHaveBeenCalledTimes(2);
+    });
   });
 
   // =============================================================================
@@ -467,7 +496,6 @@ describe('publicFeedback.service - unit tests', () => {
         lean: vi.fn().mockResolvedValue([{
           feedbackId: 'fb-1',
           projectId: 'test-project-1',
-          beneficiaryNameHash: 'abc123',
           rating: 5,
           comment: 'Good',
           submittedAt: new Date()
@@ -515,6 +543,8 @@ describe('publicFeedback.service - unit tests', () => {
       results.forEach(result => {
         expect(result).toBeDefined();
       });
+
+      expect(mockAggregate).toHaveBeenCalledTimes(1);
 
       const statsResults = results.filter(r => 'avgRating' in r) as PublicFeedbackStatsResult[];
       statsResults.forEach(stats => {

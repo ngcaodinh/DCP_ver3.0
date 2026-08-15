@@ -52,11 +52,14 @@ services:
     mem_limit: 768m
     env_file:
       - /opt/dcp/env/backend.env
+    secrets:
+      - feedback_client_ip_hmac_key
     environment:
       NODE_ENV: production
       RUN_WORKERS: "false"
       REQUEST_BODY_LIMIT: 5mb
       NODE_OPTIONS: "--max-old-space-size=512"
+      FEEDBACK_CLIENT_IP_HMAC_KEY_FILE: /run/secrets/feedback_client_ip_hmac_key
     depends_on:
       mongo:
         condition: service_healthy
@@ -85,11 +88,14 @@ services:
     mem_limit: 512m
     env_file:
       - /opt/dcp/env/backend.env
+    secrets:
+      - feedback_client_ip_hmac_key
     environment:
       NODE_ENV: production
       RUN_WORKERS: "true"
       REQUEST_BODY_LIMIT: 5mb
       NODE_OPTIONS: "--max-old-space-size=384"
+      FEEDBACK_CLIENT_IP_HMAC_KEY_FILE: /run/secrets/feedback_client_ip_hmac_key
     depends_on:
       mongo:
         condition: service_healthy
@@ -120,9 +126,12 @@ services:
     mem_limit: 512m
     env_file:
       - /opt/dcp/env/frontend.env
+    secrets:
+      - feedback_client_ip_hmac_key
     environment:
       NODE_ENV: production
       PORT: 3000
+      FEEDBACK_CLIENT_IP_HMAC_KEY_FILE: /run/secrets/feedback_client_ip_hmac_key
     depends_on:
       backend:
         condition: service_healthy
@@ -131,7 +140,7 @@ services:
     networks:
       - dcp_internal
     healthcheck:
-      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000').then(response => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))\""]
+      test: ["CMD", "node", "scripts/check-frontend-liveness.mjs"]
       interval: 30s
       timeout: 5s
       retries: 5
@@ -145,3 +154,7 @@ volumes:
 networks:
   dcp_internal:
     driver: bridge
+
+secrets:
+  feedback_client_ip_hmac_key:
+    file: /opt/dcp/env/feedback-client-ip-hmac.key
