@@ -10,8 +10,13 @@ import { createAuthenticationMiddleware } from '../middleware/authenticationMidd
 import { createRoleAuthorizationMiddleware } from '../middleware/roleAuthorizationMiddleware';
 import { createFreshRoleAuthorizationMiddleware } from '../middleware/roleAuthorizationMiddleware';
 import { createRateLimitMiddleware } from '../middleware/rateLimitMiddleware';
-import { FEEDBACK_BATCH_RATE_LIMIT_CONFIG, MAX_BATCH_SIZE, MAX_UPLOAD_SIZE_BYTES } from '../controllers/feedbackBatchController';
+import { FEEDBACK_BATCH_RATE_LIMIT_CONFIG, MAX_UPLOAD_SIZE_BYTES } from '../controllers/feedbackBatchController';
 import { handleFeedbackModeration } from '../controllers/feedbackModerationController';
+import {
+  handleDeleteFeedback,
+  handleListFlaggedFeedback,
+  handleRestoreFeedback
+} from '../controllers/flaggedFeedbackController';
 
 /**
  * Giới hạn file size cho upload (tái sử dụng từ service).
@@ -41,6 +46,26 @@ export function createFeedbackRoutes(): Router {
   const feedbackModerationRateLimiter = createRateLimitMiddleware(30, 60 * 1000, {
     bucketName: 'feedback:moderation'
   });
+  const flaggedFeedbackReadRateLimiter = createRateLimitMiddleware(120, 60 * 1000, {
+    bucketName: 'admin:flagged-feedback-read'
+  });
+
+  // F5-A: route literal và restore phải đứng trước route có parameter để không bị nuốt.
+  router.get(
+    '/flagged',
+    createAuthenticationMiddleware(),
+    createFreshRoleAuthorizationMiddleware(['admin']),
+    flaggedFeedbackReadRateLimiter,
+    handleListFlaggedFeedback
+  );
+
+  router.post(
+    '/:feedbackId/restore',
+    createAuthenticationMiddleware(),
+    createFreshRoleAuthorizationMiddleware(['admin']),
+    feedbackModerationRateLimiter,
+    handleRestoreFeedback
+  );
 
   // F5/E8: chỉ admin active mới được đổi state moderation và tạo audit trail.
   router.post(
@@ -49,6 +74,14 @@ export function createFeedbackRoutes(): Router {
     createFreshRoleAuthorizationMiddleware(['admin']),
     feedbackModerationRateLimiter,
     handleFeedbackModeration
+  );
+
+  router.delete(
+    '/:feedbackId',
+    createAuthenticationMiddleware(),
+    createFreshRoleAuthorizationMiddleware(['admin']),
+    feedbackModerationRateLimiter,
+    handleDeleteFeedback
   );
 
   /**

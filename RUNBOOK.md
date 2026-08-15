@@ -96,7 +96,11 @@ db.impact_sbt_metadata.createIndex(
 )
 ```
 
-## 8) Trang Impact NFT Gallery (C5)
+## 8) Feedback purge worker (F5)
+
+`FEEDBACK_PURGE_ENABLED` mặc định để trống. Khi rollout F5, chỉ bật `FEEDBACK_PURGE_ENABLED=true` trên đúng một container backend có `RUN_WORKERS=true`; các container API còn lại để trống để tránh chạy purge trùng không cần thiết. Worker vẫn re-check `deletedAt` ở lệnh xoá cứng để an toàn khi restore đồng thời.
+
+## 9) Trang Impact NFT Gallery (C5)
 
 1. C5 không phát hành production một mình; merge và release cùng C6 vì các card SBT liên kết tới `/impact-gallery/[tokenId]`.
 2. Trong lượt release, deploy backend trước frontend để route `GET /api/sbt/gallery` tồn tại trước khi FE gọi.

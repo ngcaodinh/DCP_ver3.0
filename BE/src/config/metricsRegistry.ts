@@ -117,6 +117,13 @@ export const donationAmountVnd = new Histogram({
   registers: [metricsRegistry]
 });
 
+/** Counter đếm feedback đã quá hạn lưu trữ và bị purge cứng khỏi MongoDB. */
+export const feedbackHardPurgedTotal = new Counter({
+  name: 'dcp_feedback_hard_purged_total',
+  help: 'Số feedback đã xoá mềm bị xoá cứng sau thời hạn lưu trữ.',
+  registers: [metricsRegistry]
+});
+
 /** Trả về registry riêng của backend để endpoint scrape và test dùng chung. */
 export function getMetricsRegistry(): Registry {
   return metricsRegistry;

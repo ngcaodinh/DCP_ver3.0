@@ -27,6 +27,7 @@ import { startDataMapperWorker } from './workers/data-mapper.worker';
 import { startNotificationWorker, stopNotificationWorker } from './workers/notification.worker';
 import { startAdminAuditArchiveWorker, stopAdminAuditArchiveWorker } from './workers/adminAuditArchiveWorker';
 import { startAdminActionOutboxWorker, stopAdminActionOutboxWorker } from './workers/adminActionOutboxWorker';
+import { startFeedbackPurgeWorker, stopFeedbackPurgeWorker } from './workers/feedbackPurgeWorker';
 
 const logger = getLogger();
 
@@ -72,6 +73,7 @@ function startBackgroundWorkers(): void {
   // Admin audit cold archive: chỉ chạy khi private S3-compatible storage được bật/configured.
   startAdminAuditArchiveWorker();
   startAdminActionOutboxWorker();
+  startFeedbackPurgeWorker();
 }
 
 /**
@@ -114,6 +116,7 @@ async function startServer(): Promise<void> {
       await stopNotificationWorker();
       stopAdminAuditArchiveWorker();
       stopAdminActionOutboxWorker();
+      stopFeedbackPurgeWorker();
     } catch (error) {
       logger.error('Lỗi khi shutdown workers.', {
         errorMessage: (error as Error).message

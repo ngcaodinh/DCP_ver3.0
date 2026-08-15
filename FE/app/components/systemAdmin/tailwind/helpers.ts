@@ -23,6 +23,7 @@ export function getPageTitle(key: PageKey): string {
     transparency: 'Tra cứu Giao dịch',
     sybilManagement: 'Quản lý Sybil Attack',
     transferQueue: 'Hàng chờ chuyển khoản',
+    feedbackFlagging: 'Feedback bị flag',
   };
   return titles[key] ?? 'Không xác định';
 }

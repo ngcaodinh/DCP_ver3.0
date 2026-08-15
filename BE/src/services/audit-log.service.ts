@@ -23,7 +23,7 @@ const SENSITIVE_CONTEXT_KEYS = new Set([
 const CANONICAL_AUDIT_ACTIONS: readonly AdminAuditAction[] = [
   'MANUAL_APPROVE', 'MANUAL_REJECT', 'MANUAL_BANK_ACCOUNT_VIEW',
   'OVERRIDE_VOTE_APPROVE', 'OVERRIDE_VOTE_REJECT', 'OVERRIDE_EXPIRED',
-  'FEEDBACK_FLAG', 'FEEDBACK_UNFLAG', 'SBT_MINT_RERUN_REQUESTED',
+  'FEEDBACK_FLAG', 'FEEDBACK_UNFLAG', 'FEEDBACK_DELETE', 'FEEDBACK_RESTORE', 'SBT_MINT_RERUN_REQUESTED',
   'SBT_MINT_RERUN_ENQUEUED', 'SBT_MINT_RERUN_DISPATCH_FAILED'
 ] as const;
 const AUDIT_READ_PROJECTION = [
@@ -41,6 +41,8 @@ const ACTION_TARGET_TYPES: Record<AdminAuditAction, AdminAuditTargetType> = {
   OVERRIDE_EXPIRED: 'OVERRIDE_REQUEST',
   FEEDBACK_FLAG: 'BENEFICIARY_FEEDBACK',
   FEEDBACK_UNFLAG: 'BENEFICIARY_FEEDBACK',
+  FEEDBACK_DELETE: 'BENEFICIARY_FEEDBACK',
+  FEEDBACK_RESTORE: 'BENEFICIARY_FEEDBACK',
   SBT_MINT_RERUN_REQUESTED: 'SBT_MINT_REQUEST',
   SBT_MINT_RERUN_ENQUEUED: 'SBT_MINT_REQUEST',
   SBT_MINT_RERUN_DISPATCH_FAILED: 'SBT_MINT_REQUEST'
@@ -55,6 +57,8 @@ const ACTION_CONTEXT_KEYS: Record<AdminAuditAction, readonly string[]> = {
   OVERRIDE_EXPIRED: ['overrideRequestId', 'projectId', 'organizationId', 'commissionerSnapshotSize', 'outcome'],
   FEEDBACK_FLAG: ['feedbackId', 'projectId', 'isFlaggedBefore', 'isFlaggedAfter', 'riskScore', 'reason'],
   FEEDBACK_UNFLAG: ['feedbackId', 'projectId', 'isFlaggedBefore', 'isFlaggedAfter', 'riskScore', 'reason'],
+  FEEDBACK_DELETE: ['feedbackId', 'projectId', 'rating', 'riskScore', 'isFlaggedBefore', 'source', 'submittedAt', 'purgeAfter', 'reason'],
+  FEEDBACK_RESTORE: ['feedbackId', 'projectId', 'riskScore', 'deletedAt', 'deletedByAdminId', 'daysBeforePurge', 'reason'],
   SBT_MINT_RERUN_REQUESTED: ['mintRequestId', 'sbtId', 'previousStatus', 'previousAttemptNumber', 'reRunCount', 'jobId', 'enqueueResult', 'outboxEventId', 'dispatchAttempt'],
   SBT_MINT_RERUN_ENQUEUED: ['mintRequestId', 'sbtId', 'previousStatus', 'previousAttemptNumber', 'reRunCount', 'jobId', 'enqueueResult', 'outboxEventId', 'dispatchAttempt'],
   SBT_MINT_RERUN_DISPATCH_FAILED: ['mintRequestId', 'sbtId', 'previousStatus', 'previousAttemptNumber', 'reRunCount', 'jobId', 'enqueueResult', 'outboxEventId', 'dispatchAttempt']

@@ -293,7 +293,8 @@ async function processBatch(
   batchContentHash: string,
   inputType: BatchInputType = 'json'
 ): Promise<BatchFeedbackResult> {
-  // Kiểm tra duplicate: nếu batch với cùng hash đã được upload bởi cùng org
+  // Cố ý không lọc deletedAt: unique index vẫn giữ batch đã xoá mềm để idempotency không đâm E11000.
+  // Sau khi purge cứng, cùng file mới được coi là một lần upload mới theo chính sách lưu trữ F5.
   const existingBatch = await BeneficiaryFeedbackModel.findOne({
     uploadedByOrganizationId,
     batchContentHash

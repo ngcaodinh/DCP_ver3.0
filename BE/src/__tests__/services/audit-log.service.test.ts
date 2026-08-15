@@ -131,6 +131,40 @@ describe('audit-log.service', () => {
     })).toEqual({ previousError: { message: 'provider failed' } });
   });
 
+  it('chấp nhận FEEDBACK_DELETE/RESTORE và giữ purge context nhưng loại comment', async () => {
+    await recordAdminAuditLog({
+      actionId: 'feedback-delete-audit',
+      actorType: 'ADMIN',
+      adminId: 'admin-1',
+      adminRole: 'admin',
+      actionType: 'FEEDBACK_DELETE',
+      targetId: 'fb-1',
+      targetType: 'BENEFICIARY_FEEDBACK',
+      reason: 'Xoá feedback spam',
+      context: { feedbackId: 'fb-1', purgeAfter: '2026-09-14T00:00:00.000Z', comment: 'must not persist' }
+    });
+    await recordAdminAuditLog({
+      actionId: 'feedback-restore-audit',
+      actorType: 'ADMIN',
+      adminId: 'admin-1',
+      adminRole: 'admin',
+      actionType: 'FEEDBACK_RESTORE',
+      targetId: 'fb-1',
+      targetType: 'BENEFICIARY_FEEDBACK',
+      reason: 'Khôi phục feedback thật',
+      context: { feedbackId: 'fb-1', deletedByAdminId: 'admin-delete', comment: 'must not persist' }
+    });
+
+    expect(mocks.createAdminAuditLog.mock.calls[0][0].context).toEqual({
+      feedbackId: 'fb-1',
+      purgeAfter: '2026-09-14T00:00:00.000Z'
+    });
+    expect(mocks.createAdminAuditLog.mock.calls[1][0].context).toEqual({
+      feedbackId: 'fb-1',
+      deletedByAdminId: 'admin-delete'
+    });
+  });
+
   it('list server-side filter, sort, projection và pagination trước database', async () => {
     mocks.find.mockReturnValue(buildQueryChain([{
       actionId: 'action-1',

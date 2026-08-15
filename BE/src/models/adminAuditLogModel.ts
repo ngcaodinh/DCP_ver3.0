@@ -10,6 +10,8 @@ export const ADMIN_AUDIT_ACTIONS = [
   'OVERRIDE_EXPIRED',
   'FEEDBACK_FLAG',
   'FEEDBACK_UNFLAG',
+  'FEEDBACK_DELETE',
+  'FEEDBACK_RESTORE',
   'SBT_MINT_RERUN_REQUESTED',
   'SBT_MINT_RERUN_ENQUEUED',
   'SBT_MINT_RERUN_DISPATCH_FAILED'
@@ -143,4 +145,36 @@ export async function findAuditLogsByRequestId(
     .sort({ createdAt: -1 })
     .lean<AdminAuditLogRecord[]>()
     .exec();
+}
+
+export interface LatestFeedbackFlagAudit {
+  createdAt: Date;
+  reason?: string | null;
+  adminId?: string | null;
+  adminUserId?: string | null;
+  context?: Record<string, unknown>;
+}
+
+/** Lấy audit flag thủ công mới nhất cho cả trang feedback bằng một aggregate, không tạo N+1 query. */
+export async function findLatestFlagAuditsByFeedbackIds(
+  feedbackIds: string[]
+): Promise<Map<string, LatestFeedbackFlagAudit>> {
+  if (!feedbackIds.length) return new Map();
+
+  const rows = await AdminAuditLogModel.aggregate<{
+    _id: string;
+    audit: LatestFeedbackFlagAudit;
+  }>([
+    {
+      $match: {
+        targetId: { $in: feedbackIds },
+        targetType: 'BENEFICIARY_FEEDBACK',
+        $or: [{ actionType: 'FEEDBACK_FLAG' }, { action: 'FEEDBACK_FLAG' }]
+      }
+    },
+    { $sort: { createdAt: -1 } },
+    { $group: { _id: '$targetId', audit: { $first: '$$ROOT' } } }
+  ]).exec();
+
+  return new Map(rows.map(row => [row._id, row.audit]));
 }

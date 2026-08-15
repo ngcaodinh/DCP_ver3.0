@@ -86,7 +86,8 @@ export async function getPublicFeedbackList(
   const [feedbacks, totalItems] = await Promise.all([
     BeneficiaryFeedbackModel.find({
       projectId,
-      isFlagged: false
+      isFlagged: false,
+      deletedAt: null
     })
       .select('-_id feedbackId projectId rating comment submittedAt location')
       .sort({ submittedAt: -1 })
@@ -95,7 +96,8 @@ export async function getPublicFeedbackList(
       .lean(),
     BeneficiaryFeedbackModel.countDocuments({
       projectId,
-      isFlagged: false
+      isFlagged: false,
+      deletedAt: null
     })
   ]);
 
@@ -121,7 +123,8 @@ async function loadPublicFeedbackStats(projectId: string): Promise<PublicFeedbac
     {
       $match: {
         projectId,
-        isFlagged: false
+        isFlagged: false,
+        deletedAt: null
       }
     },
     {

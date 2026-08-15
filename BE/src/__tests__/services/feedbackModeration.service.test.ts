@@ -3,7 +3,8 @@ import { describe, expect, it, beforeEach, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   findFeedback: vi.fn(),
   transitionFlag: vi.fn(),
-  recordAudit: vi.fn()
+  recordAudit: vi.fn(),
+  invalidateStats: vi.fn()
 }));
 
 vi.mock('../../models/beneficiaryFeedbackModel', () => ({
@@ -12,6 +13,9 @@ vi.mock('../../models/beneficiaryFeedbackModel', () => ({
 }));
 vi.mock('../../services/audit-log.service', () => ({
   recordAdminAuditLog: mocks.recordAudit
+}));
+vi.mock('../../services/publicFeedback.service', () => ({
+  invalidatePublicFeedbackStatsCache: mocks.invalidateStats
 }));
 
 import { moderateBeneficiaryFeedback } from '../../services/feedbackModeration.service';
@@ -56,6 +60,7 @@ describe('feedbackModeration.service', () => {
       targetType: 'BENEFICIARY_FEEDBACK',
       context: expect.objectContaining({ isFlaggedBefore: false, isFlaggedAfter: true })
     }));
+    expect(mocks.invalidateStats).toHaveBeenCalledWith('project-1');
   });
 
   it('rejects no-op, missing feedback, invalid reason and non-admin role', async () => {

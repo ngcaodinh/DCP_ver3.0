@@ -63,6 +63,11 @@ export function getNavigationItems(): NavigationItem[] {
       label: 'Hàng chờ chuyển khoản',
       iconPath: 'M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z',
     },
+    {
+      key: 'feedbackFlagging',
+      label: 'Feedback bị flag',
+      iconPath: 'M7 8h10M7 12h6m-9 8 3.5-3.5h9A2.5 2.5 0 0019 14V6a2.5 2.5 0 00-2.5-2.5h-9A2.5 2.5 0 005 6v14z',
+    },
   ];
 }
 

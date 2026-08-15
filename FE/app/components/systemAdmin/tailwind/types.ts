@@ -15,7 +15,8 @@ export type PageKey =
   | 'report'
   | 'transparency'
   | 'sybilManagement'
-  | 'transferQueue';
+  | 'transferQueue'
+  | 'feedbackFlagging';
 
 /** Mục điều hướng trong Sidebar. */
 export type NavigationItem = {

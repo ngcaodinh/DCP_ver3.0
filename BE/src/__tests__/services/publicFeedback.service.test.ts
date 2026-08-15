@@ -132,7 +132,13 @@ describe('publicFeedback.service - unit tests', () => {
 
       expect(mockFind).toHaveBeenCalledWith({
         projectId: 'test-project-1',
-        isFlagged: false
+        isFlagged: false,
+        deletedAt: null
+      });
+      expect(mockCountDocuments).toHaveBeenCalledWith({
+        projectId: 'test-project-1',
+        isFlagged: false,
+        deletedAt: null
       });
     });
 
@@ -145,7 +151,8 @@ describe('publicFeedback.service - unit tests', () => {
 
       expect(mockFind).toHaveBeenCalledWith({
         projectId: 'proj-A',
-        isFlagged: false
+        isFlagged: false,
+        deletedAt: null
       });
     });
 
@@ -292,7 +299,7 @@ describe('publicFeedback.service - unit tests', () => {
       expect(mockAggregate).toHaveBeenCalledWith(
         expect.arrayContaining([
           expect.objectContaining({
-            $match: { projectId: 'test-project-1', isFlagged: false }
+            $match: { projectId: 'test-project-1', isFlagged: false, deletedAt: null }
           })
         ])
       );
@@ -467,7 +474,8 @@ describe('publicFeedback.service - unit tests', () => {
 
       expect(mockFind).toHaveBeenCalledWith({
         projectId: specialProjectId,
-        isFlagged: false
+        isFlagged: false,
+        deletedAt: null
       });
       expect(result).toBeDefined();
     });

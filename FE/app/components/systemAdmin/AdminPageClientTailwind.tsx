@@ -455,9 +455,14 @@ export default function AdminPageClientTailwind() {
   // PAGE NAVIGATION
   // =============================================================================
 
+  /** Điều hướng các mục quản trị có route riêng mà không mount panel vào dashboard legacy. */
   const handleNavigate = useCallback((key: PageKey) => {
     if (key === 'transferQueue') {
       router.push('/admin/transfers');
+      return;
+    }
+    if (key === 'feedbackFlagging') {
+      router.push('/admin/feedback');
       return;
     }
     setActivePage(key);
