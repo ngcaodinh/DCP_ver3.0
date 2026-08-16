@@ -16,8 +16,10 @@ import {
   shouldFlagFeedback,
   RISK_SCORE_AUTO_FLAG_THRESHOLD
 } from './feedbackSpamDetection.service';
+import { invalidatePublicFeedbackStatsCache } from './publicFeedback.service';
 import {
   BatchSizeExceededError,
+  EmptyBatchError,
   FileTooLargeError,
   InvalidCsvError,
   PayloadMustBeArrayError
@@ -92,6 +94,25 @@ function stripBom(buffer: Buffer): Buffer {
     return buffer.subarray(3);
   }
   return buffer;
+}
+
+/** Chuẩn hóa riêng cột rating của CSV trước validation, nhưng giữ nguyên contract chặt của JSON. */
+function coerceCsvRow(row: unknown): unknown {
+  if (row === null || typeof row !== 'object') {
+    return row;
+  }
+
+  const record = row as Record<string, unknown>;
+  if (typeof record.rating !== 'string') {
+    return row;
+  }
+
+  const trimmedRating = record.rating.trim();
+  if (!/^-?\d+$/.test(trimmedRating)) {
+    return row;
+  }
+
+  return { ...record, rating: Number(trimmedRating) };
 }
 
 /**
@@ -248,7 +269,10 @@ export async function processCsvBatchFeedback(
     throw new FileTooLargeError('File size exceeds 5MB limit');
   }
 
-  const rows = parseCsvBuffer(csvBuffer);
+  const rows = parseCsvBuffer(csvBuffer).map(coerceCsvRow);
+  if (rows.length === 0) {
+    throw new EmptyBatchError();
+  }
   if (rows.length > MAX_BATCH_SIZE) {
     throw new BatchSizeExceededError('Batch size exceeds 1000 limit');
   }
@@ -269,6 +293,10 @@ export async function processJsonBatchFeedback(
 ): Promise<BatchFeedbackResult> {
   if (!Array.isArray(jsonPayload)) {
     throw new PayloadMustBeArrayError('Payload must be a JSON array');
+  }
+
+  if (jsonPayload.length === 0) {
+    throw new EmptyBatchError();
   }
 
   if (jsonPayload.length > MAX_BATCH_SIZE) {
@@ -324,6 +352,10 @@ async function processBatch(
   if (processedRows.length > 0) {
     savedCount = await saveBatchFeedback(processedRows, uploadedByOrganizationId, batchContentHash);
     flaggedCount = processedRows.filter((r) => r.isFlagged).length;
+
+    // Dọn cache stats public sau khi batch đã ghi thành công để số liệu các màn hình đồng nhất.
+    const affectedProjectIds = [...new Set(processedRows.map((row) => row.data.projectId))];
+    affectedProjectIds.forEach(projectId => invalidatePublicFeedbackStatsCache(projectId));
 
     logger.info('Batch feedback processed', {
       totalItems: rows.length,

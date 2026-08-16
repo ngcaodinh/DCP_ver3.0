@@ -1181,12 +1181,20 @@ export function ProjectsSection({
               <div className="flex justify-between text-[11px] text-[#6B7280]"><span>{project.raisedAmount}</span><span>{project.goalAmount}</span></div>
               <div className="flex flex-wrap gap-2 text-[11px] text-[#6B7280]">{project.footerMeta.map(meta => <span key={meta}>{meta}</span>)}</div>
               {project.projectId ? (
-                <a
-                  href={`/organization/projects/${encodeURIComponent(project.projectId)}/geofence`}
-                  className="block rounded border border-[#99F6E4] bg-[#F0FDFA] px-2 py-1.5 text-center text-xs font-semibold text-[#0F766E] hover:bg-[#CCFBF1]"
-                >
-                  Thiết lập vùng địa lý
-                </a>
+                <div className="grid grid-cols-2 gap-2">
+                  <a
+                    href={`/organization/projects/${encodeURIComponent(project.projectId)}/geofence`}
+                    className="block rounded border border-[#99F6E4] bg-[#F0FDFA] px-2 py-1.5 text-center text-xs font-semibold text-[#0F766E] hover:bg-[#CCFBF1]"
+                  >
+                    Thiết lập vùng địa lý
+                  </a>
+                  <a
+                    href={`/organization/feedback?projectId=${encodeURIComponent(project.projectId)}`}
+                    className="block rounded border border-[#BFDBFE] bg-[#EFF6FF] px-2 py-1.5 text-center text-xs font-semibold text-[#1D4ED8] hover:bg-[#DBEAFE]"
+                  >
+                    Quản lý feedback
+                  </a>
+                </div>
               ) : null}
               <div className="flex gap-2">
                 <button

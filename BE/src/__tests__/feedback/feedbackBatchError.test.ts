@@ -5,6 +5,7 @@ import { describe, it, expect } from 'vitest';
 import { ApplicationError } from '../../utils/applicationError';
 import {
   BatchSizeExceededError,
+  EmptyBatchError,
   FileTooLargeError,
   InvalidCsvError,
   PayloadMustBeArrayError,
@@ -61,6 +62,14 @@ describe('feedbackBatchError', () => {
     });
   });
 
+  describe('EmptyBatchError', () => {
+    it('nên có statusCode 400 và errorCode EMPTY_BATCH', () => {
+      const error = new EmptyBatchError();
+      expect(error.statusCode).toBe(400);
+      expect(error.errorCode).toBe('EMPTY_BATCH');
+    });
+  });
+
   describe('InvalidCsvError', () => {
     it('nên có statusCode là 400', () => {
       const error = new InvalidCsvError();
@@ -102,6 +111,10 @@ describe('feedbackBatchError', () => {
 
     it('nên trả về true cho FileTooLargeError', () => {
       expect(isFeedbackBatchError(new FileTooLargeError())).toBe(true);
+    });
+
+    it('nên trả về true cho EmptyBatchError', () => {
+      expect(isFeedbackBatchError(new EmptyBatchError())).toBe(true);
     });
 
     it('nên trả về true cho InvalidCsvError', () => {

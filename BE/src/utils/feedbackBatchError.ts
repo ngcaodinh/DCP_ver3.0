@@ -25,6 +25,14 @@ export class FileTooLargeError extends ApplicationError {
   }
 }
 
+/** Lỗi khi CSV không có bất kỳ dòng dữ liệu feedback nào. */
+export class EmptyBatchError extends ApplicationError {
+  constructor(message: string = 'Phải có ít nhất 1 feedback.') {
+    super(message, 400, 'EMPTY_BATCH');
+    this.name = 'EmptyBatchError';
+  }
+}
+
 /**
  * Lỗi khi CSV format không hợp lệ.
  */
@@ -53,6 +61,7 @@ export class PayloadMustBeArrayError extends ApplicationError {
 export function isFeedbackBatchError(error: unknown): boolean {
   return error instanceof BatchSizeExceededError
     || error instanceof FileTooLargeError
+    || error instanceof EmptyBatchError
     || error instanceof InvalidCsvError
     || error instanceof PayloadMustBeArrayError;
 }

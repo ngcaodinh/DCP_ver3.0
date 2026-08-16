@@ -138,6 +138,10 @@ const beneficiaryFeedbackSchema = new Schema<BeneficiaryFeedback>(
 
 // Compound index cho truy vấn theo project và thời gian
 beneficiaryFeedbackSchema.index({ projectId: 1, submittedAt: -1 });
+// Compound index cho danh sách feedback theo tenant, tránh quét collection khi phân trang.
+beneficiaryFeedbackSchema.index({ uploadedByOrganizationId: 1, deletedAt: 1, submittedAt: -1, feedbackId: -1 });
+// Compound index phủ aggregate thống kê theo tenant, trạng thái moderation và rating.
+beneficiaryFeedbackSchema.index({ uploadedByOrganizationId: 1, deletedAt: 1, isFlagged: 1, rating: 1 });
 // Index cho việc tìm kiếm feedback đã flagged
 beneficiaryFeedbackSchema.index({ isFlagged: 1, riskScore: -1, submittedAt: -1 });
 // Chỉ chứa bản ghi đã xoá mềm để worker purge quét theo cutoff hiệu quả.

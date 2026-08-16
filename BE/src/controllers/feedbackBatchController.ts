@@ -83,10 +83,20 @@ export async function batchUploadFeedbackController(
         return;
       }
 
-      // Validate MIME type (CSV) - chỉ chấp nhận CSV MIME types
-      // Loại bỏ text/plain vì quá rộng và có thể bị lợi dụng
-      const allowedMimeTypes = ['text/csv', 'application/csv'];
-      if (!allowedMimeTypes.includes(file.mimetype.toLowerCase())) {
+      // Validate MIME type (CSV); extension bắt buộc để các MIME generic không mở rộng thành file tùy ý.
+      const allowedMimeTypes = [
+        'text/csv',
+        'application/csv',
+        'application/vnd.ms-excel',
+        'application/octet-stream'
+      ];
+      const hasCsvExtension = file.originalname.toLowerCase().endsWith('.csv');
+      if (!hasCsvExtension || !allowedMimeTypes.includes(file.mimetype.toLowerCase())) {
+        logger.warn('Rejected CSV upload file type', {
+          organizationId: userId,
+          mimetype: file.mimetype.toLowerCase(),
+          hasCsvExtension
+        });
         sendErrorResponse(response, 400, 'File phải là CSV.', 'INVALID_FILE_TYPE');
         return;
       }
@@ -120,11 +130,6 @@ export async function batchUploadFeedbackController(
 
       if (feedbacks.length > MAX_BATCH_SIZE) {
         sendErrorResponse(response, 400, 'Batch size exceeds 1000 limit.', 'BATCH_SIZE_EXCEEDED');
-        return;
-      }
-
-      if (feedbacks.length === 0) {
-        sendErrorResponse(response, 400, 'Phải có ít nhất 1 feedback.', 'EMPTY_BATCH');
         return;
       }
 
