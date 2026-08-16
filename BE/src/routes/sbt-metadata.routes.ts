@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, type NextFunction, type Request, type Response } from 'express';
 import { createAuthenticationMiddleware } from '../middleware/authenticationMiddleware';
 import { createFreshRoleAuthorizationMiddleware } from '../middleware/roleAuthorizationMiddleware';
 import { createRateLimitMiddleware } from '../middleware/rateLimitMiddleware';
@@ -17,14 +17,35 @@ import {
   updateSbtStatusBodySchema
 } from '../validators/sbtMetadataValidator';
 
+const SBT_METADATA_READ_WINDOW_MS = 60 * 1000;
+const PUBLIC_SBT_METADATA_READ_MAX_REQUESTS = 100;
+const SSR_SBT_METADATA_READ_MAX_REQUESTS = 600;
+const INTERNAL_SSR_REQUEST_HEADER = 'X-DCP-SSR-Request';
+const INTERNAL_SSR_REQUEST_HEADER_VALUE = '1';
+const SSR_RATE_LIMIT_IDENTITY = 'server-rendered';
+
 /** Tạo sub-router cho 3 API metadata SBT, giữ middleware riêng với các route mint admin cũ. */
 export function createSbtMetadataRoutes(): Router {
   const router = Router();
   const authenticationMiddleware = createAuthenticationMiddleware();
   const adminRoleMiddleware = createFreshRoleAuthorizationMiddleware(['admin']);
-  const readRateLimiter = createRateLimitMiddleware(100, 60 * 1000, {
+  const publicReadRateLimiter = createRateLimitMiddleware(PUBLIC_SBT_METADATA_READ_MAX_REQUESTS, SBT_METADATA_READ_WINDOW_MS, {
     bucketName: 'sbt-metadata-read'
   });
+  const serverRenderedReadRateLimiter = createRateLimitMiddleware(
+    SSR_SBT_METADATA_READ_MAX_REQUESTS,
+    SBT_METADATA_READ_WINDOW_MS,
+    {
+      bucketName: 'sbt-metadata-read:ssr',
+      clientIpResolver: () => SSR_RATE_LIMIT_IDENTITY
+    }
+  );
+  /** Chọn quota riêng cho SSR nội bộ; Nginx loại header này khỏi mọi request public đi vào backend. */
+  const readRateLimiter = (request: Request, response: Response, next: NextFunction): void => {
+    const isServerRenderedRequest = request.get(INTERNAL_SSR_REQUEST_HEADER) === INTERNAL_SSR_REQUEST_HEADER_VALUE;
+    const rateLimiter = isServerRenderedRequest ? serverRenderedReadRateLimiter : publicReadRateLimiter;
+    rateLimiter(request, response, next);
+  };
   const writeRateLimiter = createRateLimitMiddleware(20, 60 * 1000, {
     bucketName: 'sbt-metadata-write'
   });

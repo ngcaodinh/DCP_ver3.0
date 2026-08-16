@@ -100,6 +100,8 @@ describe('public feedback production runtime contract', () => {
     }
     expect(apiLocation).toContain('proxy_set_header X-Feedback-Client-IP "";');
     expect(apiLocation).toContain('proxy_set_header X-Feedback-Client-IP-Signature "";');
+    expect(apiLocation).toContain('proxy_set_header X-DCP-SSR-Request "";');
+    expect(nginxConfiguration).toContain('proxy_set_header X-DCP-SSR-Request "";');
   });
 
   it('keeps frontend liveness local instead of probing backend identity', () => {

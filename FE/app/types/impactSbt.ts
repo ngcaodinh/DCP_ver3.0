@@ -28,3 +28,37 @@ export interface ImpactSbtGalleryResponse {
   entries: ImpactSbtGalleryEntry[];
   pagination: ImpactSbtGalleryPagination;
 }
+
+/** Dữ liệu on-chain được public detail API trả về cho một token SBT. */
+export interface SbtTokenOnChainDetail {
+  projectId: number;
+  milestone: number;
+  beneficiaryCount: number;
+  gpsCoordinates: string;
+  imageCID: string;
+  mintedAt: string;
+  tokenStatus: ImpactSbtTokenStatus | null;
+}
+
+/** Dữ liệu off-chain được allowlist cho màn hình chi tiết SBT public. */
+export interface SbtTokenOffChainDetail {
+  projectId: string;
+  milestone: number;
+  beneficiaryCount: number;
+  imageCid: string;
+  tokenUri: string;
+  confirmedAt: string | null;
+  transactionHash: string | null;
+  tokenStatusReason: string | null;
+}
+
+/** Payload data của GET /api/sbt/token/:tokenId sau khi JSON serialize. */
+export interface SbtTokenDetailResponse {
+  onChainTokenId: number;
+  onChain: SbtTokenOnChainDetail;
+  offChain: SbtTokenOffChainDetail | null;
+  imageGatewayUrl: string | null;
+  ipfsMetadata: unknown;
+  ipfsError: string | null;
+  cached: boolean;
+}

@@ -112,6 +112,8 @@ export interface SbtPublicOffChainDetail {
   imageCid: string;
   tokenUri: string;
   confirmedAt: Date | null;
+  transactionHash: string | null;
+  tokenStatusReason: string | null;
 }
 
 export interface SbtStatusUpdateResult {
@@ -183,7 +185,9 @@ function toOffChainDetail(record: ImpactSbtMetadataRecord | null): SbtPublicOffC
     beneficiaryCount: record.beneficiaryCount,
     imageCid: record.imageCid,
     tokenUri: record.tokenUri,
-    confirmedAt: record.confirmedAt
+    confirmedAt: record.confirmedAt,
+    transactionHash: record.transactionHash ?? null,
+    tokenStatusReason: record.tokenStatusReason ?? null
   };
 }
 
@@ -203,6 +207,8 @@ function sanitizeCachedOffChain(value: unknown): SbtPublicOffChainDetail | null 
   const imageCid = value.imageCid;
   const tokenUri = value.tokenUri;
   const confirmedAtValue = value.confirmedAt;
+  const transactionHashValue = value.transactionHash;
+  const tokenStatusReasonValue = value.tokenStatusReason;
   if (
     typeof projectId !== 'string'
     || typeof milestone !== 'number'
@@ -219,8 +225,30 @@ function sanitizeCachedOffChain(value: unknown): SbtPublicOffChainDetail | null 
     ? null
     : new Date(String(confirmedAtValue));
   if (confirmedAt && Number.isNaN(confirmedAt.getTime())) return null;
+  if (
+    transactionHashValue !== undefined
+    && transactionHashValue !== null
+    && typeof transactionHashValue !== 'string'
+  ) return null;
+  if (
+    tokenStatusReasonValue !== undefined
+    && tokenStatusReasonValue !== null
+    && typeof tokenStatusReasonValue !== 'string'
+  ) return null;
 
-  return { projectId, milestone, beneficiaryCount, imageCid, tokenUri, confirmedAt };
+  const transactionHash = transactionHashValue ?? null;
+  const tokenStatusReason = tokenStatusReasonValue ?? null;
+
+  return {
+    projectId,
+    milestone,
+    beneficiaryCount,
+    imageCid,
+    tokenUri,
+    confirmedAt,
+    transactionHash,
+    tokenStatusReason
+  };
 }
 
 /** Parse và validate cache detail trước khi trả về client hoặc dùng làm nguồn dữ liệu API. */

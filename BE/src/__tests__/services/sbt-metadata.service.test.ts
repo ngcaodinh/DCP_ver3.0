@@ -219,7 +219,9 @@ describe('sbt-metadata.service', () => {
       beneficiaryCount: 150,
       imageCid: 'QmImage',
       tokenUri: 'ipfs://QmMetadata',
-      confirmedAt: new Date('2026-08-01T10:00:00.000Z')
+      confirmedAt: new Date('2026-08-01T10:00:00.000Z'),
+      transactionHash: null,
+      tokenStatusReason: null
     });
     expect(result.offChain).not.toHaveProperty('beneficiaryAddress');
     expect(result.imageGatewayUrl).toBe('https://ipfs.test/ipfs/QmImage');
@@ -256,12 +258,33 @@ describe('sbt-metadata.service', () => {
       beneficiaryCount: 150,
       imageCid: 'QmImage',
       tokenUri: 'ipfs://QmMetadata',
-      confirmedAt: new Date('2026-08-01T10:00:00.000Z')
+      confirmedAt: new Date('2026-08-01T10:00:00.000Z'),
+      transactionHash: '0xtx',
+      tokenStatusReason: null
     });
     expect(result.offChain).not.toHaveProperty('mintRequestId');
     expect(result.offChain).not.toHaveProperty('verificationId');
     expect(result.offChain).not.toHaveProperty('organizationId');
     expect(result.offChain).not.toHaveProperty('beneficiaryAddress');
+  });
+
+  it('returns the public transaction hash and status reason from Mongo', async () => {
+    mocks.findByToken.mockResolvedValue(makeRecord({ tokenStatusReason: 'Minh chứng bị thu hồi.' }));
+
+    const result = await getSbtTokenDetail(1);
+
+    expect(result.offChain).toMatchObject({
+      transactionHash: '0xtx',
+      tokenStatusReason: 'Minh chứng bị thu hồi.'
+    });
+  });
+
+  it('maps explicitly missing lifecycle fields to null', async () => {
+    mocks.findByToken.mockResolvedValue(makeRecord({ transactionHash: null, tokenStatusReason: null }));
+
+    const result = await getSbtTokenDetail(1);
+
+    expect(result.offChain).toMatchObject({ transactionHash: null, tokenStatusReason: null });
   });
 
   it('reads chain and IPFS on cache miss, then writes the detail cache', async () => {

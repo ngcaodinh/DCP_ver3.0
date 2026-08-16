@@ -189,6 +189,20 @@ describe('sbt metadata routes', () => {
     expect(lastResponse?.body.errorCode).toBe('RATE_LIMIT_EXCEEDED');
   });
 
+  it('keeps the server-rendered read quota separate from the public client quota', async () => {
+    const app = createTestApp();
+
+    for (let index = 0; index < 100; index += 1) {
+      await supertest(app)
+        .get('/api/sbt/token/1')
+        .set('X-DCP-SSR-Request', '1');
+    }
+
+    const publicResponse = await supertest(app).get('/api/sbt/project/p-1');
+
+    expect(publicResponse.status).toBe(200);
+  });
+
   it('does not reset the public gallery quota when a client spoofs the left side of X-Forwarded-For', async () => {
     const app = createTestApp();
     let lastResponse;

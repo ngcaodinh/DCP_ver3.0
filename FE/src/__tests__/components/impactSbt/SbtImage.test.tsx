@@ -53,6 +53,14 @@ describe('SbtImage', () => {
     expect(screen.getByTestId('sbt-image')).toHaveAttribute('src', PRIMARY_URL);
   });
 
+  it('shows a loading spinner before image load and hides it after onLoad', () => {
+    renderImage();
+
+    expect(screen.getByTestId('sbt-image-loading')).toBeInTheDocument();
+    fireEvent.load(screen.getByTestId('sbt-image'));
+    expect(screen.queryByTestId('sbt-image-loading')).not.toBeInTheDocument();
+  });
+
   it('moves to the second gateway after an image error and then renders placeholder', () => {
     renderImage();
     fireEvent.error(screen.getByTestId('sbt-image'));
