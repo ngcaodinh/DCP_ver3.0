@@ -22,6 +22,7 @@ import { findGuestDonationRiskByWalletAddress } from '../repositories/guestDonat
 import { updateAuditByTransactionHash } from '../repositories/anonymousDonationAuditRepository';
 import { incrementSessionDonationCounters } from '../repositories/guestWalletSessionRepository';
 import { recordDonationMetrics } from '../utils/donationMetrics';
+import * as eventLoggerService from './event-logger.service';
 
 const logger = getLogger();
 
@@ -463,6 +464,19 @@ export async function handleDonationPostIndex(
     sessionId: guestSession?.sessionId,
     projectId: donationEvent.projectId,
     trustMultiplier
+  });
+  eventLoggerService.logEvent({
+    eventType: 'DONATION_CONFIRMED',
+    projectId: donationEvent.projectId,
+    walletAddress: donationEvent.donorAddress,
+    amount: donationEvent.amount,
+    correlationId: generateDonationCorrelationId(donationEvent.transactionHash),
+    timestamp: donationEvent.timestamp,
+    payload: {
+      transactionHash: donationEvent.transactionHash,
+      blockNumber: donationEvent.blockNumber,
+      isAnonymous: donationEvent.isAnonymous
+    }
   });
   return isGuestDonation;
 }

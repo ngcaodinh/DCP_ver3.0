@@ -1,6 +1,7 @@
 import {
   collectDefaultMetrics,
   Counter,
+  Gauge,
   Histogram,
   Registry
 } from 'prom-client';
@@ -121,6 +122,41 @@ export const donationAmountVnd = new Histogram({
 export const feedbackHardPurgedTotal = new Counter({
   name: 'dcp_feedback_hard_purged_total',
   help: 'Số feedback đã xoá mềm bị xoá cứng sau thời hạn lưu trữ.',
+  registers: [metricsRegistry]
+});
+
+/** Gauge theo dõi số event đang chờ worker ghi vào MongoDB. */
+export const eventLoggerBufferDepth = new Gauge({
+  name: 'dcp_event_logger_buffer_depth',
+  help: 'Số event hiện đang nằm trong Redis buffer của event logger.',
+  registers: [metricsRegistry]
+});
+
+/** Gauge phản ánh subscriber realtime của event logger đã kết nối và subscribe channel hay chưa. */
+export const eventSocketBridgeConnected = new Gauge({
+  name: 'dcp_event_socket_bridge_connected',
+  help: 'Trạng thái kết nối Redis subscriber của event socket bridge (1 = connected).',
+  registers: [metricsRegistry]
+});
+
+/** Counter ghi nhận event bị loại khi Redis buffer đạt giới hạn cứng. */
+export const eventLoggerDroppedTotal = new Counter({
+  name: 'dcp_event_logger_dropped_total',
+  help: 'Tổng số event bị loại do Redis buffer đạt giới hạn.',
+  registers: [metricsRegistry]
+});
+
+/** Histogram đo thời gian worker xử lý một lượt flush event. */
+export const eventLoggerFlushDurationMs = new Histogram({
+  name: 'dcp_event_logger_flush_duration_ms',
+  help: 'Thời gian xử lý một lượt flush event logger tính bằng mili-giây.',
+  registers: [metricsRegistry]
+});
+
+/** Histogram đo độ trễ từ thời điểm event xảy ra tới lúc được ghi vào MongoDB. */
+export const eventLoggerFlushLagMs = new Histogram({
+  name: 'dcp_event_logger_flush_lag_ms',
+  help: 'Độ trễ từ timestamp nghiệp vụ tới createdAt khi flush event.',
   registers: [metricsRegistry]
 });
 

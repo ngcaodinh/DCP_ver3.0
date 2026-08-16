@@ -16,6 +16,7 @@ import { hashBeneficiaryName } from '../utils/feedbackText';
 import { computeRiskScore, shouldFlagFeedback } from './feedbackSpamDetection.service';
 import { invalidatePublicFeedbackStatsCache } from './publicFeedback.service';
 import type { PublicFeedbackSubmitPayload } from '../validators/publicFeedbackSubmitValidator';
+import * as eventLoggerService from './event-logger.service';
 
 const logger = getLogger();
 const TICKET_SLOT_TTL_SECONDS = TICKET_TTL_SECONDS;
@@ -165,6 +166,15 @@ export async function submitSingleFeedback(
 
     await invalidatePublicFeedbackStatsCache(payload.projectId);
     logger.info('Public feedback submitted.', { projectId: payload.projectId, feedbackId, isFlagged });
+    if (isFlagged) {
+      eventLoggerService.logEvent({
+        eventType: 'FEEDBACK_FLAGGED',
+        projectId: payload.projectId,
+        organizationId: project.organizationId,
+        timestamp: new Date(),
+        payload: { feedbackId, riskScore, source: 'public' }
+      });
+    }
 
     return { feedbackId, isFlagged };
   } catch (error) {

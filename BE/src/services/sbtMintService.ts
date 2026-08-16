@@ -39,6 +39,7 @@ import { getLogger } from '../config/logger';
 import { ApplicationError } from '../utils/applicationError';
 import { extractErrorMessage } from '../utils/extractErrorMessage';
 import { sanitizeProviderError } from '../utils/sanitizeProviderError';
+import * as eventLoggerService from './event-logger.service';
 
 // Re-export để giữ backward compatibility cho tests và các module đang import
 export { extractErrorMessage };
@@ -458,9 +459,25 @@ export async function executeSbtMint(
     blockNumber,
     imageCid: record.imageCid,
     tokenUri: record.tokenUri,
+    milestone: record.milestone,
+    beneficiaryCount: record.beneficiaryCount,
     mintedAt: confirmedAt
   };
   sbtEvents.emit('sbt.minted', eventPayload);
+  eventLoggerService.logEvent({
+    eventType: 'SBT_MINTED',
+    projectId: eventPayload.projectId,
+    organizationId: eventPayload.organizationId,
+    walletAddress: eventPayload.beneficiaryAddress,
+    timestamp: eventPayload.mintedAt,
+    payload: {
+      tokenId: eventPayload.onChainTokenId,
+      milestone: eventPayload.milestone,
+      beneficiaryCount: eventPayload.beneficiaryCount,
+      sbtId: eventPayload.sbtId,
+      transactionHash: eventPayload.transactionHash
+    }
+  });
 
   // Fire-and-forget: kiểm tra DLQ sau khi mint confirm mà không block response.
   // Nếu DLQ check fail, cron job 15 phút sẽ cover.
@@ -577,6 +594,14 @@ export async function handleSbtMintFailure(
     errorMessage: safeErrorMessage,
     failedAt: new Date()
   } satisfies SbtMintFailedEventPayload);
+  eventLoggerService.logEvent({
+    eventType: 'SBT_MINT_FAILED',
+    projectId: record.projectId,
+    organizationId: record.organizationId,
+    walletAddress: record.beneficiaryAddress,
+    timestamp: new Date(),
+    payload: { sbtId: record.sbtId, mintRequestId, attemptNumber, errorMessage: safeErrorMessage }
+  });
 
   // Nếu đã hết retry → DLQ
   if (attemptNumber >= SBT_MINT_MAX_ATTEMPTS) {
@@ -612,6 +637,19 @@ export async function handleSbtMintFailure(
       lastErrorMessage: safeErrorMessage,
       dlqAt
     } satisfies SbtMintDlqEventPayload);
+    eventLoggerService.logEvent({
+      eventType: 'SBT_MINT_DLQ',
+      projectId: record.projectId,
+      organizationId: record.organizationId,
+      walletAddress: record.beneficiaryAddress,
+      timestamp: dlqAt,
+      payload: {
+        sbtId: record.sbtId,
+        mintRequestId,
+        attemptNumber,
+        lastErrorMessage: safeErrorMessage
+      }
+    });
 
     logger.error('SBT mint đã hết retry — chuyển DLQ.', {
       mintRequestId,

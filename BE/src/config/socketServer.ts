@@ -8,6 +8,7 @@ import type { OverrideRequestedEventPayload, OverrideExecutedEventPayload } from
 import { findPendingManualReviewQueues } from '../models/manualReviewQueueModel';
 import { findDisbursementsByRequestIds } from '../models/disbursementModel';
 import { findUserById } from '../models/authModel';
+import { findProjectByProjectId } from '../models/projectModel';
 import { getRedisClientIfReady } from './redis';
 
 const logger = getLogger();
@@ -16,6 +17,35 @@ type JwtClaims = { userId: string; role: string; authVersion?: number };
 
 const AUTH_VERSION_CACHE_KEY_PREFIX = 'auth_version:';
 const AUTH_VERSION_CACHE_TTL_S = 10; // TTL ngắn để phát hiện revoke nhanh
+const PROJECT_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/u;
+const MAX_EVENT_PROJECT_ROOMS_PER_SOCKET = 20;
+const EVENT_SUBSCRIBE_RATE_LIMIT_WINDOW_MS = 60_000;
+const MAX_EVENT_SUBSCRIBE_ATTEMPTS_PER_WINDOW = 30;
+
+/** Tạo bộ giới hạn số lần thử subscribe event độc lập với số room đã join thành công. */
+export function createEventSubscribeRateLimiter(): () => boolean {
+  let windowStartedAt = Date.now();
+  let attemptCount = 0;
+
+  return (): boolean => {
+    const now = Date.now();
+    if (now - windowStartedAt >= EVENT_SUBSCRIBE_RATE_LIMIT_WINDOW_MS) {
+      windowStartedAt = now;
+      attemptCount = 0;
+    }
+    if (attemptCount >= MAX_EVENT_SUBSCRIBE_ATTEMPTS_PER_WINDOW) return false;
+    attemptCount += 1;
+    return true;
+  };
+}
+
+/** Kiểm tra quota room event theo cả room đã join và room đang chờ authorization bất đồng bộ. */
+export function hasAvailableEventProjectRoomSlot(
+  subscribedRooms: ReadonlySet<string>,
+  pendingRooms: ReadonlySet<string>
+): boolean {
+  return subscribedRooms.size + pendingRooms.size < MAX_EVENT_PROJECT_ROOMS_PER_SOCKET;
+}
 
 /**
  * Lấy authVersion hiện tại của user từ Redis cache hoặc DB.
@@ -137,6 +167,9 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
   io.on('connection', (socket) => {
     const userId = socket.data.userId as string;
     const role = socket.data.role as string;
+    const subscribedEventRooms = new Set<string>();
+    const pendingEventRooms = new Set<string>();
+    const eventSubscribeRateLimiter = createEventSubscribeRateLimiter();
 
     // Room isolation theo role:
     // - admin: join 'admin' (transfer alerts) + 'commissioners' (override alerts) + 'user:${userId}'
@@ -153,6 +186,63 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
       void socket.join('commissioners');
     }
     void socket.join(`user:${userId}`);
+
+    // Room event chứa amount và wallet đã che, nên phải kiểm tra quyền trước khi join.
+    socket.on('events:subscribe', (requestedProjectId: unknown) => {
+      void (async () => {
+        if (!eventSubscribeRateLimiter()) {
+          logger.warn('Socket bị từ chối subscribe event vì vượt rate limit.', {
+            context: { userId }
+          });
+          socket.emit('events:subscribe:denied', { projectId: requestedProjectId });
+          return;
+        }
+
+        const projectId = typeof requestedProjectId === 'string' ? requestedProjectId : '';
+        if (!PROJECT_ID_PATTERN.test(projectId)) {
+          socket.emit('events:subscribe:denied', { projectId: requestedProjectId });
+          return;
+        }
+
+        const room = `events:${projectId}`;
+        if (subscribedEventRooms.has(room) || pendingEventRooms.has(room)) return;
+        if (!hasAvailableEventProjectRoomSlot(subscribedEventRooms, pendingEventRooms)) {
+          logger.warn('Socket bị từ chối subscribe vì vượt giới hạn room event.', {
+            context: { userId, roomLimit: MAX_EVENT_PROJECT_ROOMS_PER_SOCKET }
+          });
+          socket.emit('events:subscribe:denied', { projectId });
+          return;
+        }
+
+        pendingEventRooms.add(room);
+        try {
+          const allowed = await canSubscribeToProjectEvents(projectId, role, userId);
+          if (!allowed) {
+            socket.emit('events:subscribe:denied', { projectId });
+            return;
+          }
+          subscribedEventRooms.add(room);
+          await socket.join(room);
+          socket.emit('events:subscribe:ok', { projectId });
+        } catch (error) {
+          logger.warn('Socket subscribe project event thất bại.', {
+            context: { userId, errorName: error instanceof Error ? error.name : 'UNKNOWN_ERROR' }
+          });
+          socket.emit('events:subscribe:denied', { projectId });
+        } finally {
+          pendingEventRooms.delete(room);
+        }
+      })();
+    });
+
+    socket.on('events:unsubscribe', (requestedProjectId: unknown) => {
+      const projectId = typeof requestedProjectId === 'string' ? requestedProjectId : '';
+      if (!PROJECT_ID_PATTERN.test(projectId)) return;
+      const room = `events:${projectId}`;
+      if (!subscribedEventRooms.delete(room)) return;
+      void socket.leave(room);
+    });
+
     logger.info('User connected via Socket.io.', {
       userId,
       context: { role }
@@ -272,4 +362,17 @@ function startManualReviewPollingBridge(): void {
       }
     })();
   }, 15_000);
+}
+
+/** Kiểm tra quyền join room event theo role và organization sở hữu project. */
+export async function canSubscribeToProjectEvents(
+  projectId: string,
+  role: string,
+  userId: string
+): Promise<boolean> {
+  if (role === 'admin' || role === 'regulatory') return true;
+  if (role !== 'organizations') return false;
+
+  const project = await findProjectByProjectId(projectId);
+  return project?.organizationId === userId;
 }

@@ -24,6 +24,7 @@ import {
   type OracleVerifiedEventPayload,
   type OverrideRequestedEventPayload
 } from '../events/oracleEvents';
+import * as eventLoggerService from './event-logger.service';
 
 const logger = getLogger();
 
@@ -262,6 +263,13 @@ async function handleValid(
     verificationId, projectId, organizationId, evidenceCid,
     isValid: true, distance: distanceMeters, reason: null
   } satisfies OracleVerifiedEventPayload);
+  eventLoggerService.logEvent({
+    eventType: 'ORACLE_VERIFIED',
+    projectId,
+    organizationId,
+    timestamp: new Date(),
+    payload: { verificationId, evidenceCid, isValid: true, distance: distanceMeters, reason: null }
+  });
 
   return { isValid: true, distance: distanceMeters, reason: null, verificationId, overrideRequestId: null };
 }
@@ -531,10 +539,30 @@ function emitVerifiedAndOverride(
     verificationId, projectId, organizationId, evidenceCid,
     isValid, distance, reason: verifiedReason
   } satisfies OracleVerifiedEventPayload);
+  eventLoggerService.logEvent({
+    eventType: 'ORACLE_VERIFIED',
+    projectId,
+    organizationId,
+    timestamp: new Date(),
+    payload: { verificationId, evidenceCid, isValid, distance, reason: verifiedReason }
+  });
 
   oracleEvents.emit('override.requested', {
     overrideRequestId, projectId, organizationId, evidenceCid,
     gpsFromImage, gpsFromProject, distance: distanceMeters,
     reason: overrideReason, commissionerCount
   } satisfies OverrideRequestedEventPayload);
+  eventLoggerService.logEvent({
+    eventType: 'OVERRIDE_REQUESTED',
+    projectId,
+    organizationId,
+    timestamp: new Date(),
+    payload: {
+      overrideRequestId,
+      evidenceCid,
+      distance: distanceMeters,
+      reason: overrideReason,
+      commissionerCount
+    }
+  });
 }

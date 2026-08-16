@@ -12,6 +12,7 @@ import {
   createWebhookAuditId,
   type WebhookAuditAction
 } from '../models/webhookAuditLogModel';
+import * as eventLoggerService from './event-logger.service';
 /**
  * Cac hang so trang thai dung trong webhook handler.
  * Dung thay cho magic strings de tranh loi type-safe khi disbursementService thay doi enum.
@@ -216,6 +217,21 @@ async function emitDisbursementNotification(
     // Xac dinh loai event dua tren trang thai
     if (disbursement.status === DISBURSEMENT_STATUS_COMPLETED && disbursement.payosTransferStatus === PAYOS_TRANSFER_STATUS_SUCCESS) {
       webhookEvents.emit('DISBURSEMENT_TRANSFERRED', eventPayload);
+      eventLoggerService.logEvent({
+        eventType: 'DISBURSEMENT_TRANSFERRED',
+        projectId: disbursement.projectId,
+        organizationId: disbursement.organizationId,
+        amount: disbursement.amount,
+        correlationId: disbursement.requestId,
+        timestamp: new Date(),
+        payload: {
+          requestId: disbursement.requestId,
+          status: disbursement.status,
+          payosTransferStatus: disbursement.payosTransferStatus,
+          payosTransferId: disbursement.payosTransferId,
+          transactionHash: eventPayload.transactionHash
+        }
+      });
       logger.info('Da emit DISBURSEMENT_TRANSFERRED event. requestId=${disbursement.requestId}', {
         requestId: disbursement.requestId
       });
@@ -224,6 +240,21 @@ async function emitDisbursementNotification(
       || disbursement.payosTransferStatus === PAYOS_TRANSFER_STATUS_FAILED
     ) {
       webhookEvents.emit('DISBURSEMENT_TRANSFER_FAILED', eventPayload);
+      eventLoggerService.logEvent({
+        eventType: 'DISBURSEMENT_TRANSFER_FAILED',
+        projectId: disbursement.projectId,
+        organizationId: disbursement.organizationId,
+        amount: disbursement.amount,
+        correlationId: disbursement.requestId,
+        timestamp: new Date(),
+        payload: {
+          requestId: disbursement.requestId,
+          status: disbursement.status,
+          payosTransferStatus: disbursement.payosTransferStatus,
+          payosTransferId: disbursement.payosTransferId,
+          transactionHash: eventPayload.transactionHash
+        }
+      });
       logger.info('Da emit DISBURSEMENT_TRANSFER_FAILED event. requestId=${disbursement.requestId}', {
         requestId: disbursement.requestId
       });

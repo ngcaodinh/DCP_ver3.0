@@ -28,7 +28,8 @@ export type SbtMintedEventPayload = {
   blockNumber: number;
   imageCid: string;
   tokenUri: string;
-  milestone?: number;
+  milestone: number;
+  beneficiaryCount: number;
   mintedAt: Date;
 };
 

@@ -53,6 +53,7 @@ describe('sbtEventBridge.service', () => {
         imageCid: 'QmTest',
         tokenUri: 'ipfs://QmTest',
         milestone: 0,
+        beneficiaryCount: 1,
         mintedAt: new Date('2025-01-01T00:00:00Z')
       });
 
@@ -179,7 +180,9 @@ describe('sbtEventBridge.service', () => {
           transactionHash: '0xorphan',
           blockNumber: 0,
           imageCid: 'QmOrphan',
-          tokenUri: 'ipfs://QmOrphan',
+        tokenUri: 'ipfs://QmOrphan',
+          milestone: 0,
+          beneficiaryCount: 1,
           mintedAt: new Date()
         });
       }).not.toThrow();

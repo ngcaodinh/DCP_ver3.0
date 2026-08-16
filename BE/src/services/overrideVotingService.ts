@@ -20,6 +20,7 @@ import { createUserNotification } from './notificationService';
 import { oracleEvents, type OverrideExecutedEventPayload } from '../events/oracleEvents';
 import { getRedisClientIfReady } from '../config/redis';
 import type { ClientSession } from 'mongoose';
+import * as eventLoggerService from './event-logger.service';
 
 const logger = getLogger();
 
@@ -349,6 +350,19 @@ async function publishResolvedOverrideOutcome(
       executedAt: new Date(),
       status: 'REJECTED'
     } satisfies OverrideExecutedEventPayload);
+    eventLoggerService.logEvent({
+      eventType: 'OVERRIDE_EXECUTED',
+      projectId: resolved.projectId,
+      organizationId: resolved.organizationId,
+      timestamp: new Date(),
+      payload: {
+        overrideRequestId: resolved.overrideRequestId,
+        evidenceCid: resolved.evidenceCid,
+        disbursementRequestId: resolved.disbursementRequestId,
+        totalVoters: resolved.commissionerSnapshot.length,
+        status: 'REJECTED'
+      }
+    });
     logger.info('Override request bị REJECTED.', {
       overrideRequestId: resolved.overrideRequestId,
       projectId: resolved.projectId
@@ -375,6 +389,19 @@ async function publishResolvedOverrideOutcome(
     executedAt: new Date(),
     status: 'APPROVED'
   } satisfies OverrideExecutedEventPayload);
+  eventLoggerService.logEvent({
+    eventType: 'OVERRIDE_EXECUTED',
+    projectId: resolved.projectId,
+    organizationId: resolved.organizationId,
+    timestamp: new Date(),
+    payload: {
+      overrideRequestId: resolved.overrideRequestId,
+      evidenceCid: resolved.evidenceCid,
+      disbursementRequestId: resolved.disbursementRequestId,
+      totalVoters: resolved.commissionerSnapshot.length,
+      status: 'APPROVED'
+    }
+  });
   await notifyOrganizationOverrideResult(resolved, true);
   logger.info('Override request APPROVED — tất cả commissioner đã vote.', {
     overrideRequestId: resolved.overrideRequestId,

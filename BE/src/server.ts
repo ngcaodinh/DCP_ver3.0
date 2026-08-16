@@ -28,6 +28,9 @@ import { startNotificationWorker, stopNotificationWorker } from './workers/notif
 import { startAdminAuditArchiveWorker, stopAdminAuditArchiveWorker } from './workers/adminAuditArchiveWorker';
 import { startAdminActionOutboxWorker, stopAdminActionOutboxWorker } from './workers/adminActionOutboxWorker';
 import { startFeedbackPurgeWorker, stopFeedbackPurgeWorker } from './workers/feedbackPurgeWorker';
+import { startEventLoggerWorker, stopEventLoggerWorker } from './workers/event-logger.worker';
+import { startEventRetentionWorker, stopEventRetentionWorker } from './workers/event-retention.worker';
+import { initializeEventSocketBridge, shutdownEventSocketBridge } from './services/eventSocketBridge.service';
 
 const logger = getLogger();
 
@@ -74,6 +77,8 @@ function startBackgroundWorkers(): void {
   startAdminAuditArchiveWorker();
   startAdminActionOutboxWorker();
   startFeedbackPurgeWorker();
+  startEventLoggerWorker();
+  startEventRetentionWorker();
 }
 
 /**
@@ -100,6 +105,8 @@ async function startServer(): Promise<void> {
 
   // Khởi tạo Socket.io sau khi HTTP server sẵn sàng
   initSocketServer(httpServer);
+  // Event logger bridge phải chạy ở cả API và worker process sau khi Socket.io sẵn sàng.
+  initializeEventSocketBridge();
 
   // Graceful shutdown: đóng Socket.io và dừng workers trước khi process tắt
   // Graceful shutdown: đóng Socket.io và dừng workers trước khi process tắt
@@ -107,6 +114,7 @@ async function startServer(): Promise<void> {
     logger.info(`Nhận signal ${signal}, đang shutdown...`);
     try {
       shutdownSocketServer();
+      await shutdownEventSocketBridge();
       stopManualReviewEscalationWorker();
       stopOverrideExpiryWorker();
       await stopOracleWorker();
@@ -117,6 +125,8 @@ async function startServer(): Promise<void> {
       stopAdminAuditArchiveWorker();
       stopAdminActionOutboxWorker();
       stopFeedbackPurgeWorker();
+      await stopEventLoggerWorker();
+      stopEventRetentionWorker();
     } catch (error) {
       logger.error('Lỗi khi shutdown workers.', {
         errorMessage: (error as Error).message

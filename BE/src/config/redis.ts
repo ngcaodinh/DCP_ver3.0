@@ -71,3 +71,16 @@ export function getRedisClientIfReady() {
 
   return redisClient;
 }
+
+/** Đăng ký callback dùng chung cho lúc Redis singleton kết nối hoặc sẵn sàng lại sau reconnect. */
+export function onRedisReady(listener: () => void): () => void {
+  const redisClient = getRedisClientSingleton();
+  const handleReady = (): void => listener();
+  redisClient.on('connect', handleReady);
+  redisClient.on('ready', handleReady);
+
+  return (): void => {
+    redisClient.removeListener('connect', handleReady);
+    redisClient.removeListener('ready', handleReady);
+  };
+}

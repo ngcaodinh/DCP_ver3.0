@@ -13,8 +13,31 @@ import {
 import { findDonationsByDonorAddress, type DonationRecord } from '../models/donationModel';
 import { recalculateRankingSnapshot } from './rankingService';
 import { invalidateRankingCache } from './rankingCacheService';
+import * as eventLoggerService from './event-logger.service';
 
 const logger = getLogger();
+
+/** Ghi SYBIL_FLAGGED bất đồng bộ với snapshot risk score, không chặn luồng toggle Sybil. */
+function logSybilFlaggedEvent(user: AuthUser, timestamp: Date, flagReason: string): void {
+  const emitEvent = (riskScore: number | null): void => {
+    eventLoggerService.logEvent({
+      eventType: 'SYBIL_FLAGGED',
+      projectId: null,
+      walletAddress: user.walletAddress,
+      timestamp,
+      payload: { riskScore, flagReason }
+    });
+  };
+
+  void findDonationsByDonorAddress(user.walletAddress)
+    .then(donationList => emitEvent(calculateSybilRiskScore(user, donationList)))
+    .catch(error => {
+      logger.warn('Không lấy được donation history khi ghi SYBIL_FLAGGED; dùng null.', {
+        context: { errorName: error instanceof Error ? error.name : 'UNKNOWN_ERROR' }
+      });
+      emitEvent(null);
+    });
+}
 
 /**
  * Kiểu dữ liệu payload yêu cầu toggle trạng thái Sybil.
@@ -299,6 +322,16 @@ function calculateRiskFactors(
   return result;
 }
 
+/** Cộng điểm các yếu tố risk đã tính để dùng chung cho dashboard và event log. */
+function sumSybilRiskFactors(riskFactors: RiskFactorDetail[]): number {
+  return riskFactors.reduce((sum, factor) => sum + factor.score, 0);
+}
+
+/** Tính snapshot risk score Sybil từ các yếu tố donation pattern dùng cho dashboard và event log. */
+export function calculateSybilRiskScore(user: AuthUser, donationList: DonationRecord[]): number {
+  return sumSybilRiskFactors(calculateRiskFactors(user, donationList));
+}
+
 /**
  * Chuyển đổi AuthUser thành SybilUserRecord cho dashboard.
  * Mục đích: map dữ liệu từ MongoDB sang format mà frontend SybilManagementPanel mong đợi.
@@ -308,7 +341,7 @@ async function buildSybilUserRecord(user: AuthUser): Promise<SybilUserRecord> {
 
   // Tính risk score tổng
   const riskFactors = calculateRiskFactors(user, donationList);
-  const totalRiskScore = riskFactors.reduce((sum, factor) => sum + factor.score, 0);
+  const totalRiskScore = sumSybilRiskFactors(riskFactors);
 
   // Tổng donation amount
   const totalDonationAmount = donationList.reduce((sum, d) => sum + d.amount, 0);
@@ -581,7 +614,7 @@ export async function getSybilUserDetail(userId: string): Promise<SybilUserDetai
 
   const donationList = await findDonationsByDonorAddress(user.walletAddress);
   const riskFactors = calculateRiskFactors(user, donationList);
-  const totalRiskScore = riskFactors.reduce((sum, factor) => sum + factor.score, 0);
+  const totalRiskScore = sumSybilRiskFactors(riskFactors);
   const totalDonationAmount = donationList.reduce((sum, d) => sum + d.amount, 0);
 
   const ipAddressSet = new Set<string>();
@@ -697,6 +730,10 @@ export async function toggleSybilStatus(payload: SybilTogglePayload): Promise<Sy
     createdAt: new Date()
   };
   await addSybilAuditLog(auditLogEntry);
+
+  if (action === 'mark') {
+    logSybilFlaggedEvent(user, auditLogEntry.createdAt, reason.trim());
+  }
 
   // Ghi log thành công
   logger.info('Sybil status changed.', {

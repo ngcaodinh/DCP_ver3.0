@@ -373,7 +373,9 @@ describe('sbtMintService - executeSbtMint', () => {
     expect(invalidateSbtGalleryTotalCache).toHaveBeenCalledWith(pendingRecord.projectId);
     expect(sbtEvents.emit).toHaveBeenCalledWith('sbt.minted', expect.objectContaining({
       sbtId: 'SBT-pending',
-      mintRequestId: 'SBT-MINT-pending'
+      mintRequestId: 'SBT-MINT-pending',
+      milestone: pendingRecord.milestone,
+      beneficiaryCount: pendingRecord.beneficiaryCount
     }));
   });
 
