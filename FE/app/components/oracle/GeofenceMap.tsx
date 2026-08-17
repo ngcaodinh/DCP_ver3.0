@@ -18,15 +18,6 @@ import L from 'leaflet';
 import { MapContainer, TileLayer, Polygon, Circle, CircleMarker, Popup, useMap } from 'react-leaflet';
 import { useGeofence } from '@/app/hooks/useGeofence';
 
-// Sửa lỗi icon Leaflet bị broken khi bundle qua webpack/Next.js
-// (Leaflet tìm icon theo path tương đối, webpack đổi path → 404)
-delete (L.Icon.Default.prototype as unknown as Record<string, unknown>)._getIconUrl;
-L.Icon.Default.mergeOptions({
-  iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
-  iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
-  shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
-});
-
 // =============================================================================
 // TYPES
 // =============================================================================
@@ -374,7 +365,7 @@ export default function GeofenceMap({ projectId, snapshot, markers = EMPTY_GEOFE
         {/* Fit bounds về polygon + marker có tọa độ sau khi map mount */}
         <BoundsFitter points={boundsPoints} pointsKey={boundsPointsKey} />
 
-        {/* Polygon — vùng ranh giới (chỉ để hiển thị, verify dùng circle radius) */}
+        {/* Polygon — ranh giới verdict của Oracle; circle chỉ là reference Haversine. */}
         {polygonPositions.length >= 3 && (
           <Polygon
             positions={polygonPositions}

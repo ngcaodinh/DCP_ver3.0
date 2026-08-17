@@ -231,8 +231,8 @@ describe('submitOverrideVote', () => {
     }));
   });
 
-  // Kiá»ƒm chá»©ng race final resolution khÃ´ng ghi audit outcome sai khi conditional update khÃ´ng match.
-  it('khÃ´ng tráº£ RESOLVED_REJECTED vÃ  khÃ´ng ghi audit khi final resolve fail', async () => {
+  // Kiểm chứng race final resolution không ghi audit outcome sai khi conditional update không match.
+  it('không trả RESOLVED_REJECTED và không ghi audit khi final resolve fail', async () => {
     const initialRequest = buildPendingRequest();
     const requestAfterReject = buildPendingRequest({
       votes: [

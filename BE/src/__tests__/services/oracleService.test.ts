@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { extractExifGps, haversineDistance, verifyEvidenceImage } from '../../services/oracleService';
+import { extractExifGps, haversineDistance, isPointInsidePolygon, verifyEvidenceImage } from '../../services/oracleService';
 import type { GpsCoordinate } from '../../models/projectGeofenceModel';
 
 // Mock DB models để test không cần MongoDB
@@ -309,6 +309,23 @@ describe('verifyEvidenceImage', () => {
 
   // --- out of radius ---
 
+  it('dùng polygon làm verdict dù khoảng cách Haversine vượt radius tham chiếu', async () => {
+    vi.mocked(findGeofenceByProjectId).mockResolvedValue({
+      ...mockGeofenceWith500m,
+      radiusMeters: 100
+    });
+    vi.mocked(mockExifCreate).mockReturnValue({
+      enableSimpleValues: vi.fn().mockReturnThis(),
+      parse: vi.fn().mockReturnValue({
+        // Điểm vẫn nằm trong triangle nhưng cách centroid khoảng 250m > 100m.
+        tags: { GPSLatitude: 10.779, GPSLongitude: 106.703, GPSLatitudeRef: 'N', GPSLongitudeRef: 'E' }
+      })
+    } as unknown as ReturnType<typeof mockExifCreate>);
+
+    const result = await verifyEvidenceImage(Buffer.alloc(64), mockProjectId, mockOrgId, mockCid);
+    expect(result.isValid).toBe(true);
+  });
+
   it('trả về isValid=false khi GPS ngoài phạm vi geofence', async () => {
     vi.mocked(findGeofenceByProjectId).mockResolvedValue({
       ...mockGeofenceWith500m,
@@ -458,13 +475,13 @@ describe('verifyEvidenceImage', () => {
 
   // --- radius clamping ---
 
-  it('cap radiusMeters về 2000m khi DB có giá trị lớn hơn', async () => {
+  it('cap radiusMeters về 2000m trong snapshot khi DB có giá trị lớn hơn', async () => {
     vi.mocked(findGeofenceByProjectId).mockResolvedValue({
       ...mockGeofenceWith500m,
       centroid: { lat: 10.775, lng: 106.703 },
       radiusMeters: 9999 // vượt cap
     });
-    // GPS cách centroid ~1800m — trong 2000m (cap) nhưng ngoài nếu không cap
+    // Điểm này nằm ngoài polygon; radius chỉ còn là telemetry/display reference.
     vi.mocked(mockExifCreate).mockReturnValue({
       enableSimpleValues: vi.fn().mockReturnThis(),
       parse: vi.fn().mockReturnValue({
@@ -473,7 +490,9 @@ describe('verifyEvidenceImage', () => {
     } as unknown as ReturnType<typeof mockExifCreate>);
 
     const result = await verifyEvidenceImage(Buffer.alloc(64), mockProjectId, mockOrgId, mockCid);
-    expect(result.isValid).toBe(true); // 1800m < 2000m cap → VALID
+    expect(result.isValid).toBe(false);
+    const verificationCall = vi.mocked(createOracleVerificationResult).mock.calls[0]?.[0];
+    expect(verificationCall?.geofenceSnapshot?.radiusMeters).toBe(2000);
   });
 
   it('floor radiusMeters lên 100m khi DB có giá trị nhỏ hơn', async () => {
@@ -525,5 +544,17 @@ describe('verifyEvidenceImage', () => {
     const edge1100m: GpsCoordinate = { lat: 10.7868, lng: 106.7009 };
     expect(haversineDistance(center, edge900m)).toBeLessThan(1000);
     expect(haversineDistance(center, edge1100m)).toBeGreaterThan(1000);
+  });
+
+  it('point-in-polygon chấp nhận điểm trong, từ chối điểm ngoài và chấp nhận điểm trên biên', () => {
+    const polygon: GpsCoordinate[] = [
+      { lat: 0, lng: 0 },
+      { lat: 1, lng: 0 },
+      { lat: 1, lng: 1 },
+      { lat: 0, lng: 1 }
+    ];
+    expect(isPointInsidePolygon({ lat: 0.5, lng: 0.5 }, polygon)).toBe(true);
+    expect(isPointInsidePolygon({ lat: 2, lng: 0.5 }, polygon)).toBe(false);
+    expect(isPointInsidePolygon({ lat: 0, lng: 0.5 }, polygon)).toBe(true);
   });
 });

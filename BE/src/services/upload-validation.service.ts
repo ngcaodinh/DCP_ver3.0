@@ -33,14 +33,12 @@ const SIGNATURE_MAP: Array<{
       { bytes: '89504E470D0A1A0A', mimeType: 'image/png', extension: 'png' },
       // GIF
       { bytes: '47494638', mimeType: 'image/gif', extension: 'gif' },
-      // WebP (RIFF container)
-      { bytes: '52494646', mimeType: 'image/webp', extension: 'webp' },
       // PDF
       { bytes: '25504446', mimeType: 'application/pdf', extension: 'pdf' },
     ]
   },
   {
-    offset: 4,
+    offset: 8,
     signatures: [
       // WebP (WEBP signature inside RIFF container)
       { bytes: '57454250', mimeType: 'image/webp', extension: 'webp' },
@@ -111,7 +109,12 @@ export function detectFileTypeFromBuffer(buffer: Buffer): DetectedFileType {
     for (const sig of entry.signatures) {
       if (!sig.bytes) continue;
 
-      if (hexAtOffset.startsWith(sig.bytes)) {
+      const isWebpSignature = sig.mimeType === 'image/webp';
+      const hasRiffContainer = isWebpSignature
+        ? bufferToHex(buffer, 0, 4) === '52494646'
+        : true;
+
+      if (hasRiffContainer && hexAtOffset.startsWith(sig.bytes)) {
         return {
           mimeType: sig.mimeType,
           extension: sig.extension,
@@ -142,6 +145,22 @@ export function detectFileTypeFromBuffer(buffer: Buffer): DetectedFileType {
   }
 
   const isTextBased = printableCount === firstBytes.length;
+
+  // JSON cần parse toàn bộ buffer vì chỉ kiểm tra prefix sẽ cho phép CSV/text
+  // đi qua endpoint JSON. Giữ fallback CSV cho text hợp lệ còn lại.
+  const textContent = buffer.toString('utf8').replace(/^\uFEFF/, '').trim();
+  if (textContent.startsWith('{') || textContent.startsWith('[')) {
+    try {
+      JSON.parse(textContent);
+      return {
+        mimeType: 'application/json',
+        extension: 'json',
+        isValid: ALLOWED_MIME_TYPES.includes('application/json')
+      };
+    } catch {
+      // Không phải JSON hợp lệ — tiếp tục phân loại text thành CSV heuristic.
+    }
+  }
 
   if (isTextBased || startsWithBomUtf8) {
     return {

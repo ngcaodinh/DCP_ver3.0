@@ -110,6 +110,7 @@ let io: SocketIOServer | null = null;
 // Theo dõi các queueId đã biết để polling recovery không emit trùng.
 let knownManualReviewQueueIds = new Set<string>();
 let pollingIntervalId: ReturnType<typeof setInterval> | null = null;
+const SOCKET_AUTH_REVALIDATION_INTERVAL_MS = 30_000;
 
 // Lưu reference listener để có thể removeListener khi hot-reload tránh tích lũy
 let _overrideRequestedListener: ((p: OverrideRequestedEventPayload) => void) | null = null;
@@ -148,13 +149,18 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
       
       // Lấy authVersion hiện tại từ Redis cache (TTL 10s) hoặc DB
       const currentAuthVersion = await getCachedAuthVersion(userId);
-      
-      if (currentAuthVersion === null) {
+      const currentUser = await findUserById(userId);
+
+      if (currentAuthVersion === null || !currentUser) {
         // User không tồn tại trong DB → từ chối
         return next(new Error('UNAUTHORIZED'));
       }
       
-      if (tokenAuthVersion < currentAuthVersion) {
+      if (
+        currentUser.accountStatus !== 'ACTIVE'
+        || tokenAuthVersion !== currentUser.authVersion
+        || currentAuthVersion !== currentUser.authVersion
+      ) {
         // Token đã bị revoke (authVersion trong DB đã tăng lên) → từ chối
         logger.warn('Socket connection từ chối: JWT authVersion lỗi thời.', {
           userId,
@@ -165,7 +171,9 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
       }
       
       socket.data.userId = userId;
-      socket.data.role = payload.role;
+      // Không dùng role trong JWT để vào room; role hiện tại phải lấy từ DB.
+      socket.data.role = currentUser.role;
+      socket.data.authVersion = tokenAuthVersion;
       next();
     } catch (err) {
       logger.warn('Socket JWT verification thất bại.', { errorMessage: String(err) });
@@ -179,6 +187,33 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
     const subscribedEventRooms = new Set<string>();
     const pendingEventRooms = new Set<string>();
     const eventSubscribeRateLimiter = createEventSubscribeRateLimiter(userId);
+
+    // Handshake chỉ bảo vệ thời điểm connect. Revalidate định kỳ để session đang
+    // mở cũng bị ngắt khi role/accountStatus/authVersion thay đổi trong DB.
+    const socketAuthRevalidationTimer = setInterval(() => {
+      void (async () => {
+        try {
+          const currentUser = await findUserById(userId);
+          const currentAuthVersion = await getCachedAuthVersion(userId);
+          const tokenAuthVersion = socket.data.authVersion as number;
+          const isSessionStillValid = currentUser?.accountStatus === 'ACTIVE'
+            && currentUser.role === socket.data.role
+            && currentUser.authVersion === tokenAuthVersion
+            && currentAuthVersion === tokenAuthVersion;
+
+          if (!isSessionStillValid) {
+            logger.warn('Socket bị ngắt do quyền hoặc phiên đã thay đổi.', { userId });
+            socket.disconnect(true);
+          }
+        } catch (error) {
+          logger.warn('Không thể revalidate socket session.', {
+            userId,
+            errorMessage: error instanceof Error ? error.message : String(error)
+          });
+        }
+      })();
+    }, SOCKET_AUTH_REVALIDATION_INTERVAL_MS);
+    socketAuthRevalidationTimer.unref?.();
 
     // Room isolation theo role:
     // - admin: join 'admin' (transfer alerts) + 'commissioners' (override alerts) + 'user:${userId}'
@@ -257,6 +292,7 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
       context: { role }
     });
     socket.on('disconnect', (reason) => {
+      clearInterval(socketAuthRevalidationTimer);
       logger.info('User disconnected from Socket.io.', {
         context: { reason, userId }
       });

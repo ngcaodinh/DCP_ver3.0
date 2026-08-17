@@ -14,8 +14,8 @@ export type GpsCoordinate = {
 
 /**
  * Ranh giới địa lý của dự án từ thiện.
- * Oracle dùng radiusMeters (Haversine) để kiểm tra ảnh minh chứng có chụp đúng địa điểm không.
- * polygon là danh sách điểm tạo thành vùng — centroid của polygon được dùng làm điểm tham chiếu Haversine.
+ * Oracle dùng polygon làm ranh giới verdict; radiusMeters/Haversine vẫn được
+ * lưu để telemetry, review và hiển thị khoảng cách tham chiếu.
  */
 export type ProjectGeofenceRecord = {
   projectId: string;

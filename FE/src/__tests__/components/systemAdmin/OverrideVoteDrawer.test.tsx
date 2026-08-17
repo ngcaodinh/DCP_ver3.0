@@ -725,6 +725,47 @@ describe('OverrideVoteDrawer', () => {
     });
   });
 
+  it('sau khi vote thành công, detail dùng lại dữ liệu mới và hiển thị badge đã vote', async () => {
+    const updatedItem = {
+      ...baseMockItem,
+      votes: [
+        {
+          commissionerId: CURRENT_USER_ID,
+          commissionerRole: 'admin',
+          vote: 'APPROVE' as const,
+          reason: 'Đã kiểm tra tọa độ hợp lệ',
+          votedAt: '2026-08-17T10:00:00.000Z'
+        }
+      ]
+    };
+    mockApiResponse([baseMockItem]);
+    mockSubmitSuccess({ outcome: 'VOTE_RECORDED', pendingVoters: 2, totalVoters: 3 });
+    let refetchCount = 0;
+    overrideRequestsMock.refetch = vi.fn().mockImplementation(async () => {
+      refetchCount += 1;
+      if (refetchCount > 1) overrideRequestsMock.data = [updatedItem];
+      return { data: overrideRequestsMock.data, error: null };
+    });
+
+    await act(async () => {
+      render(<OverrideVoteDrawer {...defaultProps} />);
+    });
+    await waitFor(() => expect(screen.getByText('proj-abc')).toBeInTheDocument());
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('proj-abc'));
+    });
+    await waitFor(() => expect(findButton('Dong y Ghi de')).not.toBeNull());
+    fireEvent.click(findButton('Dong y Ghi de')!);
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Đã xác minh vị trí' } });
+    fireEvent.click(screen.getByTestId('vote-confirm-submit'));
+
+    await waitFor(() => {
+      assertText('Da dong y');
+      expect(findButton('Dong y Ghi de')).toBeNull();
+    });
+  });
+
   // ---------------------------------------------------------------------------
   // Test 12: REJECTED banner khi status REJECTED với 1 phiếu reject
   // ---------------------------------------------------------------------------

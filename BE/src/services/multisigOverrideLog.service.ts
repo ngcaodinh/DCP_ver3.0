@@ -87,7 +87,8 @@ export async function logOverrideRejected(
  */
 export async function logOverrideExpired(
   request: OracleOverrideRequestRecord,
-  expiredByCommissionerId: string
+  expiredByCommissionerId: string,
+  expiryReason: 'COMMISSIONER_SET_CHANGED' | 'TIMEOUT' = 'COMMISSIONER_SET_CHANGED'
 ): Promise<void> {
   try {
     await createMultisigOverrideLog({
@@ -98,11 +99,13 @@ export async function logOverrideExpired(
       operatorRole: '',
       action: 'OVERRIDE_EXPIRED',
       resolution: 'EXPIRED',
-      reason: 'Commissioner set changed',
+      reason: expiryReason === 'TIMEOUT'
+        ? 'Override request expired by timeout'
+        : 'Commissioner set changed',
       txHash: null,
       blockNumber: null,
       eventTimestamp: request.expiredAt ?? new Date(),
-      metadata: {},
+      metadata: { expiryReason },
     });
     logger.info('Đã ghi multisig_override_log EXPIRED', {
       overrideRequestId: request.overrideRequestId,

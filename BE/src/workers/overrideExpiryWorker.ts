@@ -7,6 +7,7 @@ import {
 import { recordAdminAuditLog } from '../services/audit-log.service';
 import { runMongoTransaction } from '../utils/mongoTransaction';
 import { createUserNotification } from '../services/notificationService';
+import { logOverrideExpired } from '../services/multisigOverrideLog.service';
 
 const logger = getLogger();
 
@@ -101,6 +102,10 @@ async function checkAndExpireOverdueRequests(): Promise<void> {
         if (!expired) continue; // Đã được expire bởi chu kỳ khác (race condition bình thường)
 
         expiredCount++;
+
+        // Timeout expiry cũng phải có legacy multisig audit record như expiry do
+        // commissioner set thay đổi; SYSTEM là actor của scheduler.
+        await logOverrideExpired(expired, 'SYSTEM', 'TIMEOUT');
 
         // Notify tất cả commissioner trong snapshot và tổ chức
         await notifyOverrideExpired(overrideRequest);

@@ -4,7 +4,7 @@ import { createInMemoryCache } from '../utils/inMemoryCache';
 
 const logger = getLogger();
 const TILE_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60;
-const TILE_CACHE_MAX_ENTRIES = 128;
+const TILE_CACHE_MAX_ENTRIES = 1024;
 const TILE_FETCH_TIMEOUT_MS = 8_000;
 const MAX_TILE_SIZE_BYTES = 512 * 1024;
 const OSM_TILE_SUBDOMAINS = ['a', 'b', 'c'] as const;

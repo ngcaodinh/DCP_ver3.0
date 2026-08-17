@@ -6,6 +6,7 @@
  */
 
 import { Request, Response, NextFunction } from 'express';
+import { parse } from 'csv-parse/sync';
 import {
   detectFileTypeFromBuffer,
   getFileSizeLimit,
@@ -20,6 +21,12 @@ const logger = getLogger();
  * Đủ cover tất cả signatures.
  */
 const READ_BUFFER_SIZE = 16;
+
+const UPLOAD_MIME_TYPES_BY_TYPE: Record<'image' | 'csv' | 'json', ReadonlyArray<string>> = {
+  image: ['image/jpeg', 'image/png', 'image/webp'],
+  csv: ['text/csv'],
+  json: ['application/json']
+};
 
 /**
  * Giới hạn số dòng tối đa cho CSV batch upload.
@@ -53,12 +60,13 @@ function validateFileBuffer(
   fileSize: number,
   signatureBuffer: Buffer,
   declaredMimeType: string,
-  fileName: string
+  fileName: string,
+  uploadType: 'image' | 'csv' | 'json',
+  sizeLimit: number
 ): FileValidationResult {
   // Bước 1: Kiểm tra kích thước tổng thể (dùng fileSize thực tế)
   const detected = detectFileTypeFromBuffer(signatureBuffer);
   const effectiveMimeType = detected.mimeType;
-  const sizeLimit = getFileSizeLimit(effectiveMimeType);
 
   if (fileSize > sizeLimit) {
     logger.warn('File upload rejected: size exceeds limit', {
@@ -78,7 +86,8 @@ function validateFileBuffer(
   }
 
   // Bước 2: Kiểm tra MIME type whitelist
-  if (!UPLOAD_ALLOWED_MIME_TYPES.includes(effectiveMimeType)) {
+  const allowedMimeTypes = UPLOAD_MIME_TYPES_BY_TYPE[uploadType];
+  if (!allowedMimeTypes.includes(effectiveMimeType)) {
     logger.warn('File upload rejected: unsupported media type', {
       fileName,
       declaredMimeType,
@@ -89,7 +98,7 @@ function validateFileBuffer(
       detectedMimeType: effectiveMimeType,
       detectedExtension: detected.extension,
       errorCode: 'UNSUPPORTED_MEDIA_TYPE',
-      errorMessage: `File type "${effectiveMimeType}" is not allowed. Allowed types: ${UPLOAD_ALLOWED_MIME_TYPES.join(', ')}`
+      errorMessage: `File type "${effectiveMimeType}" is not allowed for ${uploadType} upload. Allowed types: ${allowedMimeTypes.join(', ')}`
     };
   }
 
@@ -153,8 +162,17 @@ export function createUploadValidationMiddleware(uploadType: 'image' | 'csv' | '
     const resolvedLimit = resolveFileSizeLimit(uploadType);
 
     // Truncate buffer để chỉ đọc phần signature (performance)
-    const signatureBuffer = buffer.slice(0, Math.min(READ_BUFFER_SIZE, buffer.length));
-    const result = validateFileBuffer(size, signatureBuffer, mimetype, originalname);
+    const signatureBuffer = uploadType === 'json'
+      ? buffer
+      : buffer.slice(0, Math.min(READ_BUFFER_SIZE, buffer.length));
+    const result = validateFileBuffer(
+      size,
+      signatureBuffer,
+      mimetype,
+      originalname,
+      uploadType,
+      resolvedLimit
+    );
 
     // Attach validation result vào request để controller/service downstream có thể sử dụng
     request.validatedFile = {
@@ -236,8 +254,17 @@ export function createBatchUploadValidationMiddleware(uploadType: 'image' | 'csv
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
-      const signatureBuffer = file.buffer.slice(0, Math.min(READ_BUFFER_SIZE, file.buffer.length));
-      const result = validateFileBuffer(file.size, signatureBuffer, file.mimetype, file.originalname);
+      const signatureBuffer = uploadType === 'json'
+        ? file.buffer
+        : file.buffer.slice(0, Math.min(READ_BUFFER_SIZE, file.buffer.length));
+      const result = validateFileBuffer(
+        file.size,
+        signatureBuffer,
+        file.mimetype,
+        file.originalname,
+        uploadType,
+        resolvedLimit
+      );
 
       validationResults.push({
         index: i,
@@ -300,10 +327,51 @@ export function createBatchUploadValidationMiddleware(uploadType: 'image' | 'csv
  * Middleware validate CSV row count sau khi file đã được parse.
  * Gắn kết quả vào request để controller xử lý.
  *
- * @param rowCount - Số dòng đã parse được từ CSV
+ * @param requiredHeaders - Các cột bắt buộc phải có trong header CSV
  */
-export function createCsvRowCountValidationMiddleware(rowCount: number) {
-  return (_request: Request, response: Response, next: NextFunction): void => {
+export function createCsvRowCountValidationMiddleware(
+  requiredHeaders: ReadonlyArray<string> = []
+) {
+  return (request: Request, response: Response, next: NextFunction): void => {
+    const file = request.file;
+    if (!file) {
+      next();
+      return;
+    }
+
+    let rows: unknown[][];
+    try {
+      rows = parse(file.buffer.toString('utf8'), {
+        bom: true,
+        skip_empty_lines: true,
+        relax_column_count: true
+      }) as unknown[][];
+    } catch {
+      response.status(400).json({
+        success: false,
+        message: 'CSV không hợp lệ.',
+        errorCode: 'INVALID_CSV'
+      });
+      return;
+    }
+
+    const headers = (rows[0] ?? [])
+      .map(header => typeof header === 'string' ? header.trim() : '')
+      .filter(Boolean);
+    const missingHeaders = requiredHeaders.filter(header => !headers.includes(header));
+    if (missingHeaders.length > 0) {
+      response.status(400).json({
+        success: false,
+        message: 'CSV thiếu cột bắt buộc.',
+        errorCode: 'INVALID_CSV_HEADERS',
+        details: [{ field: 'file', message: `Thiếu cột: ${missingHeaders.join(', ')}` }]
+      });
+      return;
+    }
+
+    const rowCount = Math.max(rows.length - 1, 0);
+    request.csvValidation = { headers, rowCount };
+
     if (rowCount > MAX_CSV_ROWS) {
       logger.warn('CSV row count exceeds limit', {
         rowCount,
@@ -352,6 +420,10 @@ declare global {
         errorCode?: string;
         errorMessage?: string;
       }>;
+      csvValidation?: {
+        headers: string[];
+        rowCount: number;
+      };
     }
   }
 }

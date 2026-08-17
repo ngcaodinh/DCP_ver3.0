@@ -32,6 +32,26 @@ import { extractAuditRequestContext } from '../utils/auditRequestContext';
 
 const logger = getLogger();
 
+/** Giới hạn số lượt verify đồng bộ để EXIF parsing không làm nghẽn event loop. */
+const SYNC_ORACLE_VERIFY_CONCURRENCY = 3;
+let activeSyncOracleVerifications = 0;
+const syncOracleVerificationWaiters: Array<() => void> = [];
+
+/** Chia sẻ tối đa 3 slot cho endpoint sync; batch vẫn đi qua queue riêng. */
+async function runWithSyncOracleSlot<T>(operation: () => Promise<T>): Promise<T> {
+  if (activeSyncOracleVerifications >= SYNC_ORACLE_VERIFY_CONCURRENCY) {
+    await new Promise<void>((resolve) => syncOracleVerificationWaiters.push(resolve));
+  }
+
+  activeSyncOracleVerifications++;
+  try {
+    return await operation();
+  } finally {
+    activeSyncOracleVerifications--;
+    syncOracleVerificationWaiters.shift()?.();
+  }
+}
+
 /**
  * Schema validate body cho POST /api/oracle/override-requests/:overrideRequestId/vote.
  * Mục đích: thay thế validation thủ công bằng Zod để đảm bảo type-safety và bảo mật đầu vào.
@@ -96,6 +116,7 @@ export async function handleVerifyImage(
     sendErrorResponse(response, 401, 'Bạn chưa đăng nhập.', 'UNAUTHENTICATED');
     return;
   }
+  const authenticatedUserId = request.authenticatedUser.userId;
 
   const file = request.file;
   if (!file) {
@@ -134,12 +155,12 @@ export async function handleVerifyImage(
       return;
     }
 
-    const result = await verifyEvidenceImage(
+    const result = await runWithSyncOracleSlot(() => verifyEvidenceImage(
       file.buffer,
       projectId,
-      request.authenticatedUser.userId,
+      authenticatedUserId,
       normalizedEvidenceCid
-    );
+    ));
 
     logger.info('Oracle verify-image hoàn thành.', {
       projectId,

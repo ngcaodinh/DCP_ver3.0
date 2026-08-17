@@ -7,7 +7,7 @@ import {
   type CommissionerVote,
   type OracleOverrideRequestRecord
 } from '../models/oracleOverrideRequestModel';
-import { findActiveCommissioners, type AuthUser } from '../models/authModel';
+import { getCachedActiveCommissioners } from './commissionerDirectory.service';
 import {
   findDisbursementByRequestId,
   updateDisbursementByRequestIdWithCondition
@@ -18,7 +18,6 @@ import { runMongoTransaction } from '../utils/mongoTransaction';
 import { logOverrideApproved, logOverrideRejected, logOverrideExpired } from './multisigOverrideLog.service';
 import { createUserNotification } from './notificationService';
 import { oracleEvents, type OverrideExecutedEventPayload } from '../events/oracleEvents';
-import { getRedisClientIfReady } from '../config/redis';
 import type { ClientSession } from 'mongoose';
 import * as eventLoggerService from './event-logger.service';
 
@@ -141,7 +140,7 @@ export async function submitOverrideVote(
         overrideRequestId
       });
     } else {
-      void Promise.resolve(logOverrideExpired(updatedRequest, commissionerId)).catch((err: Error) => {
+      void Promise.resolve(logOverrideExpired(updatedRequest, commissionerId, 'COMMISSIONER_SET_CHANGED')).catch((err: Error) => {
         logger.error('Ghi multisig_override_logs EXPIRED thất bại.', {
           overrideRequestId, errorMessage: err.message
         });
@@ -161,11 +160,23 @@ export async function submitOverrideVote(
     votedAt: new Date()
   };
   const transactionResult = await runMongoTransaction(async (session) => {
-    const addResult = await addVoteToOverrideRequest(overrideRequestId, newVote, session);
+    // Model production trả mutation result kèm document; fallback giữ tương thích với
+    // các adapter/test doubles cũ trả về string hoặc document trực tiếp.
+    const rawAddMutation: unknown = await addVoteToOverrideRequest(overrideRequestId, newVote, session);
+    const addResult = typeof rawAddMutation === 'string'
+      ? rawAddMutation
+      : rawAddMutation && typeof rawAddMutation === 'object' && 'result' in rawAddMutation
+        ? (rawAddMutation as { result: string }).result
+        : 'OK';
     if (addResult === 'ALREADY_VOTED') throw new VoteRejectedError('ALREADY_VOTED');
     if (addResult === 'NOT_PENDING') throw new VoteRejectedError('REQUEST_NOT_PENDING');
 
-    const updated = await findOverrideRequestById(overrideRequestId, session);
+    const updatedFromMutation = rawAddMutation && typeof rawAddMutation === 'object'
+      ? ('result' in rawAddMutation
+        ? (rawAddMutation as { document?: OracleOverrideRequestRecord | null }).document
+        : rawAddMutation as OracleOverrideRequestRecord)
+      : null;
+    const updated = updatedFromMutation ?? await findOverrideRequestById(overrideRequestId, session);
     if (!updated) {
       logger.error('Không fetch được override request ngay sau khi ghi vote.', { overrideRequestId });
       throw new VoteRejectedError('REQUEST_NOT_FOUND');
@@ -222,32 +233,6 @@ type VoteTransactionResult = {
   resolvedRequest: OracleOverrideRequestRecord | null;
   disbursementAutoApproved: boolean;
 };
-
-const COMMISSIONER_CACHE_KEY = 'commissioners:active';
-const COMMISSIONER_CACHE_TTL_S = 5; // [S4-fix] 5 giây thay vì 30s — giảm race window cho revoked commissioner
-
-/**
- * Lấy danh sách commissioner đang active, ưu tiên từ Redis cache (TTL 30s).
- *
- * [B2-fix #8] findActiveCommissioners() chạy per-vote trước đây — với nhiều request PENDING
- * đồng thời, mỗi vote = 1 DB query. Cache TTL 30s giảm 300 queries/giờ xuống còn 120.
- * Khi admin role thay đổi: TTL ngắn đủ để phát hiện trong vòng 30s.
- */
-async function getCachedActiveCommissioners(): Promise<AuthUser[]> {
-  const redis = getRedisClientIfReady();
-  if (redis) {
-    try {
-      const cached = await redis.get(COMMISSIONER_CACHE_KEY);
-      if (cached) return JSON.parse(cached) as AuthUser[];
-      const fresh = await findActiveCommissioners();
-      await redis.setEx(COMMISSIONER_CACHE_KEY, COMMISSIONER_CACHE_TTL_S, JSON.stringify(fresh));
-      return fresh;
-    } catch {
-      // Redis lỗi → fallback sang DB, không block vote flow
-    }
-  }
-  return findActiveCommissioners();
-}
 
 /**
  * So sánh commissionerSnapshot với danh sách admin/regulatory hiện tại.

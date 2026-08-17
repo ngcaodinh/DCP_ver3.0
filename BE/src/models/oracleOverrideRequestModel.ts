@@ -207,19 +207,23 @@ export async function deleteOracleOverrideRequestById(overrideRequestId: string)
  */
 export type AddVoteResult = 'OK' | 'ALREADY_VOTED' | 'NOT_PENDING';
 
+export type AddVoteMutationResult = {
+  result: AddVoteResult;
+  document: OracleOverrideRequestRecord | null;
+};
+
 /**
  * Thêm vote của một commissioner vào danh sách votes với atomic check.
  * Filter loại trừ commissionerId đã vote ngay tại DB để ngăn race condition.
  * 
- * @returns 'OK' nếu vote được ghi thành công
- *          'ALREADY_VOTED' nếu commissionerId đã vote trước đó
- *          'NOT_PENDING' nếu request không tồn tại hoặc không ở trạng thái PENDING
+ * @returns mutation result và document sau update để service không phải đọc lại
+ *          cùng một document trong transaction.
  */
 export async function addVoteToOverrideRequest(
   overrideRequestId: string,
   vote: CommissionerVote,
   session?: ClientSession
-): Promise<AddVoteResult> {
+): Promise<AddVoteMutationResult> {
   const updated = await OracleOverrideRequestMongoModel.findOneAndUpdate(
     {
       overrideRequestId,
@@ -230,14 +234,16 @@ export async function addVoteToOverrideRequest(
     { returnDocument: 'after', ...(session ? { session } : {}) }
   ).lean<OracleOverrideRequestRecord>().exec();
 
-  if (updated) return 'OK';
+  if (updated) return { result: 'OK', document: updated };
 
   // Phân biệt nguyên nhân null: cần query lại để xác định
   const currentQuery = OracleOverrideRequestMongoModel.findOne({ overrideRequestId });
   if (session) currentQuery.session(session);
   const current = await currentQuery.lean().exec();
-  if (!current || current.status !== 'PENDING') return 'NOT_PENDING';
-  return 'ALREADY_VOTED';
+  if (!current || current.status !== 'PENDING') {
+    return { result: 'NOT_PENDING', document: null };
+  }
+  return { result: 'ALREADY_VOTED', document: null };
 }
 
 /**

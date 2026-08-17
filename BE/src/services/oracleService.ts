@@ -17,7 +17,7 @@ import {
 import {
   createOracleOverrideRequest
 } from '../models/oracleOverrideRequestModel';
-import { findActiveCommissioners } from '../models/authModel';
+import { getCachedActiveCommissioners } from './commissionerDirectory.service';
 import { createUserNotification } from './notificationService';
 import {
   oracleEvents,
@@ -40,8 +40,8 @@ const MIN_RADIUS_METERS = 100;
 
 /**
  * Kết quả xác minh từ oracle service.
- * isValid = true  : trong phạm vi geofence
- * isValid = false : ngoài phạm vi → cần override vote
+ * isValid = true  : điểm GPS nằm trong hoặc trên biên polygon geofence
+ * isValid = false : điểm GPS ngoài polygon → cần override vote
  * isValid = null  : không có GPS hoặc chưa có geofence → cần override vote
  */
 export type OracleVerificationResult = {
@@ -86,9 +86,7 @@ export function extractExifGps(buffer: Buffer): GpsCoordinate | null {
     if (tags.GPSLongitudeRef === 'W') lng = -Math.abs(lng);
 
     if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
-      logger.warn('EXIF GPS ngoài phạm vi hợp lệ.', {
-        gpsCoordinates: `lat=${lat}, lng=${lng}`
-      });
+      logger.warn('EXIF GPS ngoài phạm vi hợp lệ.', { outOfRange: true });
       return null;
     }
 
@@ -131,7 +129,7 @@ export function haversineDistance(a: GpsCoordinate, b: GpsCoordinate): number {
  * Query sau mỗi request để đảm bảo snapshot phản ánh đúng trạng thái hệ thống tại thời điểm tạo.
  */
 async function fetchCommissionerSnapshot(): Promise<CommissionerSnapshotEntry[]> {
-  const commissioners = await findActiveCommissioners();
+  const commissioners = await getCachedActiveCommissioners();
   return commissioners
     .filter((user): user is typeof user & { role: CommissionerSnapshotEntry['role'] } => isCommissionerRole(user.role))
     .map(u => ({ userId: u.id, role: u.role }));
@@ -178,7 +176,7 @@ export async function verifyEvidenceImage(
     throw new Error(`Geofence polygon phải có từ ${MIN_GEOFENCE_POLYGON_POINTS} đến ${MAX_GEOFENCE_POLYGON_POINTS} điểm.`);
   }
 
-  // Clamp radius: floor 100m và cap 2000m theo spec, bảo vệ khỏi giá trị DB không hợp lệ
+  // Clamp radius để lưu telemetry/reference ổn định; verdict dùng polygon bên dưới.
   const radiusMeters = Math.min(Math.max(geofence.radiusMeters, MIN_RADIUS_METERS), MAX_RADIUS_METERS);
   const projectCentroid = geofence.centroid;
 
@@ -194,12 +192,6 @@ export async function verifyEvidenceImage(
   // Bước 2: Trích xuất EXIF GPS
   const gpsFromImage = extractExifGps(buffer);
 
-  // THIẾT KẾ — Circular approximation: xác minh dùng khoảng cách Haversine từ GPS ảnh tới centroid.
-  // Geofence.polygon chỉ dùng để hiển thị trên bản đồ (B3 GeofenceMap), không dùng cho verification.
-  // Điều này có nghĩa: điểm trong polygon nhưng ngoài vòng tròn → INVALID (và ngược lại).
-  // Chấp nhận sai số này vì polygon thường là convex quanh centroid và radius được chọn bao phủ polygon.
-  // Nếu cần chính xác hơn: implement point-in-polygon (ray casting) thay thế.
-
   if (!gpsFromImage) {
     return await handleNoGps(
       verificationId, projectId, organizationId, evidenceCid,
@@ -207,19 +199,19 @@ export async function verifyEvidenceImage(
     );
   }
 
-  // Bước 3: Haversine distance
+  // Bước 3: Tính khoảng cách tham khảo và kiểm tra điểm nằm trong polygon.
   const distanceMeters = haversineDistance(gpsFromImage, projectCentroid);
-  const isInRadius = distanceMeters <= radiusMeters;
+  const isInsidePolygon = isPointInsidePolygon(gpsFromImage, geofenceSnapshot.polygon);
 
   logger.info('Oracle verification kết quả.', {
     verificationId,
     projectId,
     distanceMeters: distanceMeters.toFixed(2),
     radiusMeters,
-    isInRadius
+    isInsidePolygon
   });
 
-  if (isInRadius) {
+  if (isInsidePolygon) {
     return await handleValid(
       verificationId, projectId, organizationId, evidenceCid,
       gpsFromImage, projectCentroid, distanceMeters, radiusMeters, geofenceSnapshot
@@ -230,6 +222,43 @@ export async function verifyEvidenceImage(
       gpsFromImage, projectCentroid, distanceMeters, radiusMeters, geofenceSnapshot, disbursementRequestId
     );
   }
+}
+
+/**
+ * Kiểm tra một điểm GPS nằm trong hoặc trên biên polygon bằng thuật toán ray casting.
+ * Điểm trên biên được xem là hợp lệ để tránh từ chối ảnh đúng tại ranh giới đã lưu.
+ */
+export function isPointInsidePolygon(
+  point: GpsCoordinate,
+  polygon: GpsCoordinate[]
+): boolean {
+  let isInside = false;
+
+  for (let index = 0, previousIndex = polygon.length - 1; index < polygon.length; previousIndex = index++) {
+    const current = polygon[index];
+    const previous = polygon[previousIndex];
+    if (!current || !previous) continue;
+
+    const crossProduct = (point.lng - previous.lng) * (current.lat - previous.lat)
+      - (point.lat - previous.lat) * (current.lng - previous.lng);
+    const isOnSegment = Math.abs(crossProduct) <= 1e-12
+      && point.lng >= Math.min(previous.lng, current.lng) - 1e-12
+      && point.lng <= Math.max(previous.lng, current.lng) + 1e-12
+      && point.lat >= Math.min(previous.lat, current.lat) - 1e-12
+      && point.lat <= Math.max(previous.lat, current.lat) + 1e-12;
+    if (isOnSegment) return true;
+
+    const crossesHorizontalRay = (current.lat > point.lat) !== (previous.lat > point.lat);
+    if (!crossesHorizontalRay) continue;
+
+    const intersectionLng = (previous.lng - current.lng)
+      * (point.lat - current.lat)
+      / (previous.lat - current.lat)
+      + current.lng;
+    if (point.lng < intersectionLng) isInside = !isInside;
+  }
+
+  return isInside;
 }
 
 /** Xử lý ảnh GPS hợp lệ và trong phạm vi geofence. */

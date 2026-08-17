@@ -23,9 +23,12 @@ function areSamePoints(firstPoint: GeofencePoint, secondPoint: GeofencePoint): b
 
 /** Phát hiện điểm xuất hiện lặp lại trong polygon đang vẽ. */
 function hasDuplicatePoints(points: GeofencePoint[]): boolean {
-  return points.some((point, pointIndex) => (
-    points.slice(pointIndex + 1).some(candidatePoint => areSamePoints(point, candidatePoint))
-  ));
+  for (let pointIndex = 0; pointIndex < points.length; pointIndex++) {
+    for (let candidateIndex = pointIndex + 1; candidateIndex < points.length; candidateIndex++) {
+      if (areSamePoints(points[pointIndex]!, points[candidateIndex]!)) return true;
+    }
+  }
+  return false;
 }
 
 /** Tính hai lần diện tích có dấu theo công thức Shoelace để nhận diện polygon suy biến. */

@@ -101,10 +101,36 @@ describe('upload-validation.service', () => {
     });
   });
 
+  describe('detectFileTypeFromBuffer — JSON', () => {
+    it('detect JSON hợp lệ thay vì phân loại chung là CSV', () => {
+      const result = detectFileTypeFromBuffer(Buffer.from('{"projectId":"project-1"}'));
+      expect(result.mimeType).toBe('application/json');
+      expect(result.extension).toBe('json');
+      expect(result.isValid).toBe(true);
+    });
+
+    it('fallback JSON malformed về text heuristic để uploadType tự chặn', () => {
+      const result = detectFileTypeFromBuffer(Buffer.from('{"projectId":}'));
+      expect(result.mimeType).toBe('text/csv');
+      expect(result.isValid).toBe(true);
+    });
+  });
+
   // =========================================================================
   // Magic bytes detection — unsupported types
   // =========================================================================
   describe('detectFileTypeFromBuffer — unsupported types', () => {
+    it('không nhận WAV/RIFF là WebP nếu thiếu WEBP signature', () => {
+      const buffer = Buffer.from([
+        0x52, 0x49, 0x46, 0x46, 0x24, 0x00, 0x00, 0x00,
+        0x57, 0x41, 0x56, 0x45, 0x66, 0x6D, 0x74, 0x20
+      ]);
+      const result = detectFileTypeFromBuffer(buffer);
+      expect(result.mimeType).toBe('application/octet-stream');
+      expect(result.extension).toBe('bin');
+      expect(result.isValid).toBe(false);
+    });
+
     it('detect EXE với MZ header → unsupported', () => {
       const buffer = Buffer.from([0x4D, 0x5A, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00]);
       const result = detectFileTypeFromBuffer(buffer);

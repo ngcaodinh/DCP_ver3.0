@@ -9,6 +9,10 @@ import { batchUploadFeedbackController } from '../controllers/feedbackBatchContr
 import { createAuthenticationMiddleware } from '../middleware/authenticationMiddleware';
 import { createFreshRoleAuthorizationMiddleware } from '../middleware/roleAuthorizationMiddleware';
 import { createRateLimitMiddleware } from '../middleware/rateLimitMiddleware';
+import {
+  createCsvRowCountValidationMiddleware,
+  createUploadValidationMiddleware
+} from '../middleware/upload-validation.middleware';
 import { FEEDBACK_BATCH_RATE_LIMIT_CONFIG, MAX_UPLOAD_SIZE_BYTES } from '../controllers/feedbackBatchController';
 import { handleFeedbackModeration } from '../controllers/feedbackModerationController';
 import {
@@ -166,6 +170,14 @@ export function createFeedbackRoutes(): Router {
     createFreshRoleAuthorizationMiddleware(['organizations', 'admin']),
     feedbackRateLimiter,
     handleFeedbackFileUpload,
+    createUploadValidationMiddleware('csv'),
+    createCsvRowCountValidationMiddleware([
+      'projectId',
+      'beneficiaryName',
+      'rating',
+      'comment',
+      'submittedAt'
+    ]),
     batchUploadFeedbackController
   );
 

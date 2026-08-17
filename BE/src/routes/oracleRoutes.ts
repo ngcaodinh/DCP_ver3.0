@@ -34,7 +34,6 @@ export function createOracleRoutes(): Router {
 
   const authMiddleware = createAuthenticationMiddleware();
   const orgMiddleware = createRoleAuthorizationMiddleware(['organizations']);
-  const adminMiddleware = createRoleAuthorizationMiddleware(['admin', 'regulatory']);
   const freshCommissionerMiddleware = createFreshRoleAuthorizationMiddleware(['admin', 'regulatory']);
   const orgOrAdminMiddleware = createRoleAuthorizationMiddleware(['organizations', 'admin', 'regulatory']);
 
@@ -91,7 +90,7 @@ export function createOracleRoutes(): Router {
   router.get(
     '/pending-overrides',
     authMiddleware,
-    adminMiddleware,
+    freshCommissionerMiddleware,
     overrideReadRateLimit,
     handleGetPendingOverrides
   );
@@ -100,7 +99,7 @@ export function createOracleRoutes(): Router {
   router.get(
     '/override-requests/:overrideRequestId',
     authMiddleware,
-    adminMiddleware,
+    freshCommissionerMiddleware,
     overrideReadRateLimit,
     handleGetOverrideRequestById
   );

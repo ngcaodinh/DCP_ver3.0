@@ -14,7 +14,7 @@ vi.mock('../../config/redis', () => ({
   getRedisClientIfReady: vi.fn(() => null)
 }));
 
-describe('overrideVotingService — Race Condition Tests (B-NEW1)', () => {
+describe('overrideVotingService — concurrent outcome orchestration', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
@@ -75,9 +75,9 @@ describe('overrideVotingService — Race Condition Tests (B-NEW1)', () => {
     vi.mocked(overrideModel.addVoteToOverrideRequest).mockImplementation(async () => {
       if (!firstCallSucceeded) {
         firstCallSucceeded = true;
-        return 'OK';
+        return 'OK' as never;
       }
-      return 'ALREADY_VOTED';
+      return 'ALREADY_VOTED' as never;
     });
 
     // Gọi 3 lần submitOverrideVote đồng thời với cùng commissionerId
@@ -144,9 +144,9 @@ describe('overrideVotingService — Race Condition Tests (B-NEW1)', () => {
     vi.mocked(overrideModel.addVoteToOverrideRequest).mockImplementation(async () => {
       if (!voteRecorded) {
         voteRecorded = true;
-        return 'OK';
+        return 'OK' as never;
       }
-      return 'ALREADY_VOTED';
+      return 'ALREADY_VOTED' as never;
     });
 
     // Mock findOverrideRequestById lần thứ 2 (sau khi ghi vote) — trả về request với 1 vote duy nhất
@@ -220,7 +220,7 @@ describe('overrideVotingService — Race Condition Tests (B-NEW1)', () => {
     ]);
 
     // Mock addVoteToOverrideRequest — luôn trả 'OK' (giả lập 3 commissioner khác nhau vote)
-    vi.mocked(overrideModel.addVoteToOverrideRequest).mockResolvedValue('OK');
+    vi.mocked(overrideModel.addVoteToOverrideRequest).mockResolvedValue('OK' as never);
 
     // Mock findOverrideRequestById — trả về request với 0, 1, 2, 3 votes tương ứng
     vi.mocked(overrideModel.findOverrideRequestById)

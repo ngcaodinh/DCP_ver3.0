@@ -90,7 +90,15 @@ describe('oracleRoutes — override request detail RBAC', () => {
     vi.clearAllMocks();
     authModelMocks.findUserById.mockImplementation(async (userId: string) => ({
       id: userId,
-      role: userId === 'admin-demoted-1' ? 'donor' : userId.startsWith('regulatory') ? 'regulatory' : 'admin',
+      role: userId === 'admin-demoted-1'
+        ? 'donor'
+        : userId.startsWith('regulatory')
+          ? 'regulatory'
+          : userId.startsWith('organizations')
+            ? 'organizations'
+            : userId.startsWith('donor')
+              ? 'donor'
+              : 'admin',
       accountStatus: 'ACTIVE',
       authVersion: 2
     }));
@@ -130,7 +138,15 @@ describe('oracleRoutes — override vote fresh authorization', () => {
     vi.clearAllMocks();
     authModelMocks.findUserById.mockImplementation(async (userId: string) => ({
       id: userId,
-      role: userId === 'admin-demoted-1' ? 'donor' : userId.startsWith('regulatory') ? 'regulatory' : 'admin',
+      role: userId === 'admin-demoted-1'
+        ? 'donor'
+        : userId.startsWith('regulatory')
+          ? 'regulatory'
+          : userId.startsWith('organizations')
+            ? 'organizations'
+            : userId.startsWith('donor')
+              ? 'donor'
+              : 'admin',
       accountStatus: 'ACTIVE',
       authVersion: 2
     }));

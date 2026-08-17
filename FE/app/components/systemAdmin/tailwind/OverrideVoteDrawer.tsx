@@ -791,7 +791,7 @@ export default function OverrideVoteDrawer({
   onItemsCountChange
 }: OverrideVoteDrawerProps) {
   const [view, setView] = useState<'list' | 'detail'>('list');
-  const [selectedItem, setSelectedItem] = useState<PendingOverrideItem | null>(null);
+  const [selectedRequestId, setSelectedRequestId] = useState<string | null>(null);
   const [voteDialogVote, setVoteDialogVote] = useState<'APPROVE' | 'REJECT' | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   // Flag để biết đã load xong lần đầu chưa — tránh auto-select khi items còn []
@@ -804,9 +804,16 @@ export default function OverrideVoteDrawer({
   const { data: items = [], isLoading, error, refetch } = useOverrideRequests(isOpen);
   const submitVoteMutation = useSubmitOverrideVote();
 
+  // Chỉ lưu ID trong local state; item luôn derive từ query data để detail không
+  // giữ bản sao cũ sau khi vote/refetch thành công.
+  const selectedItem = useMemo(
+    () => items.find((item) => item.overrideRequestId === selectedRequestId) ?? null,
+    [items, selectedRequestId]
+  );
+
   // [B3-FE-02] Fetch chi tiết (bao gồm geofenceSnapshot) CHỈ khi đang xem DetailView của một request.
   // ListView truyền null → hook disabled → không tạo N detail/map request khi liệt kê (R4).
-  const detailRequestId = view === 'detail' ? selectedItem?.overrideRequestId ?? null : null;
+  const detailRequestId = view === 'detail' ? selectedRequestId : null;
   const {
     data: detailData,
     isLoading: isDetailLoading,
@@ -870,19 +877,19 @@ export default function OverrideVoteDrawer({
     if (result.error) return;
     const loaded = result.data ?? [];
 
-    // Đồng bộ selectedItem — reload vote list mới nhất nếu đang xem detail
-    setSelectedItem((prev) => {
-      if (!prev) return null;
-      const refreshed = loaded.find((i) => i.overrideRequestId === prev.overrideRequestId);
+    // Chỉ giữ selection nếu request vẫn còn trong danh sách PENDING.
+    if (selectedRequestId) {
+      const refreshed = loaded.find((i) => i.overrideRequestId === selectedRequestId);
       if (!refreshed) {
         setView('list');
-        return null;
+        setSelectedRequestId(null);
+        setConsistencyWarning(null);
+        return;
       }
       // B2: Kiểm tra tính nhất quán dữ liệu từ BE
       setConsistencyWarning(validateVoteConsistency(refreshed) ? null : 'Dữ liệu biểu quyết không nhất quán, vui lòng tải lại.');
-      return refreshed;
-    });
-  }, [refetch]);
+    }
+  }, [refetch, selectedRequestId]);
 
   // Load khi mở, reset khi đóng
   useEffect(() => {
@@ -891,7 +898,7 @@ export default function OverrideVoteDrawer({
       refetch();
     } else {
       setView('list');
-      setSelectedItem(null);
+      setSelectedRequestId(null);
       setVoteDialogVote(null);
       setHasLoadedOnce(false);
       setConsistencyWarning(null);
@@ -905,7 +912,7 @@ export default function OverrideVoteDrawer({
     if (initialRequestId === OVERRIDE_POLLING_SIGNAL_ID) return;
     const target = items.find((i) => i.overrideRequestId === initialRequestId);
     if (target) {
-      setSelectedItem(target);
+      setSelectedRequestId(target.overrideRequestId);
       setView('detail');
       // B2: Validate khi auto-select từ socket
       setConsistencyWarning(validateVoteConsistency(target) ? null : 'Dữ liệu biểu quyết không nhất quán, vui lòng tải lại.');
@@ -913,7 +920,7 @@ export default function OverrideVoteDrawer({
   }, [isOpen, initialRequestId, items, hasLoadedOnce, isLoading]);
 
   const handleOpenDetail = useCallback((item: PendingOverrideItem) => {
-    setSelectedItem(item);
+    setSelectedRequestId(item.overrideRequestId);
     setView('detail');
     setVoteDialogVote(null);
     // B2: Validate khi click vào item từ list
@@ -922,22 +929,24 @@ export default function OverrideVoteDrawer({
 
   const handleBackToList = useCallback(() => {
     setView('list');
-    setSelectedItem(null);
+    setSelectedRequestId(null);
     setVoteDialogVote(null);
   }, []);
 
   const handleSubmitVote = useCallback(async (reason: string) => {
     if (!selectedItem || !voteDialogVote) return;
+    const requestId = selectedItem.overrideRequestId;
 
     setIsSubmitting(true);
     try {
       const res = await submitVoteMutation.mutateAsync({
-        overrideRequestId: selectedItem.overrideRequestId,
+        overrideRequestId: requestId,
         vote: voteDialogVote,
         reason
       });
 
       setVoteDialogVote(null);
+      await loadItems();
 
       const { outcome } = res;
       if (outcome === 'VOTE_RECORDED') {
@@ -984,7 +993,7 @@ export default function OverrideVoteDrawer({
     } finally {
       setIsSubmitting(false);
     }
-  }, [selectedItem, voteDialogVote, onToast, submitVoteMutation]);
+  }, [selectedItem, voteDialogVote, onToast, submitVoteMutation, loadItems]);
 
   // Tính toán trạng thái vote cho detail view (N1: dùng useMemo tránh recalc mỗi render)
   // Phải đặt TRƯỚC early return if (!isOpen) để tuân thủ Rules of Hooks

@@ -153,6 +153,28 @@ describe('upload-validation.middleware', () => {
       });
     });
 
+    it('pass validation với JSON hợp lệ khi uploadType là json', () => {
+      const jsonBuffer = Buffer.from('{"feedbacks":[{"rating":5}]}');
+      mockRequest.file = {
+        fieldname: 'payload',
+        originalname: 'feedback.json',
+        encoding: '7bit',
+        mimetype: 'application/json',
+        buffer: jsonBuffer,
+        size: jsonBuffer.length,
+        destination: '',
+        filename: '',
+        path: '',
+        stream: null as never
+      };
+
+      const middleware = createUploadValidationMiddleware('json');
+      middleware(mockRequest as Request, mockResponse as Response, nextFunction);
+
+      expect(nextFunction).toHaveBeenCalledTimes(1);
+      expect(mockRequest.validatedFile?.detectedMimeType).toBe('application/json');
+    });
+
     // -------------------------------------------------------------------------
     // File too large
     // -------------------------------------------------------------------------
@@ -277,6 +299,61 @@ describe('upload-validation.middleware', () => {
 
         expect(nextFunction).not.toHaveBeenCalled();
         expect(mockResponse.status).toHaveBeenCalledWith(415);
+      });
+
+      it.each([
+        ['CSV', Buffer.from('projectId,beneficiaryName\nproject-1,Alice')],
+        ['JSON', Buffer.from('{"projectId":"project-1"}')]
+      ])('trả về 415 khi file %s được upload vào image endpoint', (_label, buffer) => {
+        mockRequest.file = {
+          fieldname: 'evidence',
+          originalname: 'not-an-image.bin',
+          encoding: '7bit',
+          mimetype: 'image/jpeg',
+          buffer,
+          size: buffer.length,
+          destination: '',
+          filename: '',
+          path: '',
+          stream: null as never
+        };
+
+        const middleware = createUploadValidationMiddleware('image');
+        middleware(mockRequest as Request, mockResponse as Response, nextFunction);
+
+        expect(nextFunction).not.toHaveBeenCalled();
+        expect(mockResponse.status).toHaveBeenCalledWith(415);
+      });
+
+      it('dùng giới hạn size theo env cho image upload', () => {
+        const previousLimit = process.env.MAX_UPLOAD_SIZE_IMAGE_BYTES;
+        process.env.MAX_UPLOAD_SIZE_IMAGE_BYTES = '8';
+        const jpegBuffer = Buffer.from([
+          0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46,
+          0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01
+        ]);
+
+        mockRequest.file = {
+          fieldname: 'evidence',
+          originalname: 'oversized.jpg',
+          encoding: '7bit',
+          mimetype: 'image/jpeg',
+          buffer: jpegBuffer,
+          size: jpegBuffer.length,
+          destination: '',
+          filename: '',
+          path: '',
+          stream: null as never
+        };
+
+        const middleware = createUploadValidationMiddleware('image');
+        middleware(mockRequest as Request, mockResponse as Response, nextFunction);
+
+        if (previousLimit === undefined) delete process.env.MAX_UPLOAD_SIZE_IMAGE_BYTES;
+        else process.env.MAX_UPLOAD_SIZE_IMAGE_BYTES = previousLimit;
+
+        expect(nextFunction).not.toHaveBeenCalled();
+        expect(mockResponse.status).toHaveBeenCalledWith(413);
       });
     });
 
@@ -455,23 +532,47 @@ describe('upload-validation.middleware', () => {
   // createCsvRowCountValidationMiddleware
   // =========================================================================
   describe('createCsvRowCountValidationMiddleware', () => {
+    const setCsvFile = (rowCount: number, headers = 'projectId,beneficiaryName,rating,comment,submittedAt') => {
+      const rows = Array.from(
+        { length: rowCount },
+        (_, index) => `project-${index},Beneficiary ${index},5,Good,2026-08-17T00:00:00.000Z`
+      );
+      const buffer = Buffer.from([headers, ...rows].join('\n'));
+      mockRequest.file = {
+        fieldname: 'file',
+        originalname: 'feedback.csv',
+        encoding: '7bit',
+        mimetype: 'text/csv',
+        buffer,
+        size: buffer.length,
+        destination: '',
+        filename: '',
+        path: '',
+        stream: null as never
+      };
+    };
+
     it('gọi next() khi row count <= MAX_CSV_ROWS', () => {
-      const middleware = createCsvRowCountValidationMiddleware(500);
+      setCsvFile(500);
+      const middleware = createCsvRowCountValidationMiddleware();
       middleware(mockRequest as Request, mockResponse as Response, nextFunction);
 
       expect(nextFunction).toHaveBeenCalledTimes(1);
+      expect(mockRequest.csvValidation?.rowCount).toBe(500);
       expect(mockResponse.status).not.toHaveBeenCalled();
     });
 
     it('gọi next() khi row count = MAX_CSV_ROWS (1000)', () => {
-      const middleware = createCsvRowCountValidationMiddleware(MAX_CSV_ROWS);
+      setCsvFile(MAX_CSV_ROWS);
+      const middleware = createCsvRowCountValidationMiddleware();
       middleware(mockRequest as Request, mockResponse as Response, nextFunction);
 
       expect(nextFunction).toHaveBeenCalledTimes(1);
     });
 
     it('trả về 413 khi row count > MAX_CSV_ROWS', () => {
-      const middleware = createCsvRowCountValidationMiddleware(1001);
+      setCsvFile(MAX_CSV_ROWS + 1);
+      const middleware = createCsvRowCountValidationMiddleware();
       middleware(mockRequest as Request, mockResponse as Response, nextFunction);
 
       expect(nextFunction).not.toHaveBeenCalled();
@@ -485,11 +586,26 @@ describe('upload-validation.middleware', () => {
     });
 
     it('trả về 413 khi row count = 2000 (2x limit)', () => {
-      const middleware = createCsvRowCountValidationMiddleware(2000);
+      setCsvFile(2000);
+      const middleware = createCsvRowCountValidationMiddleware();
       middleware(mockRequest as Request, mockResponse as Response, nextFunction);
 
       expect(nextFunction).not.toHaveBeenCalled();
       expect(mockResponse.status).toHaveBeenCalledWith(413);
+    });
+
+    it('trả về 400 khi CSV thiếu header bắt buộc', () => {
+      setCsvFile(1, 'projectId,beneficiaryName,rating');
+      const middleware = createCsvRowCountValidationMiddleware([
+        'projectId', 'beneficiaryName', 'rating', 'comment', 'submittedAt'
+      ]);
+      middleware(mockRequest as Request, mockResponse as Response, nextFunction);
+
+      expect(nextFunction).not.toHaveBeenCalled();
+      expect(mockResponse.status).toHaveBeenCalledWith(400);
+      expect(mockResponse.json).toHaveBeenCalledWith(
+        expect.objectContaining({ errorCode: 'INVALID_CSV_HEADERS' })
+      );
     });
   });
 

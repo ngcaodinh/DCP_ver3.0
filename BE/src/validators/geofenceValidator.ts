@@ -107,9 +107,12 @@ function areSamePoints(firstPoint: GeofenceRequestBody['polygon'][number], secon
 
 /** Phát hiện điểm lặp trong polygon, bao gồm điểm đóng trùng điểm đầu. */
 function hasDuplicatePolygonPoints(polygon: GeofenceRequestBody['polygon']): boolean {
-  return polygon.some((point, pointIndex) => (
-    polygon.slice(pointIndex + 1).some(candidatePoint => areSamePoints(point, candidatePoint))
-  ));
+  for (let pointIndex = 0; pointIndex < polygon.length; pointIndex++) {
+    for (let candidateIndex = pointIndex + 1; candidateIndex < polygon.length; candidateIndex++) {
+      if (areSamePoints(polygon[pointIndex]!, polygon[candidateIndex]!)) return true;
+    }
+  }
+  return false;
 }
 
 /** Tính hai lần diện tích có dấu của polygon để nhận diện polygon suy biến. */

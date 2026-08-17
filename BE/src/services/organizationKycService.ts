@@ -14,6 +14,7 @@ import {
   getLatestSubmissionVersion,
   updateOrganizationKycSubmissionReview
 } from '../models/organizationKycModel';
+import { changeUserRole, revokeUserAccess } from './authAdminService';
 
 export type OrganizationKycFileInput = {
   fileName: string;
@@ -593,11 +594,35 @@ export async function reviewOrganizationKycSubmission(
   }
 
   try {
-    const updatedOrganizationUser = await updateUser({
-      ...organizationUser,
-      role: nextRole,
-      accountStatus: nextAccountStatus
-    });
+    let updatedOrganizationUser: AuthUser;
+    if (nextRole !== organizationUser.role) {
+      await changeUserRole(organizationUser.id, nextRole, reviewerUserId);
+      const roleUpdatedUser = await findUserById(organizationUser.id);
+      if (!roleUpdatedUser) {
+        throw new Error('Không tìm thấy tài khoản sau khi cập nhật role.');
+      }
+      updatedOrganizationUser = await updateUser({
+        ...roleUpdatedUser,
+        accountStatus: nextAccountStatus
+      });
+    } else {
+      updatedOrganizationUser = await updateUser({
+        ...organizationUser,
+        accountStatus: nextAccountStatus
+      });
+      if (organizationUser.accountStatus !== nextAccountStatus) {
+        await revokeUserAccess(
+          organizationUser.id,
+          `Organization KYC ${normalizedAction}`,
+          reviewerUserId
+        );
+        const accessUpdatedUser = await findUserById(organizationUser.id);
+        if (!accessUpdatedUser) {
+          throw new Error('Không tìm thấy tài khoản sau khi thu hồi phiên.');
+        }
+        updatedOrganizationUser = accessUpdatedUser;
+      }
+    }
 
     if (normalizedAction === 'approve' && updatedOrganizationUser.role !== 'organizations') {
       throw new Error('Đã phê duyệt hồ sơ nhưng không thể cập nhật role tài khoản thành organizations.');

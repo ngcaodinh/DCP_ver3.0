@@ -71,6 +71,12 @@ export function useOverrideSocket({
     setIsUsingFallback(false);
   }, []);
 
+  // `enablePolling` có thể đổi theo trạng thái drawer sau khi socket đã ngắt;
+  // phải dừng interval hiện hữu ngay khi caller tắt fallback.
+  useEffect(() => {
+    if (!enablePolling) stopPolling();
+  }, [enablePolling, stopPolling]);
+
   /**
    * Bật polling fallback khi socket ngắt VÀ caller cho phép.
    * Nếu enablePolling=false → KHÔNG bật interval (tránh waste CPU).

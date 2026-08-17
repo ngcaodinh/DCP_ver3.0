@@ -105,6 +105,29 @@ describe('useOverrideSocket', () => {
     );
   });
 
+  it('dừng interval khi enablePolling chuyển từ true sang false', () => {
+    const onEvent = vi.fn();
+    const { rerender } = renderHook(
+      ({ enabled }) => useOverrideSocket({ onEvent, enablePolling: enabled }),
+      { initialProps: { enabled: true } }
+    );
+
+    const disconnectHandlers = eventHandlers['disconnect'] ?? [];
+    act(() => {
+      disconnectHandlers.forEach((h) => h(new Error('transport close')));
+      vi.advanceTimersByTime(30_000);
+    });
+    expect(onEvent).toHaveBeenCalledTimes(1);
+
+    onEvent.mockClear();
+    rerender({ enabled: false });
+    act(() => {
+      vi.advanceTimersByTime(60_000);
+    });
+
+    expect(onEvent).not.toHaveBeenCalled();
+  });
+
   it('reconnect: polling interval bị dừng khi socket connect lại', () => {
     const onEvent = vi.fn();
     renderHook(() => useOverrideSocket({ onEvent, enablePolling: true }));
