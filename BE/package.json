@@ -16,6 +16,7 @@
     "migrate:legal-registration-index": "node scripts/migrateLegalRegistrationNumberIndex.js",
     "migrate:bank-account-compound-index": "node scripts/migrateBankAccountCompoundIndex.js",
     "migrate:manual-review-queue-index": "node scripts/migrateManualReviewQueueIndexes.js",
+    "migrate:beneficiary-feedback-index": "node scripts/migrateBeneficiaryFeedbackIndexes.js",
     "migrate:manual-review-queue-request-mode": "node scripts/migrateManualReviewQueueRequestMode.js",
     "migrate:admin-audit-log-schema": "node dist/scripts/migrateAdminAuditLogSchema.js",
     "grant:project-manager-role": "node scripts/grantProjectManagerRole.js"

@@ -25,6 +25,7 @@ import { processCsvBatchFeedback, processJsonBatchFeedback } from '../../service
 import { AuthenticatedRequest } from '../../middleware/authenticationMiddleware';
 import {
   BatchSizeExceededError,
+  EmptyBatchError,
   FileTooLargeError,
   InvalidCsvError
 } from '../../utils/feedbackBatchError';
@@ -98,7 +99,7 @@ describe('feedbackBatchController', () => {
     it('nên return 403 khi userId không hợp lệ', async () => {
       mockRequest = {
         ...createUnauthenticatedRequest(),
-        authenticatedUser: { userId: '', role: 'ngo' } as any
+        authenticatedUser: { userId: '', role: 'ngo' } as unknown as NonNullable<AuthenticatedRequest['authenticatedUser']>
       };
 
       await batchUploadFeedbackController(
@@ -140,7 +141,7 @@ describe('feedbackBatchController', () => {
         mimetype: 'text/csv',
         buffer: Buffer.from('test'),
         size: 5 * 1024 * 1024 + 1
-      } as any;
+      } as unknown as NonNullable<AuthenticatedRequest['file']>;
 
       await batchUploadFeedbackController(
         mockRequest as AuthenticatedRequest,
@@ -163,7 +164,7 @@ describe('feedbackBatchController', () => {
         mimetype: 'application/pdf',
         buffer: Buffer.from('test'),
         size: 100
-      } as any;
+      } as unknown as NonNullable<AuthenticatedRequest['file']>;
 
       await batchUploadFeedbackController(
         mockRequest as AuthenticatedRequest,
@@ -195,7 +196,7 @@ describe('feedbackBatchController', () => {
         mimetype: 'text/csv',
         buffer: Buffer.from('test'),
         size: 100
-      } as any;
+      } as unknown as NonNullable<AuthenticatedRequest['file']>;
 
       await batchUploadFeedbackController(
         mockRequest as AuthenticatedRequest,
@@ -231,7 +232,7 @@ describe('feedbackBatchController', () => {
         mimetype: 'application/csv',
         buffer: Buffer.from('test'),
         size: 100
-      } as any;
+      } as unknown as NonNullable<AuthenticatedRequest['file']>;
 
       await batchUploadFeedbackController(
         mockRequest as AuthenticatedRequest,
@@ -239,6 +240,60 @@ describe('feedbackBatchController', () => {
       );
 
       expect(processCsvBatchFeedback).toHaveBeenCalled();
+    });
+
+    it('accepts Excel CSV MIME aliases when the extension is CSV', async () => {
+      for (const mimetype of ['application/vnd.ms-excel', 'application/octet-stream']) {
+        const mockResult = {
+          success: 1,
+          failed: 0,
+          errors: [],
+          flaggedCount: 0
+        };
+        (processCsvBatchFeedback as ReturnType<typeof vi.fn>).mockResolvedValueOnce(mockResult);
+
+        mockRequest.headers = { 'content-type': 'multipart/form-data' };
+        mockRequest.file = {
+          fieldname: 'file',
+          originalname: 'feedback.csv',
+          encoding: '7bit',
+          mimetype,
+          buffer: Buffer.from('test'),
+          size: 100
+        } as unknown as NonNullable<AuthenticatedRequest['file']>;
+
+        await batchUploadFeedbackController(
+          mockRequest as AuthenticatedRequest,
+          mockResponse as Response
+        );
+
+        expect(processCsvBatchFeedback).toHaveBeenCalledTimes(1);
+        vi.clearAllMocks();
+      }
+    });
+
+    it('rejects application/octet-stream when the extension is not CSV', async () => {
+      mockRequest.headers = { 'content-type': 'multipart/form-data' };
+      mockRequest.file = {
+        fieldname: 'file',
+        originalname: 'payload.exe',
+        encoding: '7bit',
+        mimetype: 'application/octet-stream',
+        buffer: Buffer.from('binary payload'),
+        size: 100
+      } as unknown as NonNullable<AuthenticatedRequest['file']>;
+
+      await batchUploadFeedbackController(
+        mockRequest as AuthenticatedRequest,
+        mockResponse as Response
+      );
+
+      expect(mockStatus).toHaveBeenCalledWith(400);
+      expect(mockJson).toHaveBeenCalledWith(expect.objectContaining({
+        success: false,
+        errorCode: 'INVALID_FILE_TYPE'
+      }));
+      expect(processCsvBatchFeedback).not.toHaveBeenCalled();
     });
 
     it('nên return 400 khi text/plain MIME type (không còn được chấp nhận)', async () => {
@@ -250,7 +305,7 @@ describe('feedbackBatchController', () => {
         mimetype: 'text/plain',
         buffer: Buffer.from('test'),
         size: 100
-      } as any;
+      } as unknown as NonNullable<AuthenticatedRequest['file']>;
 
       await batchUploadFeedbackController(
         mockRequest as AuthenticatedRequest,
@@ -296,6 +351,9 @@ describe('feedbackBatchController', () => {
 
     it('nên return 400 khi feedbacks array rỗng', async () => {
       mockRequest.body = [];
+      (processJsonBatchFeedback as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new EmptyBatchError()
+      );
 
       await batchUploadFeedbackController(
         mockRequest as AuthenticatedRequest,
@@ -434,7 +492,7 @@ describe('feedbackBatchController', () => {
         mimetype: 'text/csv',
         buffer: Buffer.from('test'),
         size: 100
-      } as any;
+      } as unknown as NonNullable<AuthenticatedRequest['file']>;
 
       await batchUploadFeedbackController(
         mockRequest as AuthenticatedRequest,
@@ -445,6 +503,33 @@ describe('feedbackBatchController', () => {
       expect(mockJson).toHaveBeenCalledWith(expect.objectContaining({
         success: false,
         errorCode: 'FILE_TOO_LARGE'
+      }));
+    });
+
+    it('nên return 400 EMPTY_BATCH khi CSV không có data rows', async () => {
+      (processCsvBatchFeedback as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new EmptyBatchError()
+      );
+
+      mockRequest.headers = { 'content-type': 'multipart/form-data' };
+      mockRequest.file = {
+        fieldname: 'file',
+        originalname: 'empty.csv',
+        encoding: '7bit',
+        mimetype: 'text/csv',
+        buffer: Buffer.from('projectId,beneficiaryName,rating,comment,submittedAt'),
+        size: 50
+      } as unknown as NonNullable<AuthenticatedRequest['file']>;
+
+      await batchUploadFeedbackController(
+        mockRequest as AuthenticatedRequest,
+        mockResponse as Response
+      );
+
+      expect(mockStatus).toHaveBeenCalledWith(400);
+      expect(mockJson).toHaveBeenCalledWith(expect.objectContaining({
+        success: false,
+        errorCode: 'EMPTY_BATCH'
       }));
     });
 
@@ -461,7 +546,7 @@ describe('feedbackBatchController', () => {
         mimetype: 'text/csv',
         buffer: Buffer.from('invalid'),
         size: 100
-      } as any;
+      } as unknown as NonNullable<AuthenticatedRequest['file']>;
 
       await batchUploadFeedbackController(
         mockRequest as AuthenticatedRequest,

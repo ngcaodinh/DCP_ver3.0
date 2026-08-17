@@ -2,7 +2,6 @@
  * Test cho feedbackBatch.service.ts - kiểm tra các hàm xử lý batch feedback.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import crypto from 'crypto';
 
 // Mock các module dependencies
 vi.mock('../../config/logger', () => ({
@@ -24,6 +23,10 @@ vi.mock('../../models/beneficiaryFeedbackModel', () => ({
   }
 }));
 
+vi.mock('../../services/publicFeedback.service', () => ({
+  invalidatePublicFeedbackStatsCache: vi.fn()
+}));
+
 // Import sau khi mock
 import {
   hashBeneficiaryName,
@@ -34,7 +37,7 @@ import {
   MAX_UPLOAD_SIZE_BYTES
 } from '../../services/feedbackBatch.service';
 import { BeneficiaryFeedbackModel } from '../../models/beneficiaryFeedbackModel';
-import { getLogger } from '../../config/logger';
+import { invalidatePublicFeedbackStatsCache } from '../../services/publicFeedback.service';
 
 describe('feedbackBatch.service', () => {
   beforeEach(() => {
@@ -138,40 +141,61 @@ proj2,Nguyen B,4,Nice,2024-01-15T11:00:00Z`;
         .rejects.toThrow('Batch size exceeds 1000 limit');
     });
 
-    it('nên xử lý CSV với mixed valid/invalid rows (string rating sẽ fail validation)', async () => {
+    it('nên lưu dòng CSV hợp lệ và trả lỗi cho dòng có rating ngoài khoảng', async () => {
       (BeneficiaryFeedbackModel.insertMany as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
 
-      // CSV parse trả về rating dạng string "4" thay vì number 4
-      // nên validator sẽ reject tất cả các row
       const csvContent = `projectId,beneficiaryName,rating,comment,submittedAt
 proj1,Nguyen A,4,Good,2024-01-15T10:00:00Z
 proj2,Nguyen B,99,Invalid,2024-01-15T11:00:00Z`;
 
       const result = await processCsvBatchFeedback(Buffer.from(csvContent), 'org123');
 
-      // Tất cả rows fail vì rating là string không phải number
-      expect(result.success).toBe(0);
-      expect(result.failed).toBe(2);
-      expect(result.errors).toHaveLength(2);
+      expect(result.success).toBe(1);
+      expect(result.failed).toBe(1);
+      expect(result.errors).toEqual([{ rowNumber: 2, reason: expect.stringContaining('Rating must be 1-5') }]);
+      const insertCall = (BeneficiaryFeedbackModel.insertMany as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(insertCall[0][0].rating).toBe(4);
     });
 
-    it('nên xử lý batch và không throw cho empty CSV', async () => {
-      (BeneficiaryFeedbackModel.insertMany as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
-
-      // CSV không có data rows
-      const csvContent = `projectId,beneficiaryName,rating,comment,submittedAt`;
+    it('nên giữ rating CSV không hợp lệ là chuỗi để báo đúng lỗi kiểu dữ liệu', async () => {
+      const csvContent = `projectId,beneficiaryName,rating,comment,submittedAt
+proj1,Nguyen A,abc,Invalid,2024-01-15T10:00:00Z
+proj2,Nguyen B,,Invalid,2024-01-15T11:00:00Z
+proj3,Nguyen C,4.5,Invalid,2024-01-15T12:00:00Z`;
 
       const result = await processCsvBatchFeedback(Buffer.from(csvContent), 'org123');
+
       expect(result.success).toBe(0);
+      expect(result.failed).toBe(3);
+      expect(result.errors.every(error => error.reason.includes('rating phải là số'))).toBe(true);
     });
 
-    it('nên xử lý với input không parse được nhưng không throw', async () => {
-      // csv-parse có thể parse nhiều format không hợp lệ mà không throw
+    it('nên dọn cache một lần cho mỗi project sau khi lưu batch thành công', async () => {
+      (BeneficiaryFeedbackModel.insertMany as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+      const csvContent = `projectId,beneficiaryName,rating,comment,submittedAt
+proj1,Nguyen A,4,Good,2024-01-15T10:00:00Z
+proj1,Tran B,5,Great,2024-01-15T11:00:00Z
+proj2,Le C,3,Okay,2024-01-15T12:00:00Z`;
+
+      await processCsvBatchFeedback(Buffer.from(csvContent), 'org123');
+
+      expect(invalidatePublicFeedbackStatsCache).toHaveBeenCalledTimes(2);
+      expect(invalidatePublicFeedbackStatsCache).toHaveBeenCalledWith('proj1');
+      expect(invalidatePublicFeedbackStatsCache).toHaveBeenCalledWith('proj2');
+    });
+
+    it('nên từ chối CSV không có data rows với EMPTY_BATCH', async () => {
+      const csvContent = `projectId,beneficiaryName,rating,comment,submittedAt`;
+
+      await expect(processCsvBatchFeedback(Buffer.from(csvContent), 'org123'))
+        .rejects.toMatchObject({ errorCode: 'EMPTY_BATCH', statusCode: 400 });
+    });
+
+    it('nên từ chối input không có bản ghi với EMPTY_BATCH', async () => {
       const invalidCsv = 'unparseable{{{';
 
-      const result = await processCsvBatchFeedback(Buffer.from(invalidCsv), 'org123');
-      expect(result).toBeDefined();
-      expect(result.success).toBe(0);
+      await expect(processCsvBatchFeedback(Buffer.from(invalidCsv), 'org123'))
+        .rejects.toMatchObject({ errorCode: 'EMPTY_BATCH', statusCode: 400 });
     });
   });
 
@@ -261,13 +285,9 @@ proj2,Nguyen B,99,Invalid,2024-01-15T11:00:00Z`;
       expect(result.errors[0].rowNumber).toBe(2);
     });
 
-    it('nên xử lý empty array và trả về kết quả rỗng', async () => {
-      const result = await processJsonBatchFeedback([], 'org123');
-
-      expect(result.success).toBe(0);
-      expect(result.failed).toBe(0);
-      expect(result.errors).toHaveLength(0);
-      expect(result.flaggedCount).toBe(0);
+    it('nên từ chối empty array với EMPTY_BATCH', async () => {
+      await expect(processJsonBatchFeedback([], 'org123'))
+        .rejects.toMatchObject({ errorCode: 'EMPTY_BATCH', statusCode: 400 });
     });
 
     it('nên xử lý single valid row', async () => {
@@ -646,8 +666,7 @@ proj1,Nguyen A,4,Good,2024-01-15T10:00:00Z`;
 
       const result = await processCsvBatchFeedback(Buffer.from(csvContent), 'org123');
 
-      // CSV rating is parsed as string "4", so it fails Zod validation (expects number)
-      // The inputType should still be set correctly
+      // CSV rating được chuẩn hóa thành number trước validation nhưng inputType vẫn là csv.
       expect(result.inputType).toBe('csv');
     });
 
@@ -697,6 +716,7 @@ proj1,Nguyen A,4,Good,2024-01-15T10:00:00Z`;
       expect(result.failed).toBe(0);
       // Verify insertMany không được gọi
       expect(BeneficiaryFeedbackModel.insertMany).not.toHaveBeenCalled();
+      expect(invalidatePublicFeedbackStatsCache).not.toHaveBeenCalled();
     });
 
     it('nên trả về isDuplicate = false khi batch chưa tồn tại', async () => {
@@ -716,6 +736,21 @@ proj1,Nguyen A,4,Good,2024-01-15T10:00:00Z`;
 
       expect(result.isDuplicate).toBeUndefined();
       expect(result.success).toBe(1);
+    });
+
+    it('không dùng cache invalidation khi insertMany thất bại', async () => {
+      (BeneficiaryFeedbackModel.insertMany as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('write failed'));
+
+      const payload = [{
+        projectId: 'proj1',
+        beneficiaryName: 'Nguyen A',
+        rating: 4,
+        comment: 'Good',
+        submittedAt: '2024-01-15T10:00:00Z'
+      }];
+
+      await expect(processJsonBatchFeedback(payload, 'org123')).rejects.toThrow('write failed');
+      expect(invalidatePublicFeedbackStatsCache).not.toHaveBeenCalled();
     });
   });
 
