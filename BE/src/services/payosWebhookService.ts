@@ -6,27 +6,16 @@ import {
   type DisbursementResult
 } from './disbursementService';
 import { verifyPayosTransferWebhookChecksum } from './payosService';
-import { webhookEvents, type DisbursementWebhookEventPayload } from '../events/webhookEvents';
 import {
   WebhookAuditLogModel,
   createWebhookAuditId,
   type WebhookAuditAction
 } from '../models/webhookAuditLogModel';
-import * as eventLoggerService from './event-logger.service';
-/**
- * Cac hang so trang thai dung trong webhook handler.
- * Dung thay cho magic strings de tranh loi type-safe khi disbursementService thay doi enum.
- */
-const DISBURSEMENT_STATUS_COMPLETED = 'COMPLETED';
-const PAYOS_TRANSFER_STATUS_SUCCESS = 'SUCCESS';
-const PAYOS_TRANSFER_STATUS_MANUAL_REVIEW = 'MANUAL_REVIEW';
-const PAYOS_TRANSFER_STATUS_FAILED = 'FAILED';
-
 const logger = getLogger();
 
 /**
  * Prefix cho Redis key idempotency.
- * Format: webhook:payos:{orderCode/requestId}
+ * Format: webhook:payos:{orderCode/requestId}:{status}
  */
 const IDEMPOTENCY_KEY_PREFIX = 'webhook:payos:';
 
@@ -47,11 +36,11 @@ export type PayosWebhookProcessResult = {
 };
 
 /**
- * Ham tao idempotency key tu orderCode/requestId.
- * Muc dich: tao key duy nhat cho moi webhook request.
+ * Hàm tạo idempotency key từ orderCode/requestId và trạng thái.
+ * Mục đích: cho phép webhook cập nhật từ PROCESSING sang trạng thái terminal.
  */
-function buildIdempotencyKey(identifier: string): string {
-  return `${IDEMPOTENCY_KEY_PREFIX}${identifier}`;
+function buildIdempotencyKey(identifier: string, status: string): string {
+  return `${IDEMPOTENCY_KEY_PREFIX}${identifier}:${status}`;
 }
 
 /**
@@ -84,19 +73,35 @@ function extractOrderCode(payload: DisbursementTransferWebhookPayload): string |
 }
 
 /**
- * Ham kiem tra va thiet lap idempotency key trong Redis.
- * Tra ve true neu request la moi (key chua ton tai).
- * Tra ve false neu request la duplicate (key da ton tai).
- * Muc dich: chong xu ly trung lap webhook.
+ * Hàm trích xuất trạng thái webhook để phân biệt các lần callback trong cùng transfer.
+ * Mục đích: giữ idempotency theo từng trạng thái thay vì khóa cả vòng đời orderCode.
  */
-async function checkAndSetIdempotency(orderCode: string): Promise<boolean> {
+function extractWebhookStatus(payload: DisbursementTransferWebhookPayload): string {
+  const data = payload.data as Record<string, unknown> | undefined;
+  const rawStatus = data?.state
+    || data?.status
+    || data?.approvalState
+    || payload.status
+    || payload.code
+    || 'UNKNOWN';
+
+  return String(rawStatus).trim().toUpperCase() || 'UNKNOWN';
+}
+
+/**
+ * Hàm kiểm tra và thiết lập idempotency key trong Redis.
+ * Trả về true nếu request là mới (key chưa tồn tại).
+ * Trả về false nếu request là duplicate (key đã tồn tại).
+ * Mục đích: chống xử lý trùng lặp webhook.
+ */
+async function checkAndSetIdempotency(orderCode: string, status: string): Promise<boolean> {
   const redisClient = getRedisClientIfReady();
   if (!redisClient) {
     logger.warn('Redis chua san sang, bo qua idempotency check. orderCode=${orderCode}', { orderCode: orderCode });
     return true;
   }
 
-  const idempotencyKey = buildIdempotencyKey(orderCode);
+  const idempotencyKey = buildIdempotencyKey(orderCode, status);
   try {
     // SETNX voi TTL - tra ve 1 neu key moi duoc set (true), 0 neu key da ton tai (false)
     const result = await redisClient.setNX(idempotencyKey, Date.now().toString());
@@ -193,81 +198,6 @@ async function writeWebhookAuditLog(
 }
 
 /**
- * Ham emit notification event sau khi xu ly webhook thanh cong.
- * Muc dich: gui thong bao cho organization khi disbursement hoan tat hoac that bai.
- * Ghi chu: organizationId da co trong DisbursementResult (da duoc them sau review A2)
- * nen khong can query lai tu DB, traanh N+1 query.
- */
-async function emitDisbursementNotification(
-  disbursement: DisbursementResult,
-  _rawPayload: DisbursementTransferWebhookPayload
-): Promise<void> {
-  try {
-    const eventPayload: DisbursementWebhookEventPayload = {
-      requestId: disbursement.requestId,
-      projectId: disbursement.projectId,
-      organizationId: disbursement.organizationId,
-      amount: disbursement.amount,
-      status: disbursement.status,
-      payosTransferStatus: disbursement.payosTransferStatus || 'UNKNOWN',
-      payosTransferId: disbursement.payosTransferId,
-      transactionHash: null
-    };
-
-    // Xac dinh loai event dua tren trang thai
-    if (disbursement.status === DISBURSEMENT_STATUS_COMPLETED && disbursement.payosTransferStatus === PAYOS_TRANSFER_STATUS_SUCCESS) {
-      webhookEvents.emit('DISBURSEMENT_TRANSFERRED', eventPayload);
-      eventLoggerService.logEvent({
-        eventType: 'DISBURSEMENT_TRANSFERRED',
-        projectId: disbursement.projectId,
-        organizationId: disbursement.organizationId,
-        amount: disbursement.amount,
-        correlationId: disbursement.requestId,
-        timestamp: new Date(),
-        payload: {
-          requestId: disbursement.requestId,
-          status: disbursement.status,
-          payosTransferStatus: disbursement.payosTransferStatus,
-          payosTransferId: disbursement.payosTransferId,
-          transactionHash: eventPayload.transactionHash
-        }
-      });
-      logger.info('Da emit DISBURSEMENT_TRANSFERRED event. requestId=${disbursement.requestId}', {
-        requestId: disbursement.requestId
-      });
-    } else if (
-      disbursement.payosTransferStatus === PAYOS_TRANSFER_STATUS_MANUAL_REVIEW
-      || disbursement.payosTransferStatus === PAYOS_TRANSFER_STATUS_FAILED
-    ) {
-      webhookEvents.emit('DISBURSEMENT_TRANSFER_FAILED', eventPayload);
-      eventLoggerService.logEvent({
-        eventType: 'DISBURSEMENT_TRANSFER_FAILED',
-        projectId: disbursement.projectId,
-        organizationId: disbursement.organizationId,
-        amount: disbursement.amount,
-        correlationId: disbursement.requestId,
-        timestamp: new Date(),
-        payload: {
-          requestId: disbursement.requestId,
-          status: disbursement.status,
-          payosTransferStatus: disbursement.payosTransferStatus,
-          payosTransferId: disbursement.payosTransferId,
-          transactionHash: eventPayload.transactionHash
-        }
-      });
-      logger.info('Da emit DISBURSEMENT_TRANSFER_FAILED event. requestId=${disbursement.requestId}', {
-        requestId: disbursement.requestId
-      });
-    }
-  } catch (error) {
-    logger.error('Emit notification event that bai. requestId=${disbursement.requestId}', {
-      requestId: disbursement.requestId,
-      errorMessage: (error as Error)?.message
-    });
-  }
-}
-
-/**
  * Ham verify checksum cua webhook payload.
  * Tra ve true neu checksum hop le, false neu khong.
  * Muc dich: xac thuc webhook thuc su den tu PayOS.
@@ -328,7 +258,7 @@ export async function processPayosWebhook(
 
   // Buoc 2: Idempotency check
   if (orderCode) {
-    const isNewRequest = await checkAndSetIdempotency(orderCode);
+    const isNewRequest = await checkAndSetIdempotency(orderCode, extractWebhookStatus(payload));
     if (!isNewRequest) {
       // Webhook trung lap - ghi audit log va tra ve thanh cong (idempotent)
       await writeWebhookAuditLog(
@@ -353,10 +283,7 @@ export async function processPayosWebhook(
   try {
     const disbursement = await processDisbursementTransferWebhook(payload);
 
-    // Buoc 4: Emit notification event
-    await emitDisbursementNotification(disbursement, payload);
-
-    // Buoc 5: Ghi audit log thanh cong
+    // Buoc 4: Ghi audit log thanh cong
     await writeWebhookAuditLog(
       'WEBHOOK_PROCESSED',
       sourceIp,

@@ -22,6 +22,8 @@ import {
 import { AuthUser, findUserById, updateUser } from '../models/authModel';
 import { findProjectById } from '../repositories/projectRepository';
 import { createUserNotification } from './notificationService';
+import { webhookEvents, type DisbursementWebhookEventPayload } from '../events/webhookEvents';
+import * as eventLoggerService from './event-logger.service';
 import { createKernelClientFromEncryptedOwnerKey } from './zeroDevService';
 import {
   getPayosTransferStatusByReferenceId,
@@ -92,6 +94,7 @@ const logger = getLogger();
 
 const transferStatusSweepIntervalMilliseconds = 60000;
 const transferStatusSweepBatchLimitCount = 20;
+const FINALIZE_CLAIM_LEASE_MS = 10 * 60 * 1000;
 const minimumPayosTransferAmountVnd = readPositiveIntegerEnv(process.env.PAYOS_TRANSFER_MIN_AMOUNT_VND, 10000);
 const activeTransferSyncRequestIdSet = new Set<string>();
 let isTransferStatusSweepStarted = false;
@@ -233,6 +236,17 @@ type ProcessDisbursementTransferWebhookOptions = {
   expectedTransferIdempotencyKey?: string;
 };
 
+type DisbursementNotificationData = Pick<
+  DisbursementResult,
+  'requestId'
+  | 'projectId'
+  | 'organizationId'
+  | 'amount'
+  | 'status'
+  | 'payosTransferStatus'
+  | 'payosTransferId'
+>;
+
 // ============ HELPERS ============
 
 /** Hàm đọc số nguyên dương từ biến môi trường. Mục đích: cấu hình polling an toàn với fallback mặc định. */
@@ -302,6 +316,71 @@ async function createDisbursementSignatureNotification(record: DisbursementRecor
       amount: record.amount
     }
   });
+}
+
+/**
+ * Phát sự kiện thông báo khi trạng thái giải ngân đã chuyển terminal.
+ * Chỉ caller thắng cập nhật nguyên tử mới được gọi hàm này để tránh gửi trùng.
+ */
+export async function emitDisbursementNotification(
+  disbursement: DisbursementNotificationData
+): Promise<void> {
+  try {
+    const eventPayload: DisbursementWebhookEventPayload = {
+      requestId: disbursement.requestId,
+      projectId: disbursement.projectId,
+      organizationId: disbursement.organizationId,
+      amount: disbursement.amount,
+      status: disbursement.status,
+      payosTransferStatus: disbursement.payosTransferStatus || 'UNKNOWN',
+      payosTransferId: disbursement.payosTransferId,
+      transactionHash: null
+    };
+
+    if (disbursement.status === 'COMPLETED' && disbursement.payosTransferStatus === 'SUCCESS') {
+      webhookEvents.emit('DISBURSEMENT_TRANSFERRED', eventPayload);
+      eventLoggerService.logEvent({
+        eventType: 'DISBURSEMENT_TRANSFERRED',
+        projectId: disbursement.projectId,
+        organizationId: disbursement.organizationId,
+        amount: disbursement.amount,
+        correlationId: disbursement.requestId,
+        timestamp: new Date(),
+        payload: {
+          requestId: disbursement.requestId,
+          status: disbursement.status,
+          payosTransferStatus: disbursement.payosTransferStatus,
+          payosTransferId: disbursement.payosTransferId,
+          transactionHash: eventPayload.transactionHash
+        }
+      });
+      return;
+    }
+
+    if (disbursement.payosTransferStatus === 'MANUAL_REVIEW' || disbursement.payosTransferStatus === 'FAILED') {
+      webhookEvents.emit('DISBURSEMENT_TRANSFER_FAILED', eventPayload);
+      eventLoggerService.logEvent({
+        eventType: 'DISBURSEMENT_TRANSFER_FAILED',
+        projectId: disbursement.projectId,
+        organizationId: disbursement.organizationId,
+        amount: disbursement.amount,
+        correlationId: disbursement.requestId,
+        timestamp: new Date(),
+        payload: {
+          requestId: disbursement.requestId,
+          status: disbursement.status,
+          payosTransferStatus: disbursement.payosTransferStatus,
+          payosTransferId: disbursement.payosTransferId,
+          transactionHash: eventPayload.transactionHash
+        }
+      });
+    }
+  } catch (error) {
+    logger.error('Phát sự kiện notification giải ngân thất bại.', {
+      requestId: disbursement.requestId,
+      errorMessage: (error as Error)?.message
+    });
+  }
 }
 
 /** Hàm ánh xạ trạng thái request sang trạng thái nhật ký để frontend hiển thị badge thống nhất. */
@@ -1076,6 +1155,47 @@ export function startDisbursementTransferStatusSweepPolling(): void {
   }, sweepIntervalMilliseconds);
 }
 
+/**
+ * Claim nguyên tử quyền finalize on-chain cho một transfer đang PROCESSING.
+ * Lease cho phép tiến trình khác thu hồi claim bị bỏ dở sau khi process crash.
+ */
+async function claimDisbursementFinalization(
+  requestId: string,
+  expectedTransferIdempotencyKey?: string
+): Promise<{ claimId: string; disbursement: DisbursementRecord } | null> {
+  const claimId = randomUUID();
+  const claimedAt = new Date();
+  const expiredClaimAt = new Date(claimedAt.getTime() - FINALIZE_CLAIM_LEASE_MS);
+  const condition: Record<string, unknown> = {
+    status: { $in: ['APPROVED', 'EXECUTING'] },
+    payosTransferStatus: { $in: ['PROCESSING', null] },
+    $or: [
+      { finalizeClaimId: null },
+      { finalizeClaimedAt: null },
+      { finalizeClaimedAt: { $lte: expiredClaimAt } }
+    ]
+  };
+
+  if (expectedTransferIdempotencyKey) {
+    condition.transferIdempotencyKey = expectedTransferIdempotencyKey;
+  }
+
+  const claimedDisbursement = await updateDisbursementByRequestIdWithCondition(
+    requestId,
+    condition,
+    {
+      finalizeClaimId: claimId,
+      finalizeClaimedAt: claimedAt
+    }
+  );
+
+  if (!claimedDisbursement) {
+    return null;
+  }
+
+  return { claimId, disbursement: claimedDisbursement };
+}
+
 
 /** Hàm xử lý webhook chuyển khoản FR8 từ PayOS. Mục đích: xác thực checksum, cập nhật trạng thái transfer, và finalize on-chain khi nhận SUCCESS. */
 export async function processDisbursementTransferWebhook(
@@ -1186,7 +1306,9 @@ export async function processDisbursementTransferWebhook(
         payosTransferStatus: 'MANUAL_REVIEW',
         payosTransferId: webhookIdentifiers.transferId || disbursementRecord.payosTransferId,
         payosTransferLastError: manualReviewReason,
-        transferIdempotencyKey: disbursementRecord.transferIdempotencyKey || buildTransferIdempotencyKey(disbursementRecord.requestId)
+        transferIdempotencyKey: disbursementRecord.transferIdempotencyKey || buildTransferIdempotencyKey(disbursementRecord.requestId),
+        finalizeClaimId: null,
+        finalizeClaimedAt: null
       }
     );
 
@@ -1194,6 +1316,7 @@ export async function processDisbursementTransferWebhook(
     await removePendingJobsByRequestId(disbursementRecord.requestId);
 
     if (manualReviewRecord) {
+      await emitDisbursementNotification(manualReviewRecord);
       await openManualReviewQueueForDisbursement({
         disbursement: manualReviewRecord,
         reason: manualReviewReason,
@@ -1205,21 +1328,40 @@ export async function processDisbursementTransferWebhook(
     return mapDisbursementRecordToResult(manualReviewRecord || disbursementRecord);
   }
 
-  const providerTransactionId = webhookIdentifiers.providerTransactionId
-    || disbursementRecord.payosTransferId
-    || disbursementRecord.requestId;
+  const finalizationClaim = await claimDisbursementFinalization(
+    disbursementRecord.requestId,
+    options?.expectedTransferIdempotencyKey
+  );
+  if (!finalizationClaim) {
+    const currentRecord = await findDisbursementByRequestId(disbursementRecord.requestId);
+    if (currentRecord) {
+      logger.warn('Bỏ qua finalize vì disbursement đã có caller khác giữ claim.', {
+        requestId: disbursementRecord.requestId,
+        source: options?.source
+      });
+      return mapDisbursementRecordToResult(currentRecord);
+    }
+
+    throw new ApplicationError('Không tìm thấy disbursement sau khi claim finalize.', 500, 'INTERNAL_ERROR');
+  }
+
+  const { claimId, disbursement: claimedDisbursement } = finalizationClaim;
+  const claimedProviderTransactionId = webhookIdentifiers.providerTransactionId
+    || claimedDisbursement.payosTransferId
+    || claimedDisbursement.requestId;
 
   try {
     const finalizeTransactionHash = await finalizeDisbursementOnChain(
-      disbursementRecord.onChainRequestId,
-      providerTransactionId
+      claimedDisbursement.onChainRequestId,
+      claimedProviderTransactionId
     );
 
     const completedRecord = await updateDisbursementByRequestIdWithCondition(
       disbursementRecord.requestId,
       {
-        status: { $ne: 'REJECTED' },
-        payosTransferStatus: { $ne: 'FAILED' }
+        status: { $in: ['APPROVED', 'EXECUTING'] },
+        payosTransferStatus: 'PROCESSING',
+        finalizeClaimId: claimId
       },
       {
         status: 'COMPLETED',
@@ -1229,7 +1371,9 @@ export async function processDisbursementTransferWebhook(
         finalizeTransactionHash,
         transactionHash: finalizeTransactionHash,
         completedAt: new Date(),
-        payosTransferLastError: null
+        payosTransferLastError: null,
+        finalizeClaimId: null,
+        finalizeClaimedAt: null
       }
     );
 
@@ -1252,6 +1396,7 @@ export async function processDisbursementTransferWebhook(
     );
 
     // Dọn dẹp các job đang chờ để tránh duplicate transfer sau khi finalize thành công
+    await emitDisbursementNotification(completedRecord);
     await removePendingJobsByRequestId(completedRecord.requestId);
 
     return mapDisbursementRecordToResult(completedRecord);
@@ -1261,18 +1406,22 @@ export async function processDisbursementTransferWebhook(
       disbursementRecord.requestId,
       {
         status: { $nin: ['COMPLETED', 'REJECTED', 'CANCELLED'] },
-        payosTransferStatus: { $nin: ['SUCCESS', 'FAILED'] }
+        payosTransferStatus: { $nin: ['SUCCESS', 'FAILED'] },
+        finalizeClaimId: claimId
       },
       {
         status: 'APPROVED',
         payosTransferStatus: 'MANUAL_REVIEW',
         payosTransferId: webhookIdentifiers.transferId || disbursementRecord.payosTransferId,
         payosTransferLastError: `Finalize thất bại sau webhook SUCCESS: ${errorMessage}`,
-        transferIdempotencyKey: disbursementRecord.transferIdempotencyKey || buildTransferIdempotencyKey(disbursementRecord.requestId)
+        transferIdempotencyKey: disbursementRecord.transferIdempotencyKey || buildTransferIdempotencyKey(disbursementRecord.requestId),
+        finalizeClaimId: null,
+        finalizeClaimedAt: null
       }
     );
 
     if (manualReviewRecord) {
+      await emitDisbursementNotification(manualReviewRecord);
       await removePendingJobsByRequestId(manualReviewRecord.requestId);
       await openManualReviewQueueForDisbursement({
         disbursement: manualReviewRecord,

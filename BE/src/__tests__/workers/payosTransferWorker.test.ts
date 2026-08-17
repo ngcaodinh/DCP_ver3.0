@@ -6,10 +6,12 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 // ============ Mock external modules ============
 
+const mockLoggerWarn = vi.hoisted(() => vi.fn());
+
 vi.mock('../../config/logger', () => ({
   getLogger: () => ({
     info: vi.fn(),
-    warn: vi.fn(),
+    warn: mockLoggerWarn,
     error: vi.fn(),
   }),
 }));
@@ -62,6 +64,7 @@ vi.mock('../../services/notificationService', () => ({
 }));
 
 vi.mock('../../services/disbursementService', () => ({
+  emitDisbursementNotification: vi.fn(),
   processDisbursementTransferWebhook: vi.fn(),
 }));
 
@@ -571,6 +574,35 @@ describe('payosTransferWorker - processTransferJob', () => {
     vi.useRealTimers();
   });
 
+  it('should warn when the beneficiary bank is missing from the PayOS BIN map', async () => {
+    const { processTransferJob } = await import('../../workers/payosTransferWorker');
+    const disbursement = makeMockDisbursement({
+      requestId: 'DS-TEST-001',
+      beneficiaryBankAccount: {
+        bankName: 'Unknown Bank',
+        bankAccountNumber: '1234567890',
+        accountHolderName: 'Test User'
+      },
+      payosTransferStatus: 'PROCESSING',
+      transferIdempotencyKey: 'key-1'
+    });
+    (disbursementModel.findDisbursementByRequestId as ReturnType<typeof vi.fn>)
+      .mockResolvedValue(disbursement);
+    (disbursementModel.updateDisbursementByRequestIdWithCondition as ReturnType<typeof vi.fn>)
+      .mockResolvedValue(disbursement);
+    (disbursementTransferModel.createTransferLog as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeMockTransferLog({ transferLogId: 'TRF-001' })
+    );
+    (payosService.createPayosTransfer as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('PayOS unavailable'));
+
+    await processTransferJob(makeMockJob({ requestId: 'DS-TEST-001', attemptNumber: 1, idempotencyKey: 'key-1' }));
+
+    expect(mockLoggerWarn).toHaveBeenCalledWith(
+      expect.stringContaining('PayOS'),
+      expect.objectContaining({ requestId: 'DS-TEST-001', bankName: 'Unknown Bank' })
+    );
+  });
+
   it('should skip job when disbursement not found', async () => {
     const { processTransferJob } = await import('../../workers/payosTransferWorker');
     (disbursementModel.findDisbursementByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(null);
@@ -830,8 +862,8 @@ describe('payosTransferWorker - processTransferJob', () => {
     (disbursementTransferQueue.removePendingJobsByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(0);
     (notificationService.createUserNotification as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
 
-    // Attempt 3 = max, so should move to manual review
-    const mockJob = makeMockJob({ requestId: 'DS-TEST-001', attemptNumber: 3, idempotencyKey: 'key-1' });
+    // Attempt 4 = max after 3 retry delays, so should move to manual review
+    const mockJob = makeMockJob({ requestId: 'DS-TEST-001', attemptNumber: 4, idempotencyKey: 'key-1' });
     await processTransferJob(mockJob);
 
     expect(disbursementModel.updateDisbursementByRequestIdWithCondition).toHaveBeenCalledWith(
@@ -931,7 +963,7 @@ describe('payosTransferWorker - processTransferJob', () => {
     (disbursementTransferQueue.removePendingJobsByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(0);
     (notificationService.createUserNotification as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
 
-    const mockJob = makeMockJob({ requestId: 'DS-TEST-001', attemptNumber: 3, idempotencyKey: 'key-1' });
+    const mockJob = makeMockJob({ requestId: 'DS-TEST-001', attemptNumber: 4, idempotencyKey: 'key-1' });
     await processTransferJob(mockJob);
 
     expect(disbursementModel.updateDisbursementByRequestIdWithCondition).toHaveBeenCalledWith(
@@ -1080,7 +1112,7 @@ describe('payosTransferWorker - processTransferJob', () => {
     (disbursementTransferQueue.removePendingJobsByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(0);
     (notificationService.createUserNotification as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
 
-    const mockJob = makeMockJob({ requestId: 'DS-TEST-001', attemptNumber: 3, idempotencyKey: 'key-1' });
+    const mockJob = makeMockJob({ requestId: 'DS-TEST-001', attemptNumber: 4, idempotencyKey: 'key-1' });
     await processTransferJob(mockJob);
 
     expect(disbursementModel.updateDisbursementByRequestIdWithCondition).toHaveBeenCalledWith(
@@ -1119,6 +1151,59 @@ describe('payosTransferWorker - processTransferJob', () => {
     );
     expect(manualReviewCalls.length).toBe(0);
   });
+
+  it('should use all three retry delays before moving to manual review', async () => {
+    const { processTransferJob } = await import('../../workers/payosTransferWorker');
+    const processingDisbursement = makeMockDisbursement({
+      requestId: 'DS-TEST-001',
+      status: 'APPROVED',
+      payosTransferStatus: 'PROCESSING',
+      transferIdempotencyKey: 'key-1'
+    });
+    const manualReviewDisbursement = makeMockDisbursement({
+      ...processingDisbursement,
+      payosTransferStatus: 'MANUAL_REVIEW'
+    });
+
+    (disbursementModel.findDisbursementByRequestId as ReturnType<typeof vi.fn>)
+      .mockResolvedValue(processingDisbursement);
+    (disbursementModel.updateDisbursementByRequestIdWithCondition as ReturnType<typeof vi.fn>)
+      .mockImplementation(async (_requestId: string, _condition: unknown, payload: Record<string, unknown>) => (
+        payload.payosTransferStatus === 'MANUAL_REVIEW'
+          ? manualReviewDisbursement
+          : processingDisbursement
+      ));
+    (disbursementTransferModel.createTransferLog as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeMockTransferLog({ transferLogId: 'TRF-001' })
+    );
+    (disbursementTransferModel.updateTransferLogById as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeMockTransferLog({ transferLogId: 'TRF-001', status: 'FAILED' })
+    );
+    (payosService.createPayosTransfer as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('Temporary error'));
+    (disbursementTransferQueue.removePendingJobsByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(0);
+    (manualReviewService.openManualReviewQueueForDisbursement as ReturnType<typeof vi.fn>).mockResolvedValue({});
+
+    const enqueueMock = disbursementTransferQueue.enqueueDisbursementTransfer as ReturnType<typeof vi.fn>;
+    enqueueMock.mockClear();
+
+    for (const attemptNumber of [1, 2, 3, 4]) {
+      await processTransferJob(makeMockJob({
+        requestId: 'DS-TEST-001',
+        attemptNumber,
+        idempotencyKey: 'key-1'
+      }));
+    }
+
+    expect(enqueueMock).toHaveBeenNthCalledWith(1, 'DS-TEST-001', 2, 'key-1', { delay: 60_000 });
+    expect(enqueueMock).toHaveBeenNthCalledWith(2, 'DS-TEST-001', 3, 'key-1', { delay: 300_000 });
+    expect(enqueueMock).toHaveBeenNthCalledWith(3, 'DS-TEST-001', 4, 'key-1', { delay: 1_800_000 });
+    expect(enqueueMock).toHaveBeenCalledTimes(3);
+    expect(disbursementModel.updateDisbursementByRequestIdWithCondition).toHaveBeenLastCalledWith(
+      'DS-TEST-001',
+      expect.objectContaining({ transferIdempotencyKey: 'key-1' }),
+      expect.objectContaining({ payosTransferStatus: 'MANUAL_REVIEW' })
+    );
+  });
 });
 
 // ============ Integration: startPayosTransferWorker ============
@@ -1131,7 +1216,7 @@ describe('payosTransferWorker - startPayosTransferWorker', () => {
   it('should register process handler and event listeners', async () => {
     const { startPayosTransferWorker } = await import('../../workers/payosTransferWorker');
     startPayosTransferWorker();
-    expect(mockQueueProcess).toHaveBeenCalledWith(expect.any(Function));
+    expect(mockQueueProcess).toHaveBeenCalledWith(5, expect.any(Function));
     expect(mockQueueOn).toHaveBeenCalledWith('completed', expect.any(Function));
   });
 });

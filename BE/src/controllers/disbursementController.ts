@@ -13,9 +13,9 @@ import {
   getMaxWithdrawableAmount,
   signDisbursementRequest,
   rejectDisbursementRequest,
-  processDisbursementTransferWebhook,
   DisbursementTransferWebhookPayload
 } from '../services/disbursementService';
+import { processPayosWebhook } from '../services/payosWebhookService';
 
 const logger = getLogger();
 
@@ -84,7 +84,16 @@ export async function handleDisbursementTransferWebhook(request: Request, respon
       return;
     }
 
-    const processedDisbursement = await processDisbursementTransferWebhook(webhookPayload);
+    const webhookResult = await processPayosWebhook(
+      webhookPayload,
+      request.ip || request.socket.remoteAddress || 'unknown'
+    );
+    if (!webhookResult.disbursement) {
+      response.status(200).json({ message: webhookResult.message });
+      return;
+    }
+
+    const processedDisbursement = webhookResult.disbursement;
     response.status(200).json({
       message: 'Webhook transfer được xử lý thành công.',
       requestId: processedDisbursement.requestId,

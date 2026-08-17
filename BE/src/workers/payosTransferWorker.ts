@@ -19,16 +19,22 @@ import {
   updateDisbursementByRequestIdWithCondition
 } from '../models/disbursementModel';
 import { createPayosTransfer, getPayosTransferStatusByReferenceId } from '../services/payosService';
-import { processDisbursementTransferWebhook } from '../services/disbursementService';
+import {
+  emitDisbursementNotification,
+  processDisbursementTransferWebhook
+} from '../services/disbursementService';
 import { openManualReviewQueueForDisbursement } from '../services/manualReviewService';
 import { getPayosBankCode } from '../config/payosBankCodes';
 import { sanitizeProviderError } from '../utils/sanitizeProviderError';
 
 /**
- * Giới hạn số lần retry tối đa.
- * Sau 3 lần fail → chuyển sang MANUAL_REVIEW.
+ * Tổng số attempt gồm lần đầu và 3 lần retry có backoff.
+ * Sau attempt thứ 4 fail → chuyển sang MANUAL_REVIEW.
  */
-const MAX_TRANSFER_RETRY_COUNT = 3;
+const MAX_TRANSFER_ATTEMPT_COUNT = 4;
+
+/** Số job PayOS được phép xử lý đồng thời, khớp với limiter của queue. */
+const PAYOS_TRANSFER_WORKER_CONCURRENCY = 5;
 
 /**
  * Thời gian polling interval sau khi tạo transfer (miliseconds).
@@ -156,7 +162,9 @@ export async function moveToManualReview(
     status: 'APPROVED',
     payosTransferStatus: 'MANUAL_REVIEW',
     payosTransferLastError: safeErrorMessage,
-    payosTransferId: finalTransferId ?? undefined
+    payosTransferId: finalTransferId ?? undefined,
+    finalizeClaimId: null,
+    finalizeClaimedAt: null
   });
 
   // Dọn dẹp các job đang chờ để tránh duplicate transfer sau khi chuyển manual review
@@ -169,6 +177,8 @@ export async function moveToManualReview(
   }
 
   await removePendingJobsByRequestId(requestId);
+
+  await emitDisbursementNotification(updatedDisbursement);
 
   await openManualReviewQueueForDisbursement({
     disbursement: updatedDisbursement,
@@ -399,8 +409,14 @@ async function processTransferJobInternal(job: Job<DisbursementTransferJobData>)
   }
 
   // Lấy PayOS bank code từ config - đã được externalize vào payosBankCodes.ts
-  const bankCode = getPayosBankCode(disbursement.beneficiaryBankAccount.bankName)
-    || disbursement.beneficiaryBankAccount.bankName.slice(0, 32);
+  const configuredBankCode = getPayosBankCode(disbursement.beneficiaryBankAccount.bankName);
+  if (!configuredBankCode) {
+    logger.warn('Không tìm thấy mã BIN ngân hàng trong cấu hình PayOS, đang dùng fallback.', {
+      requestId,
+      bankName: disbursement.beneficiaryBankAccount.bankName
+    });
+  }
+  const bankCode = configuredBankCode || disbursement.beneficiaryBankAccount.bankName.slice(0, 32);
 
   // Tạo bản ghi log cho attempt này
   const transferLogRecord: DisbursementTransferLogRecord = {
@@ -541,7 +557,7 @@ async function processTransferJobInternal(job: Job<DisbursementTransferJobData>)
         errorMessage: errorMsg
       });
 
-      if (attemptNumber >= MAX_TRANSFER_RETRY_COUNT) {
+      if (attemptNumber >= MAX_TRANSFER_ATTEMPT_COUNT) {
         await moveToManualReview(requestId, errorMsg, transferResult.transferId, idempotencyKey);
       } else {
         await scheduleNextTransferRetry(requestId, attemptNumber, idempotencyKey, true);
@@ -582,7 +598,7 @@ async function processTransferJobInternal(job: Job<DisbursementTransferJobData>)
     }
 
     // Polling kết thúc nhưng không xác định được trạng thái cuối
-    if (attemptNumber >= MAX_TRANSFER_RETRY_COUNT) {
+    if (attemptNumber >= MAX_TRANSFER_ATTEMPT_COUNT) {
       await updateTransferLogById(transferLog.transferLogId, {
         status: 'MANUAL_REVIEW',
         errorMessage: 'Không xác định được trạng thái cuối sau polling.',
@@ -632,7 +648,7 @@ async function processTransferJobInternal(job: Job<DisbursementTransferJobData>)
     });
 
     // Nếu đã hết retry → chuyển manual review
-    if (attemptNumber >= MAX_TRANSFER_RETRY_COUNT) {
+    if (attemptNumber >= MAX_TRANSFER_ATTEMPT_COUNT) {
       await moveToManualReview(requestId, errorMessage, undefined, idempotencyKey);
     } else {
       await scheduleNextTransferRetry(requestId, attemptNumber, idempotencyKey);
@@ -656,8 +672,8 @@ export function startPayosTransferWorker(): void {
     return;
   }
 
-  // Retry với exponential backoff: 1m → 5m → 30m
-  queue.process(async (job: Job<DisbursementTransferJobData>) => {
+  // Retry backoff: 1m → 5m → 30m, tổng cộng 3 lần retry sau attempt đầu tiên.
+  queue.process(PAYOS_TRANSFER_WORKER_CONCURRENCY, async (job: Job<DisbursementTransferJobData>) => {
     return runWithWorkerContext('payos-transfer', async () => {
       try {
         await processTransferJobInternal(job);
@@ -672,7 +688,7 @@ export function startPayosTransferWorker(): void {
           errorMessage
         });
 
-        if (attemptNumber < MAX_TRANSFER_RETRY_COUNT) {
+        if (attemptNumber < MAX_TRANSFER_ATTEMPT_COUNT) {
           await scheduleNextTransferRetry(requestId, attemptNumber, job.data.idempotencyKey);
         } else {
           await moveToManualReview(requestId, errorMessage, undefined, job.data.idempotencyKey);

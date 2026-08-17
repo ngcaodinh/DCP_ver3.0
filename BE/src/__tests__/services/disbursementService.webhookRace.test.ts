@@ -7,6 +7,8 @@ const mockFindDisbursementByRequestId = vi.hoisted(() => vi.fn());
 const mockUpdateDisbursementByRequestIdWithCondition = vi.hoisted(() => vi.fn());
 const mockRemovePendingJobsByRequestId = vi.hoisted(() => vi.fn());
 const mockOpenManualReviewQueueForDisbursement = vi.hoisted(() => vi.fn());
+const mockWebhookEventsEmit = vi.hoisted(() => vi.fn());
+const mockEventLoggerLogEvent = vi.hoisted(() => vi.fn());
 
 vi.mock('ethers', () => ({
   ethers: {
@@ -29,6 +31,16 @@ vi.mock('../../config/logger', () => ({
 
 vi.mock('../../utils/blockchainMetrics', () => ({
   recordBlockchainTransaction: mockRecordBlockchainTransaction
+}));
+
+vi.mock('../../events/webhookEvents', () => ({
+  webhookEvents: {
+    emit: mockWebhookEventsEmit
+  }
+}));
+
+vi.mock('../../services/event-logger.service', () => ({
+  logEvent: mockEventLoggerLogEvent
 }));
 
 vi.mock('../../models/disbursementModel', () => ({
@@ -140,7 +152,9 @@ describe('processDisbursementTransferWebhook race guards', () => {
     mockFindDisbursementByRequestId
       .mockResolvedValueOnce(approved)
       .mockResolvedValueOnce(rejected);
-    mockUpdateDisbursementByRequestIdWithCondition.mockResolvedValue(null);
+    mockUpdateDisbursementByRequestIdWithCondition
+      .mockResolvedValueOnce(approved)
+      .mockResolvedValueOnce(null);
 
     const result = await processDisbursementTransferWebhook(
       { requestId: 'DS-RACE-001', status: 'SUCCESS' },
@@ -152,8 +166,9 @@ describe('processDisbursementTransferWebhook race guards', () => {
     expect(mockUpdateDisbursementByRequestIdWithCondition).toHaveBeenCalledWith(
       'DS-RACE-001',
       expect.objectContaining({
-        status: { $ne: 'REJECTED' },
-        payosTransferStatus: { $ne: 'FAILED' }
+        status: { $in: ['APPROVED', 'EXECUTING'] },
+        payosTransferStatus: 'PROCESSING',
+        finalizeClaimId: expect.any(String)
       }),
       expect.objectContaining({ status: 'COMPLETED', payosTransferStatus: 'SUCCESS' })
     );
@@ -171,7 +186,9 @@ describe('processDisbursementTransferWebhook race guards', () => {
     mockFindDisbursementByRequestId
       .mockResolvedValueOnce(approved)
       .mockResolvedValueOnce(rejected);
-    mockUpdateDisbursementByRequestIdWithCondition.mockResolvedValue(null);
+    mockUpdateDisbursementByRequestIdWithCondition
+      .mockResolvedValueOnce(approved)
+      .mockResolvedValueOnce(null);
 
     const result = await processDisbursementTransferWebhook(
       { requestId: 'DS-RACE-001', status: 'SUCCESS' },
@@ -213,6 +230,59 @@ describe('processDisbursementTransferWebhook race guards', () => {
     expect(mockUpdateDisbursementByRequestIdWithCondition).not.toHaveBeenCalled();
   });
 
+  it('does not call finalize when another caller already owns the atomic claim', async () => {
+    const approved = makeDisbursement();
+    const claimed = makeDisbursement({ finalizeClaimId: 'other-claim' });
+    mockFindDisbursementByRequestId
+      .mockResolvedValueOnce(approved)
+      .mockResolvedValueOnce(claimed);
+    mockUpdateDisbursementByRequestIdWithCondition.mockResolvedValue(null);
+
+    const result = await processDisbursementTransferWebhook(
+      { requestId: 'DS-RACE-001', transferId: 'payos-001', status: 'SUCCESS' },
+      { skipChecksumVerify: true, source: 'internal_poll', expectedTransferIdempotencyKey: 'key-001' }
+    );
+
+    expect(result.status).toBe('APPROVED');
+    expect(mockFinalizeDisbursement).not.toHaveBeenCalled();
+    expect(mockUpdateDisbursementByRequestIdWithCondition).toHaveBeenCalledWith(
+      'DS-RACE-001',
+      expect.objectContaining({
+        status: { $in: ['APPROVED', 'EXECUTING'] },
+        payosTransferStatus: { $in: ['PROCESSING', null] },
+        transferIdempotencyKey: 'key-001'
+      }),
+      expect.objectContaining({ finalizeClaimId: expect.any(String), finalizeClaimedAt: expect.any(Date) })
+    );
+  });
+
+  it('emits success notification when internal polling wins the finalize claim', async () => {
+    const approved = makeDisbursement();
+    const completed = makeDisbursement({ status: 'COMPLETED', payosTransferStatus: 'SUCCESS' });
+    mockFindDisbursementByRequestId.mockResolvedValue(approved);
+    mockUpdateDisbursementByRequestIdWithCondition
+      .mockResolvedValueOnce(approved)
+      .mockResolvedValueOnce(completed);
+
+    const result = await processDisbursementTransferWebhook(
+      { requestId: 'DS-RACE-001', transferId: 'payos-001', status: 'SUCCESS' },
+      {
+        skipChecksumVerify: true,
+        source: 'internal_poll',
+        expectedTransferIdempotencyKey: 'key-001'
+      }
+    );
+
+    expect(result.status).toBe('COMPLETED');
+    expect(mockWebhookEventsEmit).toHaveBeenCalledWith(
+      'DISBURSEMENT_TRANSFERRED',
+      expect.objectContaining({ requestId: 'DS-RACE-001', organizationId: 'org-001' })
+    );
+    expect(mockEventLoggerLogEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ eventType: 'DISBURSEMENT_TRANSFERRED' })
+    );
+  });
+
   it('moves the webhook to manual review when finalize returns no receipt', async () => {
     const approved = makeDisbursement();
     const manualReview = makeDisbursement({ payosTransferStatus: 'MANUAL_REVIEW' });
@@ -239,6 +309,10 @@ describe('processDisbursementTransferWebhook race guards', () => {
     );
     expect(recordBlockchainTransaction).not.toHaveBeenCalled();
     expect(mockOpenManualReviewQueueForDisbursement).toHaveBeenCalledTimes(1);
+    expect(mockWebhookEventsEmit).toHaveBeenCalledWith(
+      'DISBURSEMENT_TRANSFER_FAILED',
+      expect.objectContaining({ requestId: 'DS-RACE-001', payosTransferStatus: 'MANUAL_REVIEW' })
+    );
   });
 
   it('records a reverted finalize receipt and moves the webhook to manual review', async () => {

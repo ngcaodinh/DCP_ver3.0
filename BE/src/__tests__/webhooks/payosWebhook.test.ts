@@ -169,7 +169,7 @@ describe('PayOS Webhook Handler - processPayosWebhook', () => {
     );
   });
 
-  it('should emit DISBURSEMENT_TRANSFERRED event for successful disbursement', async () => {
+  it('should leave success notification emission to the domain service', async () => {
     mockVerifyChecksumFn.mockReturnValue(true);
     mockRedisSetNX.mockResolvedValue(1);
     mockRedisExpire.mockResolvedValue('OK');
@@ -177,25 +177,11 @@ describe('PayOS Webhook Handler - processPayosWebhook', () => {
 
     await processPayosWebhook(validPayload, '127.0.0.1');
 
-    expect(mockWebhookEventsEmitFn).toHaveBeenCalledWith(
-      'DISBURSEMENT_TRANSFERRED',
-      expect.objectContaining({
-        requestId: 'DS-123-ABC',
-        organizationId: 'ORG-001',
-        status: 'COMPLETED'
-      })
-    );
-    expect(mockEventLoggerLogEventFn).toHaveBeenCalledWith(expect.objectContaining({
-      eventType: 'DISBURSEMENT_TRANSFERRED',
-      projectId: 'PRJ-001',
-      organizationId: 'ORG-001',
-      amount: 1000000,
-      correlationId: 'DS-123-ABC',
-      payload: expect.objectContaining({ requestId: 'DS-123-ABC' })
-    }));
+    expect(mockWebhookEventsEmitFn).not.toHaveBeenCalled();
+    expect(mockEventLoggerLogEventFn).not.toHaveBeenCalled();
   });
 
-  it('should emit DISBURSEMENT_TRANSFER_FAILED event for failed disbursement', async () => {
+  it('should leave failure notification emission to the domain service', async () => {
     const failedDisbursement: DisbursementResult = {
       ...disbursementResult,
       status: 'APPROVED',
@@ -209,20 +195,8 @@ describe('PayOS Webhook Handler - processPayosWebhook', () => {
 
     await processPayosWebhook(validPayload, '127.0.0.1');
 
-    expect(mockWebhookEventsEmitFn).toHaveBeenCalledWith(
-      'DISBURSEMENT_TRANSFER_FAILED',
-      expect.objectContaining({
-        requestId: 'DS-123-ABC',
-        payosTransferStatus: 'MANUAL_REVIEW'
-      })
-    );
-    expect(mockEventLoggerLogEventFn).toHaveBeenCalledWith(expect.objectContaining({
-      eventType: 'DISBURSEMENT_TRANSFER_FAILED',
-      projectId: 'PRJ-001',
-      organizationId: 'ORG-001',
-      correlationId: 'DS-123-ABC',
-      payload: expect.objectContaining({ payosTransferStatus: 'MANUAL_REVIEW' })
-    }));
+    expect(mockWebhookEventsEmitFn).not.toHaveBeenCalled();
+    expect(mockEventLoggerLogEventFn).not.toHaveBeenCalled();
   });
 
   it('should skip idempotency when Redis is unavailable', async () => {
@@ -275,6 +249,43 @@ describe('PayOS Webhook Handler - processPayosWebhook', () => {
     await processPayosWebhook(payloadWithNestedData, '127.0.0.1');
 
     expect(mockRedisSetNX).toHaveBeenCalled();
+  });
+
+  it('should allow a terminal webhook after a PROCESSING webhook for the same order code', async () => {
+    mockVerifyChecksumFn.mockReturnValue(true);
+    mockRedisExpire.mockResolvedValue('OK');
+    mockProcessDisbursementFn.mockResolvedValue(disbursementResult);
+
+    const seenKeySet = new Set<string>();
+    mockRedisSetNX.mockImplementation(async (key: string) => {
+      if (seenKeySet.has(key)) {
+        return 0;
+      }
+      seenKeySet.add(key);
+      return 1;
+    });
+
+    const processingPayload: DisbursementTransferWebhookPayload = {
+      ...validPayload,
+      status: 'PROCESSING',
+      data: { orderCode: 'DS-123-ABC', status: 'PROCESSING' }
+    };
+    const successPayload: DisbursementTransferWebhookPayload = {
+      ...validPayload,
+      status: 'SUCCESS',
+      data: { orderCode: 'DS-123-ABC', status: 'SUCCESS' }
+    };
+
+    await processPayosWebhook(processingPayload, '127.0.0.1');
+    await processPayosWebhook(processingPayload, '127.0.0.1');
+    await processPayosWebhook(successPayload, '127.0.0.1');
+
+    expect(mockRedisSetNX.mock.calls.map(([key]) => key)).toEqual([
+      'webhook:payos:DS-123-ABC:PROCESSING',
+      'webhook:payos:DS-123-ABC:PROCESSING',
+      'webhook:payos:DS-123-ABC:SUCCESS'
+    ]);
+    expect(mockProcessDisbursementFn).toHaveBeenCalledTimes(2);
   });
 });
 

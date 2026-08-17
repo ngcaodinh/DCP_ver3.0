@@ -7,9 +7,9 @@ const logger = getLogger();
 const disbursementTransferQueueName = 'disbursement-transfer';
 
 /**
- * Exponential backoff delays cho retry PayOS transfer (tính bằng milliseconds).
+ * Backoff delays cho retry PayOS transfer (tính bằng milliseconds).
  * Retry 1: 1 phút, Retry 2: 5 phút, Retry 3: 30 phút.
- * Tổng tối đa 3 lần retry.
+ * Tổng cộng 4 attempt: 1 attempt ban đầu và 3 lần retry.
  */
 export const PAYOS_TRANSFER_RETRY_DELAYS_MS = [
   60_000,    // Retry 1: 1 phút

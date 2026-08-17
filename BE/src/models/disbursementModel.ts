@@ -77,6 +77,9 @@ export type DisbursementRecord = {
   transferIdempotencyKey: string | null;
   transactionHash: string | null;      // Hash giao dịch burn token trên blockchain
   finalizeTransactionHash: string | null;
+  /** Lease claim ngắn chặn nhiều caller cùng finalize on-chain. */
+  finalizeClaimId?: string | null;
+  finalizeClaimedAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
   expiredAt: Date | null;              // Thời điểm hết hạn (createdAt + 7 ngày)
@@ -131,6 +134,8 @@ const disbursementSchema = new Schema<DisbursementRecord>({
   transferIdempotencyKey: { type: String, default: null },
   transactionHash: { type: String, default: null },
   finalizeTransactionHash: { type: String, default: null },
+  finalizeClaimId: { type: String, default: null },
+  finalizeClaimedAt: { type: Date, default: null },
   createdAt: { type: Date, required: true },
   updatedAt: { type: Date, required: true },
   expiredAt: { type: Date, default: null },
