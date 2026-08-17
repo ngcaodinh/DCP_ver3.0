@@ -9,6 +9,9 @@ vi.mock('../../middleware/authenticationMiddleware', () => ({
       role: 'admin'
     };
     nextFunction();
+  },
+  createOptionalAuthenticationMiddleware: () => (_requestObject: express.Request, _responseObject: express.Response, nextFunction: express.NextFunction) => {
+    nextFunction();
   }
 }));
 

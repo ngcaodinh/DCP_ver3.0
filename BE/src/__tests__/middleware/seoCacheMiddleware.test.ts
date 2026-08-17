@@ -1,10 +1,21 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { Request, Response, NextFunction } from 'express';
-import { isPublicApiRoute, isPublicSseRoute, isGuestApiRoute, applySeoAndCacheHeaders } from '../../middleware/seoCacheMiddleware';
+import {
+  isPublicApiRoute,
+  isPublicSseRoute,
+  isGuestApiRoute,
+  isPersonalizedRankingRequest,
+  applySeoAndCacheHeaders
+} from '../../middleware/seoCacheMiddleware';
 import { API_GUEST_PREFIX } from '../../config/apiPrefixes';
 
-const makeMockRequest = (path: string, method = 'GET'): Request => {
-  const req = { path, method } as Request;
+const makeMockRequest = (
+  path: string,
+  method = 'GET',
+  query: Record<string, unknown> = {},
+  headers: Record<string, string> = {}
+): Request => {
+  const req = { path, method, query, headers } as unknown as Request;
   return req;
 };
 
@@ -238,6 +249,31 @@ describe('applySeoAndCacheHeaders routing priority', () => {
 
     expect(setHeaderMock).toHaveBeenCalledWith('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
     expect(nextFn).toHaveBeenCalled();
+  });
+
+  it('should prevent shared cache for ranking requests with donorAddress', () => {
+    const req = makeMockRequest(
+      '/rankings/trust-adjusted',
+      'GET',
+      { donorAddress: '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd' }
+    );
+
+    expect(isPersonalizedRankingRequest(req)).toBe(true);
+    applySeoAndCacheHeaders(req, mockResponse as unknown as Response, nextFn);
+
+    expect(setHeaderMock).toHaveBeenCalledWith('Cache-Control', 'private, no-store');
+    expect(setHeaderMock).toHaveBeenCalledWith('Vary', 'Authorization');
+    expect(setHeaderMock).not.toHaveBeenCalledWith('Cache-Control', expect.stringContaining('public'));
+  });
+
+  it('should prevent shared cache for authenticated public ranking requests', () => {
+    const req = makeMockRequest('/rankings/trust-adjusted', 'GET', {}, { authorization: 'Bearer token' });
+
+    expect(isPersonalizedRankingRequest(req)).toBe(true);
+    applySeoAndCacheHeaders(req, mockResponse as unknown as Response, nextFn);
+
+    expect(setHeaderMock).toHaveBeenCalledWith('Cache-Control', 'private, no-store');
+    expect(setHeaderMock).toHaveBeenCalledWith('Vary', 'Authorization');
   });
 
   it('should NOT set public cache for non-GET public API routes', () => {

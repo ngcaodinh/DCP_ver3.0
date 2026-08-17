@@ -15,11 +15,21 @@ export const TIER_SILVER_MAX = 0.6;
 /** Loại tier badge hiển thị cho donor. */
 export type QfTier = 'Bronze' | 'Silver' | 'Gold';
 
+/** Cách sắp xếp donor trong bảng QF mà API hỗ trợ. */
+export type QfSortBy = 'trustAdjusted' | 'original';
+
+/** Nguồn của trust score dùng cho một donor trong bảng xếp hạng. */
+export type QfTrustSource = 'computed' | 'unknown' | 'fallback';
+
 /**
  * Một entry trong bảng xếp hạng QF — đại diện cho một donor đã contribute.
  * Address được mask để bảo vệ privacy.
  */
 export interface QfRankingEntry {
+  /** Hạng tuyệt đối theo điểm trust-adjusted, bắt đầu từ 1. */
+  rank: number;
+  /** Hạng tuyệt đối theo tổng tiền đóng góp, bắt đầu từ 1. */
+  originalRank: number;
   /** Địa chỉ donor đã mask: "0xabcd...1234". */
   donorAddress: string;
   /** Tổng số tiền đã quyên góp (VND). */
@@ -30,7 +40,12 @@ export interface QfRankingEntry {
   trustAdjustedMatch: number;
   /** Tier badge: Bronze < 0.3, Silver < 0.6, Gold >= 0.6. */
   tier: QfTier;
+  /** Cho biết score là tính thật, ví chưa xác minh, hay fallback chưa có record. */
+  trustSource: QfTrustSource;
 }
+
+/** Entry cá nhân cho donor được truyền vào query, cùng shape public nhưng được tính trên full ranking. */
+export type QfMyRanking = QfRankingEntry;
 
 /**
  * Các chỉ số tổng hợp của project QF.
@@ -62,10 +77,15 @@ export interface QfScores {
 export interface QfTrustFactors {
   /** Trung bình trust score của các donor trong ranking. */
   averageTrustScore: number;
-  /** Số donor có record trust score trong DB. */
+  /**
+   * Số donor có record trust score trong DB, bao gồm cả status `unknown`.
+   * Số donor được chấm điểm thật = donorsWithTrustScore - donorsWithUnknownStatus.
+   */
   donorsWithTrustScore: number;
   /** Số donor dùng fallback trust = 0.5. */
   donorsWithFallback: number;
+  /** Số donor có record nhưng status là unknown và được dùng score 0.3. */
+  donorsWithUnknownStatus: number;
 }
 
 /**
@@ -88,6 +108,8 @@ export interface QfRankingMetadata {
   cachedAt: string | null;
   /** Flag cho biết response đến từ cache. */
   cacheHit: boolean;
+  /** Cách sắp xếp được áp dụng cho trang hiện tại. */
+  sortBy: QfSortBy;
 }
 
 /**
@@ -96,6 +118,8 @@ export interface QfRankingMetadata {
 export interface QfRankingResponse {
   /** Danh sách donor đã rank. */
   rankings: QfRankingEntry[];
+  /** Xếp hạng của donor được yêu cầu, null khi không tìm thấy trong cửa sổ dữ liệu. */
+  myRanking: QfMyRanking | null;
   /** Các chỉ số tổng hợp của project. */
   scores: QfScores;
   /** Thông tin về trust scores. */
@@ -112,6 +136,10 @@ export interface QfRankingQueryInput {
   projectId: string;
   /** Round ID optional (default = undefined → 30 days window). */
   roundId?: string;
+  /** Cách sắp xếp kết quả, mặc định là trustAdjusted. */
+  sortBy?: QfSortBy;
+  /** Địa chỉ donor đầy đủ để tìm myRanking, không dùng trong cache key. */
+  donorAddress?: string;
   /** Số trang (default = 1). */
   page: number;
   /** Số items mỗi trang (default = 20, max = 50). */

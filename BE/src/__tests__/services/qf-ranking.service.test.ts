@@ -16,6 +16,11 @@ const mockRedisClient = {
   isOpen: true
 };
 
+/** Tạo trust value computed để test phản ánh đúng contract của service. */
+function createComputedTrustValue(score: number): { score: number; source: 'computed' } {
+  return { score, source: 'computed' };
+}
+
 vi.mock('../../config/redis', () => ({
   getRedisClientIfReady: vi.fn(() => mockRedisClient)
 }));
@@ -76,12 +81,15 @@ describe('Cache hit returns cached result', () => {
 
   it('tra ve ket qua tu cache khi co san', async () => {
     const cachedResponse = {
-      rankings: [{
-        donorAddress: '0xabcd...1234',
+      entriesByTrust: [{
+        rank: 1,
+        originalRank: 1,
+        donorAddress: '0x1234567890abcdef1234567890abcdef12345678',
         contributionAmount: 1000,
         trustScore: 0.8,
         trustAdjustedMatch: 28.28,
-        tier: 'Gold'
+        tier: 'Gold',
+        trustSource: 'computed'
       }],
       scores: {
         projectTrustAdjustedScore: 800,
@@ -93,17 +101,13 @@ describe('Cache hit returns cached result', () => {
       trustFactors: {
         averageTrustScore: 0.8,
         donorsWithTrustScore: 1,
-        donorsWithFallback: 0
+        donorsWithFallback: 0,
+        donorsWithUnknownStatus: 0
       },
       metadata: {
         projectId: 'proj-1',
         roundId: 'default',
-        totalItems: 1,
-        totalPages: 1,
-        currentPage: 1,
-        pageSize: 20,
-        cachedAt: new Date().toISOString(),
-        cacheHit: false
+        cachedAt: new Date().toISOString()
       }
     };
 
@@ -452,9 +456,9 @@ describe('computeTrustAdjustedRankings', () => {
       ['0xbbb', 400]
     ]);
 
-    const trustMap = new Map<string, number>([
-      ['0xaaa', 0.5],
-      ['0xbbb', 0.8]
+    const trustMap = new Map<string, { score: number; source: 'computed' }>([
+      ['0xaaa', createComputedTrustValue(0.5)],
+      ['0xbbb', createComputedTrustValue(0.8)]
     ]);
 
     const result = computeTrustAdjustedRankings({ aggregatedDonations: aggregated, trustScoreMap: trustMap });
@@ -473,7 +477,7 @@ describe('computeTrustAdjustedRankings', () => {
       ['0xaaa', 200]
     ]);
 
-    const trustMap = new Map<string, number>(); // Empty — donor has no record
+    const trustMap = new Map<string, { score: number; source: 'computed' }>(); // Empty — donor has no record
 
     const result = computeTrustAdjustedRankings({ aggregatedDonations: aggregated, trustScoreMap: trustMap });
 
@@ -488,9 +492,9 @@ describe('computeTrustAdjustedRankings', () => {
       ['0xoverflow', MAX_SAFE_DONATION_AMOUNT + 1]
     ]);
 
-    const trustMap = new Map<string, number>([
-      ['0xsafe', 0.9],
-      ['0xoverflow', 0.9]
+    const trustMap = new Map<string, { score: number; source: 'computed' }>([
+      ['0xsafe', createComputedTrustValue(0.9)],
+      ['0xoverflow', createComputedTrustValue(0.9)]
     ]);
 
     const result = computeTrustAdjustedRankings({ aggregatedDonations: aggregated, trustScoreMap: trustMap });
@@ -508,8 +512,8 @@ describe('computeTrustAdjustedRankings', () => {
       ['0xhuge', 1e16] // amount cực lớn, lớn hơn MAX_SAFE_DONATION_AMOUNT
     ]);
 
-    const trustMap = new Map<string, number>([
-      ['0xhuge', 1.0]
+    const trustMap = new Map<string, { score: number; source: 'computed' }>([
+      ['0xhuge', createComputedTrustValue(1.0)]
     ]);
 
     const result = computeTrustAdjustedRankings({ aggregatedDonations: aggregated, trustScoreMap: trustMap });
@@ -526,8 +530,8 @@ describe('computeTrustAdjustedRankings', () => {
       ['0xexact', MAX_SAFE_DONATION_AMOUNT]
     ]);
 
-    const trustMap = new Map<string, number>([
-      ['0xexact', 0.5]
+    const trustMap = new Map<string, { score: number; source: 'computed' }>([
+      ['0xexact', createComputedTrustValue(0.5)]
     ]);
 
     const result = computeTrustAdjustedRankings({ aggregatedDonations: aggregated, trustScoreMap: trustMap });
@@ -544,8 +548,8 @@ describe('computeTrustAdjustedRankings', () => {
     ]);
 
     // trustScore âm không hợp lệ theo schema DB, nhưng test phòng thủ ở tầng tính toán
-    const trustMap = new Map<string, number>([
-      ['0xnegativetrust', -0.5]
+    const trustMap = new Map<string, { score: number; source: 'computed' }>([
+      ['0xnegativetrust', createComputedTrustValue(-0.5)]
     ]);
 
     const result = computeTrustAdjustedRankings({ aggregatedDonations: aggregated, trustScoreMap: trustMap });
@@ -563,11 +567,11 @@ describe('computeTrustAdjustedRankings', () => {
       ['0xsafe2', 1000]
     ]);
 
-    const trustMap = new Map<string, number>([
-      ['0xsafe1', 0.6],
-      ['0xoverflow1', 0.6],
-      ['0xoverflow2', 0.6],
-      ['0xsafe2', 0.6]
+    const trustMap = new Map<string, { score: number; source: 'computed' }>([
+      ['0xsafe1', createComputedTrustValue(0.6)],
+      ['0xoverflow1', createComputedTrustValue(0.6)],
+      ['0xoverflow2', createComputedTrustValue(0.6)],
+      ['0xsafe2', createComputedTrustValue(0.6)]
     ]);
 
     const result = computeTrustAdjustedRankings({ aggregatedDonations: aggregated, trustScoreMap: trustMap });
@@ -576,5 +580,150 @@ describe('computeTrustAdjustedRankings', () => {
     expect(result.skippedDonors).toBe(2);
     expect(Number.isFinite(result.totalTrustAdjustedScore)).toBe(true);
     expect(Number.isFinite(result.totalRawScore)).toBe(true);
+  });
+
+  it('tinh donor status unknown voi score 0.3 va dem rieng khoi fallback', () => {
+    const aggregated = new Map<string, number>([['0xunknown', 100]]);
+    const trustMap = new Map<string, { score: number; source: 'unknown' }>([
+      ['0xunknown', { score: 0.3, source: 'unknown' }]
+    ]);
+
+    const result = computeTrustAdjustedRankings({ aggregatedDonations: aggregated, trustScoreMap: trustMap });
+
+    expect(result.donorScores[0].trustScore).toBe(0.3);
+    expect(result.donorScores[0].trustSource).toBe('unknown');
+    expect(result.donorsWithUnknownStatus).toBe(1);
+    expect(result.donorsWithFallback).toBe(0);
+    expect(result.donorScores[0].trustAdjusted).toBeCloseTo(Math.sqrt(30), 8);
+  });
+});
+
+describe('G3 full cache contract and comparison ranking', () => {
+  beforeEach(() => {
+    mockRedisGet.mockReset();
+    mockRedisSet.mockReset();
+    mockFindDonationsByProjectId.mockReset();
+    mockFindDonationsByProjectIdInTimeRange.mockReset();
+    mockGetTrustScoresByDonorAddresses.mockReset();
+    inMemoryStore.clear();
+    mockRedisGet.mockResolvedValue(null);
+  });
+
+  afterEach(() => {
+    inMemoryStore.clear();
+  });
+
+  it('cache full list roi cat trang sau cache hit va giu rank lien tuc', async () => {
+    const donations = Array.from({ length: 40 }, (_, index) => ({
+      donorAddress: `0x${String(index + 1).padStart(40, '0')}`,
+      amount: 40 - index,
+      donationStatus: 'INDEXED'
+    }));
+    mockFindDonationsByProjectId.mockResolvedValueOnce(donations);
+    mockGetTrustScoresByDonorAddresses.mockResolvedValueOnce([]);
+
+    const firstPage = await getTrustAdjustedQfRankings({
+      projectId: 'proj-cache', roundId: 'all', sortBy: 'trustAdjusted', page: 1, limit: 20
+    });
+    const cachedPayload = mockRedisSet.mock.calls[0][1] as string;
+    const parsedCachedPayload = JSON.parse(cachedPayload) as { entriesByTrust: unknown[]; scores: { totalDonors: number } };
+    expect(parsedCachedPayload.entriesByTrust).toHaveLength(40);
+    expect('entriesByOriginal' in parsedCachedPayload).toBe(false);
+    expect(parsedCachedPayload.scores.totalDonors).toBe(40);
+    mockRedisGet.mockResolvedValueOnce(cachedPayload);
+
+    const secondPage = await getTrustAdjustedQfRankings({
+      projectId: 'proj-cache', roundId: 'all', sortBy: 'trustAdjusted', page: 2, limit: 20
+    });
+
+    expect(firstPage.rankings).toHaveLength(20);
+    expect(secondPage.rankings).toHaveLength(20);
+    expect(secondPage.rankings[0].rank).toBe(21);
+    expect(secondPage.rankings[19].rank).toBe(40);
+    expect(firstPage.rankings.some(firstEntry => secondPage.rankings.some(secondEntry => firstEntry.donorAddress === secondEntry.donorAddress))).toBe(false);
+    expect(secondPage.metadata.cacheHit).toBe(true);
+    expect(secondPage.metadata.currentPage).toBe(2);
+    expect(secondPage.metadata.totalPages).toBe(2);
+    expect(mockFindDonationsByProjectId).toHaveBeenCalledTimes(1);
+  });
+
+  it('sort original dung contributionAmount nhung van giu rank trustAdjusted', async () => {
+    mockFindDonationsByProjectId.mockResolvedValueOnce([
+      { donorAddress: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', amount: 100, donationStatus: 'INDEXED' },
+      { donorAddress: '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', amount: 300, donationStatus: 'INDEXED' },
+      { donorAddress: '0xcccccccccccccccccccccccccccccccccccccccc', amount: 200, donationStatus: 'INDEXED' }
+    ]);
+    mockGetTrustScoresByDonorAddresses.mockResolvedValueOnce([
+      { donorAddress: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', trustScore: 0.9, status: 'active' },
+      { donorAddress: '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', trustScore: 0.2, status: 'active' },
+      { donorAddress: '0xcccccccccccccccccccccccccccccccccccccccc', trustScore: 0.5, status: 'active' }
+    ]);
+
+    const result = await getTrustAdjustedQfRankings({
+      projectId: 'proj-sort', roundId: 'all', sortBy: 'original', page: 1, limit: 20
+    });
+
+    expect(result.rankings.map(entry => entry.contributionAmount)).toEqual([300, 200, 100]);
+    expect(result.rankings.map(entry => entry.trustScore)).toEqual([0.2, 0.5, 0.9]);
+    expect(result.rankings.map(entry => entry.rank)).toEqual([3, 1, 2]);
+    expect(result.rankings.map(entry => entry.originalRank)).toEqual([1, 2, 3]);
+    expect(result.metadata.sortBy).toBe('original');
+
+    const cachedPayload = mockRedisSet.mock.calls[0][1] as string;
+    mockRedisGet.mockResolvedValueOnce(cachedPayload);
+    const cachedResult = await getTrustAdjustedQfRankings({
+      projectId: 'proj-sort', roundId: 'all', sortBy: 'original', page: 1, limit: 20
+    });
+    expect(cachedResult.metadata.cacheHit).toBe(true);
+    expect(cachedResult.rankings.map(entry => entry.contributionAmount)).toEqual([300, 200, 100]);
+    expect(cachedResult.rankings.map(entry => entry.rank)).toEqual([3, 1, 2]);
+  });
+
+  it('tao myRanking tu dia chi day du va response public chi tra dia chi mask', async () => {
+    const donorAddress = '0xdddddddddddddddddddddddddddddddddddddddd';
+    mockFindDonationsByProjectId.mockResolvedValueOnce([
+      { donorAddress: '0x1111111111111111111111111111111111111111', amount: 300, donationStatus: 'INDEXED' },
+      { donorAddress: '0x2222222222222222222222222222222222222222', amount: 200, donationStatus: 'INDEXED' },
+      { donorAddress, amount: 100, donationStatus: 'INDEXED' }
+    ]);
+    mockGetTrustScoresByDonorAddresses.mockResolvedValueOnce([]);
+
+    const result = await getTrustAdjustedQfRankings({
+      projectId: 'proj-me', roundId: 'all', donorAddress, page: 1, limit: 2
+    });
+
+    expect(result.myRanking?.rank).toBe(3);
+    expect(result.myRanking?.donorAddress).toBe('0xdddd...dddd');
+    expect(JSON.stringify(result)).not.toContain(donorAddress);
+  });
+
+  it('phan biet unknown, active, record cu thieu status va fallback', async () => {
+    mockFindDonationsByProjectId.mockResolvedValueOnce([
+      { donorAddress: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', amount: 100, donationStatus: 'INDEXED' },
+      { donorAddress: '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', amount: 100, donationStatus: 'INDEXED' },
+      { donorAddress: '0xcccccccccccccccccccccccccccccccccccccccc', amount: 100, donationStatus: 'INDEXED' },
+      { donorAddress: '0xdddddddddddddddddddddddddddddddddddddddd', amount: 100, donationStatus: 'INDEXED' }
+    ]);
+    mockGetTrustScoresByDonorAddresses.mockResolvedValueOnce([
+      { donorAddress: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', trustScore: 0.5, status: 'unknown' },
+      { donorAddress: '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', trustScore: 0.8, status: 'active' },
+      { donorAddress: '0xcccccccccccccccccccccccccccccccccccccccc', trustScore: 0.7 }
+    ]);
+
+    const result = await getTrustAdjustedQfRankings({
+      projectId: 'proj-trust-source', roundId: 'all', page: 1, limit: 20
+    });
+
+    const unknownEntry = result.rankings.find(entry => entry.donorAddress === '0xaaaa...aaaa');
+    const activeEntry = result.rankings.find(entry => entry.donorAddress === '0xbbbb...bbbb');
+    const legacyEntry = result.rankings.find(entry => entry.donorAddress === '0xcccc...cccc');
+    const fallbackEntry = result.rankings.find(entry => entry.donorAddress === '0xdddd...dddd');
+
+    expect(unknownEntry).toMatchObject({ trustScore: 0.3, trustSource: 'unknown', tier: 'Silver' });
+    expect(unknownEntry?.trustAdjustedMatch).toBeCloseTo(Math.sqrt(30), 2);
+    expect(activeEntry).toMatchObject({ trustScore: 0.8, trustSource: 'computed' });
+    expect(legacyEntry).toMatchObject({ trustScore: 0.7, trustSource: 'computed' });
+    expect(fallbackEntry).toMatchObject({ trustScore: 0.5, trustSource: 'fallback' });
+    expect(result.trustFactors).toMatchObject({ donorsWithTrustScore: 3, donorsWithUnknownStatus: 1, donorsWithFallback: 1 });
   });
 });

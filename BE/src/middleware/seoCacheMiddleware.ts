@@ -32,6 +32,12 @@ export function isGuestApiRoute(request: Request): boolean {
   return request.path.startsWith(API_GUEST_PREFIX + '/') || request.path === API_GUEST_PREFIX;
 }
 
+/** Kiểm tra ranking request có chứa dữ liệu cá nhân cần cấm shared cache hay không. */
+export function isPersonalizedRankingRequest(request: Request): boolean {
+  return request.path === '/rankings/trust-adjusted'
+    && (Boolean(request.query?.donorAddress) || Boolean(request.headers.authorization));
+}
+
 /**
  * Gắn header SEO và cache cho API.
  * Mục đích: ngăn index endpoint nhạy cảm và tối ưu cache cho dữ liệu công khai phù hợp.
@@ -48,6 +54,9 @@ export function applySeoAndCacheHeaders(request: Request, response: Response, ne
   } else if (isPublicSseRoute(request)) {
     response.setHeader('Cache-Control', 'no-cache, no-transform');
     response.setHeader('X-Accel-Buffering', 'no');
+  } else if (isPersonalizedRankingRequest(request)) {
+    response.setHeader('Cache-Control', 'private, no-store');
+    response.setHeader('Vary', 'Authorization');
   } else if (request.method === 'GET' && isPublicApiRoute(request)) {
     response.setHeader('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
     // Vary: phòng ngừa CDN cache sai khi Accept-Language hoặc Accept thay đổi

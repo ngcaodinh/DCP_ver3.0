@@ -34,7 +34,8 @@ const donationSchema = new Schema<DonationRecord>({
   updatedAt: { type: Date, required: true }
 });
 
-const DonationMongoModel = mongoose.model<DonationRecord>('Donation', donationSchema);
+const DonationMongoModel = mongoose.models?.Donation
+  || mongoose.model<DonationRecord>('Donation', donationSchema);
 
 /** Hàm upsert donation theo transaction hash. Mục đích: đảm bảo indexer không ghi trùng dữ liệu event on-chain. */
 export async function upsertDonationByTransactionHash(payload: DonationRecord): Promise<DonationRecord> {

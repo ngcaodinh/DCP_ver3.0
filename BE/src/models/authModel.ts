@@ -119,9 +119,12 @@ const auditLogSchema = new Schema<AuditLogEntry>({
   createdAt: { type: Date, required: true }
 });
 
-export const AuthUserModel = mongoose.model<AuthUser>('AuthUser', authUserSchema);
-const RefreshSessionModel = mongoose.model<RefreshSession>('RefreshSession', refreshSessionSchema);
-const AuditLogModel = mongoose.model<AuditLogEntry>('AuditLog', auditLogSchema);
+export const AuthUserModel = mongoose.models?.AuthUser
+  || mongoose.model<AuthUser>('AuthUser', authUserSchema);
+const RefreshSessionModel = mongoose.models?.RefreshSession
+  || mongoose.model<RefreshSession>('RefreshSession', refreshSessionSchema);
+const AuditLogModel = mongoose.models?.AuditLog
+  || mongoose.model<AuditLogEntry>('AuditLog', auditLogSchema);
 
 /**
  * Hàm tìm người dùng theo mã số đăng ký pháp lý.
@@ -153,6 +156,15 @@ export async function findUserByWalletAddress(walletAddress: string): Promise<Au
  */
 export async function findUserById(userId: string): Promise<AuthUser | null> {
   return AuthUserModel.findOne({ id: userId }).lean<AuthUser>().exec();
+}
+
+/** Lấy riêng wallet address theo user ID để kiểm tra quyền sở hữu ví. */
+export async function findUserWalletAddressById(userId: string): Promise<string | null> {
+  const user = await AuthUserModel.findOne({ id: userId })
+    .select('walletAddress')
+    .lean<Pick<AuthUser, 'walletAddress'>>()
+    .exec();
+  return user?.walletAddress || null;
 }
 
 /**
@@ -346,7 +358,8 @@ const sybilAuditLogSchema = new Schema<SybilAuditLogEntry>({
   createdAt: { type: Date, required: true }
 });
 
-export const SybilAuditLogModel = mongoose.model<SybilAuditLogEntry>('SybilAuditLog', sybilAuditLogSchema);
+export const SybilAuditLogModel = mongoose.models?.SybilAuditLog
+  || mongoose.model<SybilAuditLogEntry>('SybilAuditLog', sybilAuditLogSchema);
 
 /**
  * Hàm ghi log thay đổi trạng thái Sybil.

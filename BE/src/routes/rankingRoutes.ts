@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { handleGetCurrentRankingSnapshot, handleGetRankingV2, handleRecalculateRankingSnapshot } from '../controllers/rankingController';
 import { handleGetTrustAdjustedRankings } from '../controllers/qfRankingController';
-import { createAuthenticationMiddleware } from '../middleware/authenticationMiddleware';
+import { createAuthenticationMiddleware, createOptionalAuthenticationMiddleware } from '../middleware/authenticationMiddleware';
 import { attachRequestMetadata } from '../middleware/ipMetadataMiddleware';
 import { createRateLimitMiddleware } from '../middleware/rateLimitMiddleware';
 import { createRoleAuthorizationMiddleware } from '../middleware/roleAuthorizationMiddleware';
@@ -10,6 +10,7 @@ import { createRoleAuthorizationMiddleware } from '../middleware/roleAuthorizati
 export function createRankingRoutes(): Router {
   const router = Router();
   const authenticationMiddleware = createAuthenticationMiddleware();
+  const optionalAuthenticationMiddleware = createOptionalAuthenticationMiddleware();
   const rankingAdminAuthorizationMiddleware = createRoleAuthorizationMiddleware(['admin', 'regulatory']);
   const recalculateRateLimit = createRateLimitMiddleware(10, 60 * 1000, { bucketName: 'ranking:recalculate' });
   const getRankingRateLimit = createRateLimitMiddleware(120, 60 * 1000, { bucketName: 'ranking:get' });
@@ -18,7 +19,13 @@ export function createRankingRoutes(): Router {
 
   router.get('/', attachRequestMetadata(), getRankingRateLimit, handleGetCurrentRankingSnapshot);
   router.get('/v2', attachRequestMetadata(), getRankingV2RateLimit, handleGetRankingV2);
-  router.get('/trust-adjusted', attachRequestMetadata(), trustAdjustedRateLimit, handleGetTrustAdjustedRankings);
+  router.get(
+    '/trust-adjusted',
+    attachRequestMetadata(),
+    trustAdjustedRateLimit,
+    optionalAuthenticationMiddleware,
+    handleGetTrustAdjustedRankings
+  );
   router.post(
     '/recalculate',
     attachRequestMetadata(),

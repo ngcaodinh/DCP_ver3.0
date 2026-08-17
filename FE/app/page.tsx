@@ -7,6 +7,7 @@ import { buildApiUrl, fetchApi } from './utils/apiClient';
 import { authenticationSessionUpdatedEventName, clearAuthSession, readAuthSession } from './utils/authSession';
 import IpfsEvidencePreviewCard from '@/app/components/common/IpfsEvidencePreviewCard';
 import { buildIpfsGatewayUrl, getIpfsContentType, resolveIpfsPreviewKind } from './utils/ipfs';
+import FairRankingTab from '@/app/components/fairRanking/FairRankingTab';
 
 
 type HomeProjectEvidenceFile = {
@@ -2408,6 +2409,7 @@ export default function HomePage() {
               </tbody>
             </table>
             </div>
+            <FairRankingTab projects={rankingItemList.map(item => ({ projectId: item.projectId, projectName: item.projectName }))} />
           </>
         )}
       </section>

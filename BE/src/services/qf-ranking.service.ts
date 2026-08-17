@@ -8,12 +8,17 @@ import { getLogger } from '../config/logger';
 import { getRedisClientIfReady } from '../config/redis';
 import { createInMemoryCache } from '../utils/inMemoryCache';
 import { parseRoundIdToTimeWindow, normalizeRoundIdForCacheKey } from '../utils/roundId.utils';
-import { TRUST_SCORE_FALLBACK } from '../types/trust-score.types';
+import { TRUST_SCORE_FALLBACK, UNKNOWN_STATUS_SCORE } from '../types/trust-score.types';
 import type {
   QfRankingEntry,
   QfRankingResponse,
   QfRankingQueryInput,
-  DonationData
+  DonationData,
+  QfRankingMetadata,
+  QfScores,
+  QfSortBy,
+  QfTrustFactors,
+  QfTrustSource
 } from '../types/qf-ranking.types';
 import { assignTier } from '../types/qf-ranking.types';
 import {
@@ -28,8 +33,9 @@ const logger = getLogger();
  * Prefix và version cho cache key của QF rankings.
  * Tăng version mỗi khi thay đổi cấu trúc response để tránh serve stale data từ deployment cũ.
  * v1 → v2: thêm field skippedDonors, fix overflow guard.
+ * v2 → v3: cache full ranking để pagination, sortBy và myRanking dùng chung một payload.
  */
-const QF_RANKING_CACHE_PREFIX = 'qf:rankings:v2:';
+const QF_RANKING_CACHE_PREFIX = 'qf:rankings:v3:';
 
 /**
  * Số lượng donation tối đa được tải về khi không giới hạn theo thời gian (roundId="all").
@@ -88,37 +94,87 @@ function buildQfRankingCacheKey(projectId: string, normalizedRoundId: string): s
  * Việc bump QF_RANKING_CACHE_PREFIX version khi đổi cấu trúc response cũng giúp
  * tránh trường hợp này, hàm này là lớp bảo vệ bổ sung.
  */
-function isValidCachedRanking(data: QfRankingResponse): boolean {
-  if (data == null || data.scores == null || data.metadata == null) return false;
+interface TrustScoreValue {
+  score: number;
+  source: QfTrustSource;
+}
 
-  const numericFields = [
-    data.scores.projectTrustAdjustedScore,
-    data.scores.originalQfScore,
-    data.scores.totalDonors,
-    data.scores.totalDonationRecords,
-    data.scores.skippedDonors
+interface FullRankingEntry {
+  rank: number;
+  originalRank: number;
+  donorAddress: string;
+  contributionAmount: number;
+  trustScore: number;
+  trustAdjustedMatch: number;
+  tier: QfRankingEntry['tier'];
+  trustSource: QfTrustSource;
+}
+
+interface FullRankingPayload {
+  entriesByTrust: FullRankingEntry[];
+  scores: QfScores;
+  trustFactors: QfTrustFactors;
+  metadata: Pick<QfRankingMetadata, 'projectId' | 'roundId' | 'cachedAt'>;
+}
+
+/** Kiểm tra một giá trị có phải số hữu hạn hay không trước khi nhận từ cache. */
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+/** Kiểm tra entry đầy đủ trong cache để không phục vụ payload cũ hoặc bị hỏng. */
+function isValidFullRankingEntry(value: unknown): value is FullRankingEntry {
+  if (value == null || typeof value !== 'object') return false;
+  const entry = value as Partial<FullRankingEntry>;
+  return typeof entry.rank === 'number' && Number.isInteger(entry.rank) && entry.rank > 0
+    && typeof entry.originalRank === 'number' && Number.isInteger(entry.originalRank) && entry.originalRank > 0
+    && typeof entry.donorAddress === 'string'
+    && isFiniteNumber(entry.contributionAmount)
+    && isFiniteNumber(entry.trustScore)
+    && isFiniteNumber(entry.trustAdjustedMatch)
+    && (entry.tier === 'Bronze' || entry.tier === 'Silver' || entry.tier === 'Gold')
+    && (entry.trustSource === 'computed' || entry.trustSource === 'unknown' || entry.trustSource === 'fallback');
+}
+
+/** Kiểm tra payload full ranking đã cache trước khi cắt trang và mask địa chỉ. */
+function isValidCachedRanking(value: unknown): value is FullRankingPayload {
+  if (value == null || typeof value !== 'object') return false;
+  const data = value as Partial<FullRankingPayload>;
+  const scores = data.scores;
+  const trustFactors = data.trustFactors;
+  const metadata = data.metadata;
+  const numericScores = scores && [
+    scores.projectTrustAdjustedScore,
+    scores.originalQfScore,
+    scores.totalDonors,
+    scores.totalDonationRecords,
+    scores.skippedDonors
+  ];
+  const numericTrustFactors = trustFactors && [
+    trustFactors.averageTrustScore,
+    trustFactors.donorsWithTrustScore,
+    trustFactors.donorsWithFallback,
+    trustFactors.donorsWithUnknownStatus
   ];
 
-  if (!Array.isArray(data.rankings)) return false;
-
-  // Kiểm tra từng entry trong rankings để chặn Infinity/null len vào từng field số học
-  for (const entry of data.rankings) {
-    if (
-      entry == null ||
-      typeof entry.contributionAmount !== 'number' || !Number.isFinite(entry.contributionAmount) ||
-      typeof entry.trustScore !== 'number' || !Number.isFinite(entry.trustScore) ||
-      typeof entry.trustAdjustedMatch !== 'number' || !Number.isFinite(entry.trustAdjustedMatch)
-    ) {
-      return false;
-    }
+  if (!Array.isArray(data.entriesByTrust)) {
+    return false;
   }
+  const entriesByTrust = data.entriesByTrust;
 
-  // Kiểm tra trustFactors — averageTrustScore cũng có thể bị null nếu từ deployment cũ
-  if (data.trustFactors == null || typeof data.trustFactors.averageTrustScore !== 'number' || !Number.isFinite(data.trustFactors.averageTrustScore)) {
+  if (!scores || !trustFactors || !metadata
+    || !Number.isInteger(scores.totalDonors) || scores.totalDonors < 0
+    || entriesByTrust.length !== scores.totalDonors
+    || !Array.isArray(numericScores) || !numericScores.every(isFiniteNumber)
+    || !Array.isArray(numericTrustFactors) || !numericTrustFactors.every(isFiniteNumber)
+    || typeof metadata.projectId !== 'string' || typeof metadata.roundId !== 'string'
+    || (metadata.cachedAt !== null && typeof metadata.cachedAt !== 'string')) {
     return false;
   }
 
-  return numericFields.every(value => typeof value === 'number' && Number.isFinite(value));
+  return entriesByTrust.every((entry) => isValidFullRankingEntry(entry)
+    && entry.rank <= entriesByTrust.length
+    && entry.originalRank <= entriesByTrust.length);
 }
 
 /**
@@ -182,8 +238,8 @@ async function fetchDonations(projectId: string, timeWindow: { startAt: Date; en
 /**
  * Hàm batch-fetch trust scores cho nhiều donor addresses.
  */
-async function fetchTrustScores(donorAddresses: string[]): Promise<Map<string, number>> {
-  const trustMap = new Map<string, number>();
+async function fetchTrustScores(donorAddresses: string[]): Promise<Map<string, TrustScoreValue>> {
+  const trustMap = new Map<string, TrustScoreValue>();
 
   if (donorAddresses.length === 0) {
     return trustMap;
@@ -192,7 +248,11 @@ async function fetchTrustScores(donorAddresses: string[]): Promise<Map<string, n
   const trustRecords = await getTrustScoresByDonorAddresses(donorAddresses);
 
   for (const record of trustRecords) {
-    trustMap.set(record.donorAddress.toLowerCase(), record.trustScore);
+    const isUnknown = record.status === 'unknown';
+    trustMap.set(record.donorAddress.toLowerCase(), {
+      score: isUnknown ? UNKNOWN_STATUS_SCORE : record.trustScore,
+      source: isUnknown ? 'unknown' : 'computed'
+    });
   }
 
   return trustMap;
@@ -219,18 +279,26 @@ function aggregateDonationsByAddress(donations: DonationData[]): Map<string, num
  */
 interface ComputeRankingsInput {
   aggregatedDonations: Map<string, number>;
-  trustScoreMap: Map<string, number>;
+  trustScoreMap: Map<string, TrustScoreValue>;
 }
 
 /**
  * Kết quả tạm thời từ computeTrustAdjustedRankings.
  */
 interface ComputeRankingsIntermediate {
-  donorScores: Array<{ address: string; amount: number; trustScore: number; trustAdjusted: number; rawScore: number }>;
+  donorScores: Array<{
+    address: string;
+    amount: number;
+    trustScore: number;
+    trustAdjusted: number;
+    rawScore: number;
+    trustSource: QfTrustSource;
+  }>;
   totalTrustAdjustedScore: number;
   totalRawScore: number;
   donorsWithTrustScore: number;
   donorsWithFallback: number;
+  donorsWithUnknownStatus: number;
   /** Số unique addresses bị bỏ qua vì amount > MAX_SAFE_DONATION_AMOUNT hoặc kết quả không hữu hạn. */
   skippedDonors: number;
 }
@@ -257,6 +325,7 @@ export function computeTrustAdjustedRankings(input: ComputeRankingsInput): Compu
   let totalRawScore = 0;
   let donorsWithTrustScore = 0;
   let donorsWithFallback = 0;
+  let donorsWithUnknownStatus = 0;
   let skippedDonors = 0;
 
   const donorScores: ComputeRankingsIntermediate['donorScores'] = [];
@@ -272,12 +341,17 @@ export function computeTrustAdjustedRankings(input: ComputeRankingsInput): Compu
       continue;
     }
 
-    const trustScore = input.trustScoreMap.get(address) ?? TRUST_SCORE_FALLBACK;
+    const trustValue = input.trustScoreMap.get(address) ?? { score: TRUST_SCORE_FALLBACK, source: 'fallback' as const };
+    const { score: trustScore, source: trustSource } = trustValue;
 
     if (input.trustScoreMap.has(address)) {
       donorsWithTrustScore++;
-    } else {
+    }
+    if (trustSource === 'fallback') {
       donorsWithFallback++;
+    }
+    if (trustSource === 'unknown') {
+      donorsWithUnknownStatus++;
     }
 
     const trustAdjusted = Math.sqrt(amount * trustScore);
@@ -297,7 +371,8 @@ export function computeTrustAdjustedRankings(input: ComputeRankingsInput): Compu
       amount,
       trustScore,
       trustAdjusted,
-      rawScore
+      rawScore,
+      trustSource
     });
   }
 
@@ -307,48 +382,72 @@ export function computeTrustAdjustedRankings(input: ComputeRankingsInput): Compu
     totalRawScore,
     donorsWithTrustScore,
     donorsWithFallback,
+    donorsWithUnknownStatus,
     skippedDonors
   };
 }
 
 /**
- * Hàm finalize rankings — sort, paginate, build response.
- * skippedDonors được lấy từ intermediate để điền vào scores.skippedDonors.
+ * So sánh donor theo điểm trust-adjusted với tie-break deterministic để thứ hạng ổn định.
  */
-function finalizeRankings(
+function compareByTrustAdjusted(
+  first: ComputeRankingsIntermediate['donorScores'][number],
+  second: ComputeRankingsIntermediate['donorScores'][number]
+): number {
+  return second.trustAdjusted - first.trustAdjusted
+    || second.amount - first.amount
+    || first.address.localeCompare(second.address);
+}
+
+/** So sánh donor theo QF gốc với tie-break deterministic để thứ hạng ổn định. */
+function compareByOriginalQf(
+  first: ComputeRankingsIntermediate['donorScores'][number],
+  second: ComputeRankingsIntermediate['donorScores'][number]
+): number {
+  return second.amount - first.amount || first.address.localeCompare(second.address);
+}
+
+/** Dựng entry nội bộ có địa chỉ đầy đủ để cache và tra myRanking. */
+function createFullRankingEntry(
+  donor: ComputeRankingsIntermediate['donorScores'][number],
+  rank: number,
+  originalRank: number
+): FullRankingEntry {
+  return {
+    rank,
+    originalRank,
+    donorAddress: donor.address,
+    contributionAmount: donor.amount,
+    trustScore: donor.trustScore,
+    trustAdjustedMatch: donor.trustAdjusted,
+    tier: assignTier(donor.trustScore),
+    trustSource: donor.trustSource
+  };
+}
+
+/** Dựng payload full ranking chưa paginate để dùng chung cho cache và mọi kiểu sort. */
+function buildFullRankingPayload(
   intermediate: ComputeRankingsIntermediate,
   totalDonationRecords: number,
-  page: number,
-  limit: number,
   projectId: string,
   roundId: string,
-  cachedAt: string | null,
-  cacheHit: boolean
-): QfRankingResponse {
-  const sorted = [...intermediate.donorScores].sort((a, b) => b.trustAdjusted - a.trustAdjusted);
-
+  cachedAt: string | null
+): FullRankingPayload {
+  const sortedByTrust = [...intermediate.donorScores].sort(compareByTrustAdjusted);
+  const sortedByOriginal = [...intermediate.donorScores].sort(compareByOriginalQf);
+  const originalRankByAddress = new Map(sortedByOriginal.map((donor, index) => [donor.address, index + 1]));
   const projectTrustAdjustedScore = intermediate.totalTrustAdjustedScore ** 2;
   const originalQfScore = intermediate.totalRawScore ** 2;
-
-  const totalItems = sorted.length;
-  const totalPages = Math.ceil(totalItems / limit);
-  const startIndex = (page - 1) * limit;
-  const paged = sorted.slice(startIndex, startIndex + limit);
-
   const averageTrustScore = intermediate.donorScores.length > 0
     ? intermediate.donorScores.reduce((sum, d) => sum + d.trustScore, 0) / intermediate.donorScores.length
     : 0;
 
-  const rankings: QfRankingEntry[] = paged.map(d => ({
-    donorAddress: maskDonorAddress(d.address),
-    contributionAmount: d.amount,
-    trustScore: Math.round(d.trustScore * 1000) / 1000,
-    trustAdjustedMatch: Math.round(d.trustAdjusted * 1000) / 1000,
-    tier: assignTier(d.trustScore)
-  }));
-
   return {
-    rankings,
+    entriesByTrust: sortedByTrust.map((donor, index) => createFullRankingEntry(
+      donor,
+      index + 1,
+      originalRankByAddress.get(donor.address) ?? index + 1
+    )),
     scores: {
       projectTrustAdjustedScore: Math.round(projectTrustAdjustedScore * 1000) / 1000,
       originalQfScore: Math.round(originalQfScore * 1000) / 1000,
@@ -359,17 +458,62 @@ function finalizeRankings(
     trustFactors: {
       averageTrustScore: Math.round(averageTrustScore * 1000) / 1000,
       donorsWithTrustScore: intermediate.donorsWithTrustScore,
-      donorsWithFallback: intermediate.donorsWithFallback
+      donorsWithFallback: intermediate.donorsWithFallback,
+      donorsWithUnknownStatus: intermediate.donorsWithUnknownStatus
     },
+    metadata: { projectId, roundId, cachedAt }
+  };
+}
+
+/** Chuyển entry nội bộ thành contract public, mask địa chỉ ở bước cuối cùng. */
+function maskRankingEntry(entry: FullRankingEntry): QfRankingEntry {
+  return {
+    rank: entry.rank,
+    originalRank: entry.originalRank,
+    donorAddress: maskDonorAddress(entry.donorAddress),
+    contributionAmount: entry.contributionAmount,
+    trustScore: Math.round(entry.trustScore * 1000) / 1000,
+    trustAdjustedMatch: Math.round(entry.trustAdjustedMatch * 1000) / 1000,
+    tier: entry.tier,
+    trustSource: entry.trustSource
+  };
+}
+
+/** Cắt trang từ payload full và dựng response public cho đúng sort hiện tại. */
+function sliceRankingPage(
+  fullRanking: FullRankingPayload,
+  sortBy: QfSortBy,
+  page: number,
+  limit: number,
+  donorAddress: string | undefined,
+  cacheHit: boolean
+): QfRankingResponse {
+  // Suy thứ tự QF gốc từ originalRank để payload cache không phải lưu cùng một tập entry lần thứ hai.
+  const entries = sortBy === 'original'
+    ? [...fullRanking.entriesByTrust].sort((first, second) => first.originalRank - second.originalRank)
+    : fullRanking.entriesByTrust;
+  const totalItems = entries.length;
+  const totalPages = Math.ceil(totalItems / limit);
+  const startIndex = (page - 1) * limit;
+  const pagedEntries = entries.slice(startIndex, startIndex + limit);
+  const normalizedDonorAddress = donorAddress?.toLowerCase();
+  const myRankingEntry = normalizedDonorAddress
+    ? fullRanking.entriesByTrust.find(entry => entry.donorAddress === normalizedDonorAddress) ?? null
+    : null;
+
+  return {
+    rankings: pagedEntries.map(maskRankingEntry),
+    myRanking: myRankingEntry ? maskRankingEntry(myRankingEntry) : null,
+    scores: fullRanking.scores,
+    trustFactors: fullRanking.trustFactors,
     metadata: {
-      projectId,
-      roundId,
+      ...fullRanking.metadata,
       totalItems,
       totalPages,
       currentPage: page,
       pageSize: limit,
-      cachedAt,
-      cacheHit
+      cacheHit,
+      sortBy
     }
   };
 }
@@ -387,7 +531,14 @@ function finalizeRankings(
 export async function getTrustAdjustedQfRankings(
   query: QfRankingQueryInput
 ): Promise<QfRankingResponse> {
-  const { projectId, roundId, page, limit } = query;
+  const {
+    projectId,
+    roundId,
+    page,
+    limit,
+    sortBy = 'trustAdjusted',
+    donorAddress
+  } = query;
 
   const normalizedRoundId = normalizeRoundIdForCacheKey(roundId);
   const timeWindow = parseRoundIdToTimeWindow(roundId);
@@ -404,11 +555,9 @@ export async function getTrustAdjustedQfRankings(
   const cached = await getQfRankingCache(cacheKey);
   if (cached) {
     try {
-      const cachedData = JSON.parse(cached) as QfRankingResponse;
+      const cachedData: unknown = JSON.parse(cached);
       if (isValidCachedRanking(cachedData)) {
-        cachedData.metadata.currentPage = page;
-        cachedData.metadata.cacheHit = true;
-        return cachedData;
+        return sliceRankingPage(cachedData, sortBy, page, limit, donorAddress, true);
       }
       logger.warn('Cached QF ranking chứa giá trị không hữu hạn hoặc thiếu field, recomputing', { cacheKey });
     } catch {
@@ -422,12 +571,22 @@ export async function getTrustAdjustedQfRankings(
   const trustScoreMap = await fetchTrustScores(uniqueAddresses);
 
   const intermediate = computeTrustAdjustedRankings({ aggregatedDonations, trustScoreMap });
-
-  const response = finalizeRankings(intermediate, donations.length, page, limit, projectId, normalizedRoundId, null, false);
+  const fullRanking = buildFullRankingPayload(
+    intermediate,
+    donations.length,
+    projectId,
+    normalizedRoundId,
+    null
+  );
+  let response = sliceRankingPage(fullRanking, sortBy, page, limit, donorAddress, false);
 
   try {
-    await setQfRankingCache(cacheKey, JSON.stringify(response));
-    response.metadata.cachedAt = new Date().toISOString();
+    const cacheableRanking: FullRankingPayload = {
+      ...fullRanking,
+      metadata: { ...fullRanking.metadata, cachedAt: new Date().toISOString() }
+    };
+    await setQfRankingCache(cacheKey, JSON.stringify(cacheableRanking));
+    response = sliceRankingPage(cacheableRanking, sortBy, page, limit, donorAddress, false);
   } catch (error) {
     logger.warn('Failed to cache QF ranking result', {
       projectId,

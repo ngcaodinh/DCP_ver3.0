@@ -55,10 +55,8 @@ const donorTrustScoreSchema = new Schema<DonorTrustScoreRecord>(
 // Index desc cho trustScore — dùng bởi G2 Trust-Adjusted QF ranking query.
 donorTrustScoreSchema.index({ trustScore: -1 });
 
-export const DonorTrustScoreModel = mongoose.model<DonorTrustScoreRecord>(
-  'DonorTrustScore',
-  donorTrustScoreSchema
-);
+export const DonorTrustScoreModel = mongoose.models?.DonorTrustScore
+  || mongoose.model<DonorTrustScoreRecord>('DonorTrustScore', donorTrustScoreSchema);
 
 /**
  * Hàm tìm bản ghi trust score theo wallet address của donor.
