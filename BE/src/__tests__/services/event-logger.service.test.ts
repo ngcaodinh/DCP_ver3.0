@@ -64,8 +64,19 @@ describe('event-logger.service', () => {
     expect(mocks.redis!.publish).toHaveBeenCalledWith(EVENT_LOGGER_LIVE_CHANNEL, expect.any(String));
     expect(mocks.redis!.eval.mock.calls[0][1].keys).toEqual([EVENT_LOGGER_BUFFER_KEY]);
     expect(publishedPayload.eventId).toBe(bufferedPayload.eventId);
+    expect(bufferedPayload.eventId).toBe('EVT-DONATION_CONFIRMED-0xtx');
     expect(bufferedPayload.walletAddress).toBe('0xabcdef1234567890abcdef1234567890abcdef12');
     expect(bufferedPayload.createdAt).toBeNull();
+  });
+
+  it('cùng transaction hash tạo cùng eventId để chống duplicate giữa hai đường phát donation', async () => {
+    logEvent(validDonationInput());
+    logEvent(validDonationInput());
+    await vi.waitFor(() => expect(mocks.redis!.eval).toHaveBeenCalledTimes(2));
+
+    const firstPayload = JSON.parse(mocks.redis!.eval.mock.calls[0][1].arguments[1] as string) as Record<string, unknown>;
+    const secondPayload = JSON.parse(mocks.redis!.eval.mock.calls[1][1].arguments[1] as string) as Record<string, unknown>;
+    expect(firstPayload.eventId).toBe(secondPayload.eventId);
   });
 
   it('Redis null thì ghi trực tiếp Mongo và không ném lỗi ra caller', async () => {
@@ -132,5 +143,30 @@ describe('event-logger.service', () => {
 
     const bufferedPayload = JSON.parse(mocks.redis!.eval.mock.calls[0][1].arguments[1] as string) as Record<string, unknown>;
     expect(bufferedPayload.payload).toEqual({ truncated: true, serializationError: true });
+  });
+
+  it('payload vượt 8 KB thì ghi marker kích thước thay vì đẩy dữ liệu quá lớn vào Redis', async () => {
+    logEvent({
+      ...validDonationInput(),
+      payload: { ...validDonationInput().payload, details: 'x'.repeat(9_000) }
+    });
+    await vi.waitFor(() => expect(mocks.redis!.eval).toHaveBeenCalledTimes(1));
+
+    const bufferedPayload = JSON.parse(mocks.redis!.eval.mock.calls[0][1].arguments[1] as string) as Record<string, unknown>;
+    expect(bufferedPayload.payload).toEqual({
+      truncated: true,
+      originalSizeBytes: expect.any(Number)
+    });
+  });
+
+  it('EVENT_LOGGER_ENABLED=false thì bỏ qua event hoàn toàn', async () => {
+    process.env.EVENT_LOGGER_ENABLED = 'false';
+
+    logEvent(validDonationInput());
+    await Promise.resolve();
+
+    expect(mocks.redis!.publish).not.toHaveBeenCalled();
+    expect(mocks.redis!.eval).not.toHaveBeenCalled();
+    expect(mocks.create).not.toHaveBeenCalled();
   });
 });

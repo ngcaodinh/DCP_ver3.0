@@ -9,7 +9,8 @@ import {
   deleteArchivedEventsOlderThan,
   findArchivedRegularEventsOlderThan,
   findHotEventsOlderThan,
-  markProjectEventArchived
+  markProjectEventArchived,
+  type ProjectEventCursor
 } from '../models/projectEventModel';
 import {
   IMMUTABLE_EVENT_TYPES,
@@ -175,7 +176,11 @@ export async function archiveProjectEvents(
     { cutoff: immutableCutoff, eventTypes: IMMUTABLE_EVENT_TYPES }
   ];
   let batchCount = 0;
-  const activePolicies = policies.map(policy => ({ policy, hasMore: true }));
+  const activePolicies = policies.map(policy => ({
+    policy,
+    hasMore: true,
+    cursor: undefined as ProjectEventCursor | undefined
+  }));
 
   // Round-robin regular va immutable de tranh starvation immutable backlog.
   while (batchCount < maxBatches && activePolicies.some(item => item.hasMore)) {
@@ -187,11 +192,18 @@ export async function archiveProjectEvents(
         break;
       }
 
-      const records = await findHotEventsOlderThan(
-        activePolicy.policy.cutoff,
-        activePolicy.policy.eventTypes,
-        batchSize
-      );
+      const records = activePolicy.cursor
+        ? await findHotEventsOlderThan(
+          activePolicy.policy.cutoff,
+          activePolicy.policy.eventTypes,
+          batchSize,
+          activePolicy.cursor
+        )
+        : await findHotEventsOlderThan(
+          activePolicy.policy.cutoff,
+          activePolicy.policy.eventTypes,
+          batchSize
+        );
       if (records.length === 0) {
         activePolicy.hasMore = false;
         continue;
@@ -207,7 +219,16 @@ export async function archiveProjectEvents(
       result.archived += batchResult.archived;
       result.skipped += batchResult.skipped;
       result.failed += batchResult.failed;
-      activePolicy.hasMore = records.length === batchSize;
+      activePolicy.cursor = {
+        timestamp: records[records.length - 1].timestamp,
+        eventId: records[records.length - 1].eventId
+      };
+      if (batchResult.archived === 0 && batchResult.failed > 0) {
+        // Không retry nóng cùng một batch khi cold storage đang lỗi; chu kỳ daily sau sẽ thử lại.
+        activePolicy.hasMore = false;
+      } else {
+        activePolicy.hasMore = records.length === batchSize;
+      }
     }
 
     if (result.hasMore || !processedBatch) break;
@@ -237,14 +258,20 @@ export async function purgeArchivedRegularEvents(
   const timeBudgetMs = normalizeBoundedInteger(options.timeBudgetMs, DEFAULT_ARCHIVE_TIME_BUDGET_MS, 300_000);
   const result: PurgeArchivedRegularEventsResult = { cutoff, scanned: 0, deleted: 0, failed: 0, hasMore: false };
   const startedAt = Date.now();
+  let cursor: ProjectEventCursor | undefined;
 
   for (let batchIndex = 0; batchIndex < maxBatches; batchIndex += 1) {
     if (batchIndex > 0 && Date.now() - startedAt >= timeBudgetMs) {
       result.hasMore = true;
       break;
     }
-    const records = await findArchivedRegularEventsOlderThan(cutoff, batchSize);
-    if (records.length === 0) break;
+    const records = cursor
+      ? await findArchivedRegularEventsOlderThan(cutoff, batchSize, cursor)
+      : await findArchivedRegularEventsOlderThan(cutoff, batchSize);
+    if (records.length === 0) {
+      result.hasMore = false;
+      break;
+    }
     result.scanned += records.length;
 
     // Defense-in-depth: immutable event tuyệt đối không được đi qua nhánh purge dù query model đã lọc.
@@ -278,9 +305,11 @@ export async function purgeArchivedRegularEvents(
       result.failed += verificationResults.filter(resultItem => !resultItem.verified).length;
     }
 
+    let deletedInBatch = 0;
     if (verifiedEventIds.length > 0) {
       try {
-        result.deleted += await deleteArchivedEventsOlderThan(cutoff, verifiedEventIds);
+        deletedInBatch = await deleteArchivedEventsOlderThan(cutoff, verifiedEventIds);
+        result.deleted += deletedInBatch;
       } catch (error) {
         result.failed += verifiedEventIds.length;
         logger.error('Purge batch project event thất bại; record sẽ được giữ lại.', {
@@ -289,6 +318,14 @@ export async function purgeArchivedRegularEvents(
       }
     }
 
+    cursor = {
+      timestamp: records[records.length - 1].timestamp,
+      eventId: records[records.length - 1].eventId
+    };
+    if (deletedInBatch === 0) {
+      // Không có tiến triển thì không hẹn retry 60 giây cho cùng một dải record lỗi.
+      break;
+    }
     if (records.length < batchSize) break;
     result.hasMore = true;
   }

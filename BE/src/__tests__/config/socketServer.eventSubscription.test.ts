@@ -70,7 +70,7 @@ describe('socketServer event subscription authorization', () => {
   });
 
   it('giới hạn cả các lần subscribe bị từ chối và mở lại sau một cửa sổ', () => {
-    const limiter = createEventSubscribeRateLimiter();
+    const limiter = createEventSubscribeRateLimiter('rate-user');
 
     for (let attempt = 0; attempt < 30; attempt += 1) {
       expect(limiter()).toBe(true);
@@ -79,6 +79,28 @@ describe('socketServer event subscription authorization', () => {
 
     vi.advanceTimersByTime(60_000);
     expect(limiter()).toBe(true);
+  });
+
+  it('dùng chung quota giữa hai socket của cùng một user', () => {
+    const firstSocketLimiter = createEventSubscribeRateLimiter('shared-user');
+    const secondSocketLimiter = createEventSubscribeRateLimiter('shared-user');
+
+    for (let attempt = 0; attempt < 15; attempt += 1) {
+      expect(firstSocketLimiter()).toBe(true);
+      expect(secondSocketLimiter()).toBe(true);
+    }
+    expect(firstSocketLimiter()).toBe(false);
+    expect(secondSocketLimiter()).toBe(false);
+
+    vi.advanceTimersByTime(60_000);
+
+    let allowedAttempts = 0;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (firstSocketLimiter()) allowedAttempts += 1;
+      if (secondSocketLimiter()) allowedAttempts += 1;
+    }
+
+    expect(allowedAttempts).toBe(30);
   });
 
   it('tính cả room đang pending để không vượt quota khi subscribe đồng thời', () => {

@@ -15,7 +15,7 @@ describe('projectEventModel', () => {
       { fields: { eventId: 1 }, options: expect.objectContaining({ unique: true }) },
       { fields: { eventType: 1, timestamp: -1 }, options: expect.any(Object) },
       { fields: { projectId: 1, timestamp: -1 }, options: expect.any(Object) },
-      { fields: { archiveState: 1, timestamp: 1 }, options: expect.any(Object) }
+      { fields: { archiveState: 1, timestamp: 1, eventId: 1 }, options: expect.any(Object) }
     ]));
   });
 

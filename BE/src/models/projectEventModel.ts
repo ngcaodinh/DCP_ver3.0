@@ -25,10 +25,15 @@ const projectEventSchema = new Schema<ProjectEventRecord>({
 projectEventSchema.index({ eventId: 1 }, { unique: true });
 projectEventSchema.index({ eventType: 1, timestamp: -1 });
 projectEventSchema.index({ projectId: 1, timestamp: -1 });
-projectEventSchema.index({ archiveState: 1, timestamp: 1 });
+projectEventSchema.index({ archiveState: 1, timestamp: 1, eventId: 1 });
 
 export const ProjectEventModel = mongoose.models.ProjectEvent
   || mongoose.model<ProjectEventRecord>('ProjectEvent', projectEventSchema, 'project_events_timeseries');
+
+export interface ProjectEventCursor {
+  timestamp: Date;
+  eventId: string;
+}
 
 /** Ghi một batch event theo ordered=false để retry không làm mất các event hợp lệ khác. */
 export async function insertProjectEvents(records: ProjectEventRecord[]): Promise<void> {
@@ -39,12 +44,21 @@ export async function insertProjectEvents(records: ProjectEventRecord[]): Promis
 export async function findHotEventsOlderThan(
   cutoff: Date,
   eventTypes: readonly ProjectEventType[],
-  limit: number
+  limit: number,
+  after?: ProjectEventCursor
 ): Promise<ProjectEventRecord[]> {
+  const cursorFilter = after ? {
+    $or: [
+      { timestamp: { $gt: after.timestamp } },
+      { timestamp: after.timestamp, eventId: { $gt: after.eventId } }
+    ]
+  } : {};
+
   return ProjectEventModel.find({
     archiveState: 'HOT',
     timestamp: { $lt: cutoff },
-    eventType: { $in: eventTypes }
+    eventType: { $in: eventTypes },
+    ...cursorFilter
   })
     .sort({ timestamp: 1, eventId: 1 })
     .limit(limit)
@@ -55,12 +69,21 @@ export async function findHotEventsOlderThan(
 /** Lấy event regular đã archive đủ một năm để verify checksum trước khi xoá. */
 export async function findArchivedRegularEventsOlderThan(
   cutoff: Date,
-  limit: number
+  limit: number,
+  after?: ProjectEventCursor
 ): Promise<ProjectEventRecord[]> {
+  const cursorFilter = after ? {
+    $or: [
+      { timestamp: { $gt: after.timestamp } },
+      { timestamp: after.timestamp, eventId: { $gt: after.eventId } }
+    ]
+  } : {};
+
   return ProjectEventModel.find({
     archiveState: 'ARCHIVED',
     timestamp: { $lt: cutoff },
-    eventType: { $nin: IMMUTABLE_EVENT_TYPES }
+    eventType: { $nin: IMMUTABLE_EVENT_TYPES },
+    ...cursorFilter
   })
     .sort({ timestamp: 1, eventId: 1 })
     .limit(limit)

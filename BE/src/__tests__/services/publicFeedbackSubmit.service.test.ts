@@ -69,10 +69,15 @@ vi.mock('../../services/publicFeedback.service', () => ({
   invalidatePublicFeedbackStatsCache: mockInvalidateStats
 }));
 
+vi.mock('../../services/event-logger.service', () => ({
+  logEvent: vi.fn()
+}));
+
 import {
   getPublicFeedbackFormContext,
   submitSingleFeedback
 } from '../../services/publicFeedbackSubmit.service';
+import { logEvent } from '../../services/event-logger.service';
 
 const project = {
   projectId: 'project-001',
@@ -132,6 +137,21 @@ describe('publicFeedbackSubmit.service', () => {
     expect(savedDocument).not.toHaveProperty('anonymousName');
     expect(savedDocument).toHaveProperty('submittedAt', expect.any(Date));
     expect(mockInvalidateStats).toHaveBeenCalledWith('project-001');
+  });
+
+  it('ghi FEEDBACK_FLAGGED khi public feedback bị gắn cờ', async () => {
+    mockComputeRiskScore.mockReturnValue(8);
+    mockShouldFlagFeedback.mockReturnValue(true);
+
+    const result = await submitSingleFeedback(createPayload(), '203.0.113.10');
+
+    expect(result.isFlagged).toBe(true);
+    expect(logEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: 'FEEDBACK_FLAGGED',
+      projectId: 'project-001',
+      organizationId: 'org-001',
+      payload: expect.objectContaining({ riskScore: 8, source: 'public' })
+    }));
   });
 
   it('accepts only ACTIVE, COMPLETED and CLOSED projects', async () => {

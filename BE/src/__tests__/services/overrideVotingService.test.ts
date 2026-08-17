@@ -41,6 +41,10 @@ vi.mock('../../events/oracleEvents', () => ({
   oracleEvents: { emit: vi.fn() }
 }));
 
+vi.mock('../../services/event-logger.service', () => ({
+  logEvent: vi.fn()
+}));
+
 import {
   findOverrideRequestById,
   addVoteToOverrideRequest,
@@ -55,6 +59,7 @@ import {
 } from '../../models/disbursementModel';
 import { recordAdminAuditLog } from '../../services/audit-log.service';
 import { oracleEvents } from '../../events/oracleEvents';
+import { logEvent } from '../../services/event-logger.service';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -218,6 +223,12 @@ describe('submitOverrideVote', () => {
 
     expect(result.outcome).toBe('RESOLVED_REJECTED');
     expect(resolveOverrideRequest).toHaveBeenCalledWith('req-001', 'REJECTED', expect.any(Date));
+    expect(logEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: 'OVERRIDE_EXECUTED',
+      projectId: 'proj-001',
+      organizationId: 'org-001',
+      payload: expect.objectContaining({ status: 'REJECTED' })
+    }));
   });
 
   // Kiá»ƒm chá»©ng race final resolution khÃ´ng ghi audit outcome sai khi conditional update khÃ´ng match.
@@ -271,6 +282,12 @@ describe('submitOverrideVote', () => {
     }
     expect(oracleEvents.emit).toHaveBeenCalledWith('override.executed', expect.objectContaining({
       overrideRequestId: 'req-001'
+    }));
+    expect(logEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: 'OVERRIDE_EXECUTED',
+      projectId: 'proj-001',
+      organizationId: 'org-001',
+      payload: expect.objectContaining({ status: 'APPROVED' })
     }));
   });
 

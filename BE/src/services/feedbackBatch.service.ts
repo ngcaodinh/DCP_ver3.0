@@ -25,6 +25,7 @@ import {
   PayloadMustBeArrayError
 } from '../utils/feedbackBatchError';
 import { escapeFormulaInjection, hashBeneficiaryName } from '../utils/feedbackText';
+import * as eventLoggerService from './event-logger.service';
 
 export { escapeFormulaInjection, hashBeneficiaryName } from '../utils/feedbackText';
 
@@ -210,6 +211,25 @@ async function saveBatchFeedback(
   });
 
   await BeneficiaryFeedbackModel.insertMany(documents, { ordered: false });
+  // Chỉ phát event sau khi batch đã ghi thành công để event stream không chứa feedback chưa tồn tại trong MongoDB.
+  for (const [index, document] of documents.entries()) {
+    const row = feedbacks[index];
+    if (!row.isFlagged) continue;
+
+    eventLoggerService.logEvent({
+      eventType: 'FEEDBACK_FLAGGED',
+      projectId: document.projectId,
+      organizationId: uploadedByOrganizationId,
+      timestamp: document.submittedAt,
+      payload: {
+        feedbackId: document.feedbackId,
+        riskScore: document.riskScore,
+        rowNumber: row.rowNumber,
+        batchContentHash,
+        source: 'batch'
+      }
+    });
+  }
   return documents.length;
 }
 

@@ -11,6 +11,7 @@ const mockRedisExpire = vi.hoisted(() => vi.fn<() => Promise<string>>());
 const mockProcessDisbursementFn = vi.hoisted(() => vi.fn<() => Promise<DisbursementResult>>());
 const mockVerifyChecksumFn = vi.hoisted(() => vi.fn<() => boolean>());
 const mockWebhookEventsEmitFn = vi.hoisted(() => vi.fn());
+const mockEventLoggerLogEventFn = vi.hoisted(() => vi.fn());
 const mockAuditLogCreateFn = vi.hoisted(() => vi.fn<() => Promise<unknown>>());
 const mockFindDisbursementFn = vi.hoisted(() => vi.fn<() => Promise<unknown>>());
 
@@ -47,6 +48,10 @@ vi.mock('../../events/webhookEvents', () => ({
     on: vi.fn(),
     setMaxListeners: vi.fn()
   }
+}));
+
+vi.mock('../../services/event-logger.service', () => ({
+  logEvent: mockEventLoggerLogEventFn
 }));
 
 vi.mock('../../models/webhookAuditLogModel', () => ({
@@ -180,6 +185,14 @@ describe('PayOS Webhook Handler - processPayosWebhook', () => {
         status: 'COMPLETED'
       })
     );
+    expect(mockEventLoggerLogEventFn).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: 'DISBURSEMENT_TRANSFERRED',
+      projectId: 'PRJ-001',
+      organizationId: 'ORG-001',
+      amount: 1000000,
+      correlationId: 'DS-123-ABC',
+      payload: expect.objectContaining({ requestId: 'DS-123-ABC' })
+    }));
   });
 
   it('should emit DISBURSEMENT_TRANSFER_FAILED event for failed disbursement', async () => {
@@ -203,6 +216,13 @@ describe('PayOS Webhook Handler - processPayosWebhook', () => {
         payosTransferStatus: 'MANUAL_REVIEW'
       })
     );
+    expect(mockEventLoggerLogEventFn).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: 'DISBURSEMENT_TRANSFER_FAILED',
+      projectId: 'PRJ-001',
+      organizationId: 'ORG-001',
+      correlationId: 'DS-123-ABC',
+      payload: expect.objectContaining({ payosTransferStatus: 'MANUAL_REVIEW' })
+    }));
   });
 
   it('should skip idempotency when Redis is unavailable', async () => {

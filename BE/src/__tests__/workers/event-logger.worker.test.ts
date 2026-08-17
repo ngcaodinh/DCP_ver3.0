@@ -72,6 +72,7 @@ describe('event-logger.worker', () => {
     process.env.EVENT_LOGGER_BATCH_SIZE = '100';
     process.env.EVENT_LOGGER_FLUSH_INTERVAL_MS = '300000';
     process.env.EVENT_LOGGER_TICK_MS = '5000';
+    process.env.EVENT_LOGGER_INFLIGHT_RECOVERY_INTERVAL_MS = '60000';
     __resetEventLoggerWorkerState();
   });
 
@@ -138,6 +139,16 @@ describe('event-logger.worker', () => {
     expect(mocks.insertMany).toHaveBeenCalledTimes(1);
   });
 
+  it('chỉ recovery inflight theo nhịp riêng, không SCAN ở mọi tick', async () => {
+    await runEventLoggerOnce();
+    await runEventLoggerOnce();
+    expect(mocks.redis!.scanIterator).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(60_000);
+    await runEventLoggerOnce();
+    expect(mocks.redis!.scanIterator).toHaveBeenCalledTimes(2);
+  });
+
   it('duplicate-only bulk error được coi là thành công để xoá inflight', async () => {
     mocks.redis!.lLen.mockResolvedValue(100);
     mocks.redis!.lRange.mockResolvedValue([createQueuedRecord(1)]);
@@ -153,12 +164,40 @@ describe('event-logger.worker', () => {
   });
 
   it('stop worker clear timer và chờ lượt flush cuối', async () => {
-    mocks.redis!.lLen.mockResolvedValue(0);
+    mocks.redis!.lLen.mockResolvedValueOnce(0).mockResolvedValueOnce(1).mockResolvedValue(0);
+    mocks.redis!.lRange.mockResolvedValue([createQueuedRecord(200)]);
     startEventLoggerWorker();
     await Promise.resolve();
     await stopEventLoggerWorker();
 
     expect(vi.getTimerCount()).toBe(0);
+    expect(mocks.insertMany).toHaveBeenCalledWith([
+      expect.objectContaining({ eventId: 'EVT-200' })
+    ]);
+  });
+
+  it('stop worker timeout sau 10 giây khi lượt flush không hoàn tất', async () => {
+    mocks.redis!.lLen.mockReturnValue(new Promise<number>(() => undefined));
+    startEventLoggerWorker();
+    await Promise.resolve();
+
+    const stopPromise = stopEventLoggerWorker();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(10_000);
+    await stopPromise;
+
+    expect(vi.getTimerCount()).toBe(0);
+    process.env.EVENT_LOGGER_ENABLED = 'false';
+  });
+
+  it('EVENT_LOGGER_ENABLED=false thì không khởi động timer', async () => {
+    process.env.EVENT_LOGGER_ENABLED = 'false';
+
+    startEventLoggerWorker();
+    await Promise.resolve();
+
+    expect(vi.getTimerCount()).toBe(0);
+    expect(mocks.redis!.scanIterator).not.toHaveBeenCalled();
   });
 
   it('giữ inflight key khi record JSON không hợp lệ để retry', async () => {

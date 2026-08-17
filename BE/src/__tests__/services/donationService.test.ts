@@ -63,6 +63,10 @@ vi.mock('../../services/rankingIncrementalService', () => ({
   applyDonationToMetrics: vi.fn()
 }));
 
+vi.mock('../../services/event-logger.service', () => ({
+  logEvent: vi.fn()
+}));
+
 /**
  * Import sau khi mock để Vitest hoisting đảm bảo mocks đã được setup.
  */
@@ -80,6 +84,7 @@ import {
 import {
   applyDonationToMetrics
 } from '../../services/rankingIncrementalService';
+import { logEvent } from '../../services/event-logger.service';
 
 /**
  * Hàm tạo DonationEventLog mẫu.
@@ -205,6 +210,17 @@ describe('handleDonationPostIndex', () => {
       mockEvent.donorAddress.toLowerCase(),
       0.5
     );
+    expect(logEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: 'DONATION_CONFIRMED',
+      projectId: '123',
+      walletAddress: mockEvent.donorAddress,
+      amount: 50,
+      payload: expect.objectContaining({
+        transactionHash: mockEvent.transactionHash,
+        blockNumber: mockEvent.blockNumber,
+        isAnonymous: true
+      })
+    }));
   });
 
   // ===== 2. Guest donation nhưng session EXPIRED =====
@@ -380,7 +396,7 @@ describe('handleDonationPostIndex', () => {
     const mockRisk = createMockRiskRecord({ trustMultiplier: 0.5 });
     const mockEvent = createMockDonationEvent({ isAnonymous: true });
 
-    let callTimes: Record<string, number> = {};
+    const callTimes: Record<string, number> = {};
     const startTime = Date.now();
     vi.mocked(findGuestWalletSessionByWalletAddress).mockImplementation(async () => {
       callTimes.sessionStart = Date.now() - startTime;

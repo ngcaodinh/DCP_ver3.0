@@ -33,8 +33,15 @@ function readPositiveIntegerEnv(name: string, fallback: number): number {
   return Number.isSafeInteger(value) && value > 0 ? value : fallback;
 }
 
-/** Sinh eventId ngay tại producer để cùng một payload giữ nguyên định danh khi retry. */
-function createProjectEventId(): string {
+/** Sinh eventId ổn định cho donation và ngẫu nhiên cho các event không có khóa nghiệp vụ. */
+function createProjectEventId(
+  eventType: string,
+  payload: Record<string, unknown>
+): string {
+  if (eventType === 'DONATION_CONFIRMED' && typeof payload.transactionHash === 'string') {
+    return `EVT-${eventType}-${payload.transactionHash.trim().toLowerCase()}`;
+  }
+
   return `EVT-${Date.now()}-${randomBytes(4).toString('hex')}`;
 }
 
@@ -139,7 +146,7 @@ export function logEvent(input: LogEventInput): void {
       return;
     }
 
-    const eventId = createProjectEventId();
+    const eventId = createProjectEventId(parsedInput.data.eventType, parsedInput.data.payload);
     const now = new Date();
     const timestamp = parsedInput.data.timestamp.getTime() > now.getTime() + FUTURE_TIMESTAMP_TOLERANCE_MS
       ? now

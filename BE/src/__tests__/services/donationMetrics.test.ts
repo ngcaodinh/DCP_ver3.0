@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => ({
   findPublicCampaigns: vi.fn(),
   getLatestIndexedBlockNumberFromRepository: vi.fn(),
   createUserNotification: vi.fn(),
+  logEvent: vi.fn(),
   jsonRpcProvider: vi.fn(),
   interfaceConstructor: vi.fn()
 }));
@@ -55,6 +56,9 @@ vi.mock('../../repositories/anonymousDonationAuditRepository', () => ({
 }));
 vi.mock('../../services/rankingIncrementalService', () => ({
   applyDonationToMetrics: mocks.applyDonationToMetrics
+}));
+vi.mock('../../services/event-logger.service', () => ({
+  logEvent: mocks.logEvent
 }));
 vi.mock('../../models/authModel', () => ({
   findUserById: mocks.findUserById,
@@ -123,6 +127,7 @@ describe('donation Prometheus metrics', () => {
     mocks.incrementSessionDonationCounters.mockResolvedValue(null);
     mocks.createUserNotification.mockResolvedValue(null);
     mocks.findProjectByProjectId.mockResolvedValue(null);
+    mocks.logEvent.mockReset();
   });
 
   afterEach(() => {
@@ -179,6 +184,55 @@ describe('donation Prometheus metrics', () => {
     expect(metrics).toMatch(/^donation_events_total(?:\{[^}]*\})? 0$/m);
     expect(metrics).not.toContain('donation_amount_vnd_count');
     expect(mocks.applyDonationToMetrics).toHaveBeenCalledWith('123', 50, DONOR_ADDRESS);
+  });
+
+  it('ghi DONATION_CONFIRMED đủ field trên đường record transaction hash', async () => {
+    process.env.BLOCKCHAIN_RPC_URL = 'https://rpc.test';
+    process.env.DONATION_RANKING_CONTRACT_ADDRESS = '0x1111111111111111111111111111111111111111';
+    process.env.BLOCKCHAIN_CHAIN_ID = '80002';
+
+    const timestampSeconds = 1_700_000_000n;
+    const parseLog = vi.fn(() => ({
+      name: 'DonationReceived',
+      args: {
+        projectId: 123n,
+        donor: DONOR_ADDRESS,
+        amount: 50n,
+        timestamp: timestampSeconds,
+        isAnonymous: true
+      }
+    }));
+    mocks.interfaceConstructor.mockImplementation(() => ({ parseLog }));
+    mocks.jsonRpcProvider.mockImplementation(() => ({
+      getNetwork: vi.fn().mockResolvedValue({ chainId: 80002n }),
+      waitForTransaction: vi.fn().mockResolvedValue({
+        status: 1,
+        blockNumber: 123,
+        logs: [{
+          address: process.env.DONATION_RANKING_CONTRACT_ADDRESS,
+          topics: ['0xtopic'],
+          data: '0xdata'
+        }]
+      })
+    }));
+    mocks.findUserById.mockResolvedValue({ walletAddress: DONOR_ADDRESS });
+    mocks.upsertDonationRecordByTransactionHash.mockResolvedValue(undefined);
+
+    await recordDonationFromTransactionHash('user-1', '123', TRANSACTION_HASH, false);
+
+    expect(mocks.logEvent).toHaveBeenCalledWith({
+      eventType: 'DONATION_CONFIRMED',
+      projectId: '123',
+      walletAddress: DONOR_ADDRESS,
+      amount: 50,
+      correlationId: `donation:${TRANSACTION_HASH}`,
+      timestamp: new Date(Number(timestampSeconds) * 1000),
+      payload: {
+        transactionHash: TRANSACTION_HASH,
+        blockNumber: 123,
+        isAnonymous: true
+      }
+    });
   });
 
   it('does not fail the indexed donation when Prometheus registry recording throws', async () => {

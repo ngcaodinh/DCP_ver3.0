@@ -36,6 +36,10 @@ vi.mock('../../services/notificationService', () => ({
   createUserNotification: vi.fn().mockResolvedValue(null)
 }));
 
+vi.mock('../../services/event-logger.service', () => ({
+  logEvent: vi.fn()
+}));
+
 vi.mock('../../config/logger', () => ({
   getLogger: () => ({
     info: vi.fn(),
@@ -54,6 +58,7 @@ import { findGeofenceByProjectId } from '../../models/projectGeofenceModel';
 import { oracleEvents } from '../../events/oracleEvents';
 import { createOracleVerificationResult, linkOverrideRequestToVerification } from '../../models/oracleVerificationResultModel';
 import { createOracleOverrideRequest } from '../../models/oracleOverrideRequestModel';
+import { logEvent } from '../../services/event-logger.service';
 
 // ============================================================================
 // extractExifGps
@@ -294,6 +299,12 @@ describe('verifyEvidenceImage', () => {
     expect(result.distance!).toBeLessThan(500);
     // valid path: linkOverrideRequestToVerification không được gọi
     expect(vi.mocked(linkOverrideRequestToVerification)).not.toHaveBeenCalled();
+    expect(logEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: 'ORACLE_VERIFIED',
+      projectId: mockProjectId,
+      organizationId: mockOrgId,
+      payload: expect.objectContaining({ verificationId: result.verificationId, isValid: true })
+    }));
   });
 
   // --- out of radius ---
@@ -498,6 +509,12 @@ describe('verifyEvidenceImage', () => {
 
     expect(vi.mocked(oracleEvents.emit)).toHaveBeenCalledWith('oracle.verified', expect.objectContaining({ isValid: false }));
     expect(vi.mocked(oracleEvents.emit)).toHaveBeenCalledWith('override.requested', expect.objectContaining({ reason: 'OUT_OF_GEOFENCE' }));
+    expect(logEvent).toHaveBeenCalledWith(expect.objectContaining({ eventType: 'ORACLE_VERIFIED' }));
+    expect(logEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: 'OVERRIDE_REQUESTED',
+      projectId: mockProjectId,
+      organizationId: mockOrgId
+    }));
   });
 
   // --- helper: per-project radius ---

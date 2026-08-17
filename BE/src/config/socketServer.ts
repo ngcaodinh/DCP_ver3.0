@@ -22,19 +22,28 @@ const MAX_EVENT_PROJECT_ROOMS_PER_SOCKET = 20;
 const EVENT_SUBSCRIBE_RATE_LIMIT_WINDOW_MS = 60_000;
 const MAX_EVENT_SUBSCRIBE_ATTEMPTS_PER_WINDOW = 30;
 
-/** Tạo bộ giới hạn số lần thử subscribe event độc lập với số room đã join thành công. */
-export function createEventSubscribeRateLimiter(): () => boolean {
-  let windowStartedAt = Date.now();
-  let attemptCount = 0;
+interface EventSubscribeRateLimitState {
+  windowStartedAt: number;
+  attemptCount: number;
+}
+
+const eventSubscribeRateLimitStates = new Map<string, EventSubscribeRateLimitState>();
+
+/** Tạo bộ giới hạn subscribe dùng chung cho mọi socket của cùng một user. */
+export function createEventSubscribeRateLimiter(userId: string): () => boolean {
+  const rateLimitKey = userId.trim() || 'unknown-user';
 
   return (): boolean => {
     const now = Date.now();
-    if (now - windowStartedAt >= EVENT_SUBSCRIBE_RATE_LIMIT_WINDOW_MS) {
-      windowStartedAt = now;
-      attemptCount = 0;
-    }
-    if (attemptCount >= MAX_EVENT_SUBSCRIBE_ATTEMPTS_PER_WINDOW) return false;
-    attemptCount += 1;
+    const currentState = eventSubscribeRateLimitStates.get(rateLimitKey);
+    const state = !currentState
+      || now - currentState.windowStartedAt >= EVENT_SUBSCRIBE_RATE_LIMIT_WINDOW_MS
+      ? { windowStartedAt: now, attemptCount: 0 }
+      : currentState;
+    eventSubscribeRateLimitStates.set(rateLimitKey, state);
+
+    if (state.attemptCount >= MAX_EVENT_SUBSCRIBE_ATTEMPTS_PER_WINDOW) return false;
+    state.attemptCount += 1;
     return true;
   };
 }
@@ -169,7 +178,7 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
     const role = socket.data.role as string;
     const subscribedEventRooms = new Set<string>();
     const pendingEventRooms = new Set<string>();
-    const eventSubscribeRateLimiter = createEventSubscribeRateLimiter();
+    const eventSubscribeRateLimiter = createEventSubscribeRateLimiter(userId);
 
     // Room isolation theo role:
     // - admin: join 'admin' (transfer alerts) + 'commissioners' (override alerts) + 'user:${userId}'
@@ -308,6 +317,7 @@ export function shutdownSocketServer(): void {
   io?.close();
   io = null;
   knownManualReviewQueueIds.clear();
+  eventSubscribeRateLimitStates.clear();
 }
 
 /**

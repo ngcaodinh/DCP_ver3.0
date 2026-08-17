@@ -100,6 +100,21 @@ describe('event-archive.service', () => {
     );
   });
 
+  it('dừng sớm khi cả batch archive không có tiến triển để tránh retry cùng dải record', async () => {
+    mocks.findHot.mockImplementation(async (_cutoff, eventTypes: readonly string[]) => (
+      eventTypes.includes('SBT_MINTED')
+        ? []
+        : [record({ eventId: 'EVT-1' }), record({ eventId: 'EVT-2' })]
+    ));
+    mocks.store.verify.mockResolvedValue(false);
+
+    const result = await archiveProjectEvents({ store: mocks.store, now, batchSize: 2, maxBatches: 5 });
+
+    expect(result.hasMore).toBe(false);
+    expect(result.failed).toBe(2);
+    expect(mocks.findHot).toHaveBeenCalledTimes(2);
+  });
+
   it('purge regular archived event chỉ sau verify thành công ngay trước khi xoá', async () => {
     mocks.findArchived.mockResolvedValueOnce([record({
       archiveState: 'ARCHIVED',
@@ -141,6 +156,28 @@ describe('event-archive.service', () => {
     expect(mocks.store.verify).toHaveBeenCalledTimes(2);
     expect(mocks.deleteArchived).toHaveBeenCalledTimes(1);
     expect(mocks.deleteArchived).toHaveBeenCalledWith(expect.any(Date), ['EVT-1', 'EVT-2']);
+  });
+
+  it('dùng cursor event cuối batch để purge tiến qua các record cùng timestamp', async () => {
+    mocks.deleteArchived.mockResolvedValueOnce(2).mockResolvedValueOnce(1);
+    mocks.findArchived
+      .mockResolvedValueOnce([
+        record({ eventId: 'EVT-1', archiveLocator: 'project-events/2025/01/EVT-1.json', archiveChecksum: 'checksum' }),
+        record({ eventId: 'EVT-2', archiveLocator: 'project-events/2025/01/EVT-2.json', archiveChecksum: 'checksum' })
+      ])
+      .mockResolvedValueOnce([
+        record({ eventId: 'EVT-3', archiveLocator: 'project-events/2025/01/EVT-3.json', archiveChecksum: 'checksum' })
+      ]);
+
+    const result = await purgeArchivedRegularEvents({ store: mocks.store, now, batchSize: 2, maxBatches: 5 });
+
+    expect(result.deleted).toBe(3);
+    expect(mocks.findArchived).toHaveBeenNthCalledWith(
+      2,
+      expect.any(Date),
+      2,
+      { timestamp: new Date('2025-01-01T00:00:00.000Z'), eventId: 'EVT-2' }
+    );
   });
 
   it('archive SBT_MINTED theo mốc một calendar year, không áp dụng mốc 90 ngày', async () => {

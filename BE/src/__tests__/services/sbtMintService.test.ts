@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ethers } from 'ethers';
 
 const recordBlockchainTransactionMock = vi.hoisted(() => vi.fn());
+const eventLoggerLogEventMock = vi.hoisted(() => vi.fn());
 
 // vi.mock hoists above imports, so ethers needs to be imported before any vi.mock calls
 // that reference it. The sbtMintService module creates SBT_MINTED_EVENT_IFACE at module
@@ -56,6 +57,10 @@ vi.mock('../../queues/sbtMintQueue', () => ({
 
 vi.mock('../../events/sbtEvents', () => ({
   sbtEvents: { emit: vi.fn() }
+}));
+
+vi.mock('../../services/event-logger.service', () => ({
+  logEvent: eventLoggerLogEventMock
 }));
 
 vi.mock('../../services/sbtMetadataCacheService', () => ({
@@ -377,6 +382,19 @@ describe('sbtMintService - executeSbtMint', () => {
       milestone: pendingRecord.milestone,
       beneficiaryCount: pendingRecord.beneficiaryCount
     }));
+    expect(eventLoggerLogEventMock).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: 'SBT_MINTED',
+      projectId: 'proj-1',
+      organizationId: 'org-1',
+      walletAddress: pendingRecord.beneficiaryAddress,
+      payload: {
+        tokenId: 99,
+        milestone: pendingRecord.milestone,
+        beneficiaryCount: pendingRecord.beneficiaryCount,
+        sbtId: 'SBT-pending',
+        transactionHash: '0xtxhash456'
+      }
+    }));
   });
 
   it('throw "revert on-chain" khi receipt.status=0', async () => {
@@ -629,6 +647,11 @@ describe('sbtMintService - handleSbtMintFailure', () => {
       expect.objectContaining({ delay: SBT_MINT_RETRY_DELAYS_MS[1] })
     );
     expect(sbtEvents.emit).toHaveBeenCalledWith('sbt.mint-failed', expect.any(Object));
+    expect(eventLoggerLogEventMock).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: 'SBT_MINT_FAILED',
+      projectId: 'proj-1',
+      payload: expect.objectContaining({ mintRequestId: 'SBT-MINT-fail' })
+    }));
   });
 
   it('move to DLQ + emit sbt.mint-dlq khi attemptNumber >= MAX (6)', async () => {
@@ -654,6 +677,11 @@ describe('sbtMintService - handleSbtMintFailure', () => {
     expect(markImpactSbtAsDlq).toHaveBeenCalled();
     expect(createSbtMintDlqEntry).toHaveBeenCalled();
     expect(sbtEvents.emit).toHaveBeenCalledWith('sbt.mint-dlq', expect.any(Object));
+    expect(eventLoggerLogEventMock).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: 'SBT_MINT_DLQ',
+      projectId: 'proj-1',
+      payload: expect.objectContaining({ mintRequestId: 'SBT-MINT-dlq' })
+    }));
     expect(enqueueSbtMint).not.toHaveBeenCalled();
   });
 });

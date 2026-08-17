@@ -26,6 +26,9 @@ vi.mock('../../models/beneficiaryFeedbackModel', () => ({
 vi.mock('../../services/publicFeedback.service', () => ({
   invalidatePublicFeedbackStatsCache: vi.fn()
 }));
+vi.mock('../../services/event-logger.service', () => ({
+  logEvent: vi.fn()
+}));
 
 // Import sau khi mock
 import {
@@ -38,6 +41,7 @@ import {
 } from '../../services/feedbackBatch.service';
 import { BeneficiaryFeedbackModel } from '../../models/beneficiaryFeedbackModel';
 import { invalidatePublicFeedbackStatsCache } from '../../services/publicFeedback.service';
+import { logEvent } from '../../services/event-logger.service';
 
 describe('feedbackBatch.service', () => {
   beforeEach(() => {
@@ -372,6 +376,18 @@ proj2,Le C,3,Okay,2024-01-15T12:00:00Z`;
 
       expect(result.success).toBe(2);
       expect(result.flaggedCount).toBe(1); // First row has risk score >= 7
+      expect(logEvent).toHaveBeenCalledTimes(1);
+      expect(logEvent).toHaveBeenCalledWith(expect.objectContaining({
+        eventType: 'FEEDBACK_FLAGGED',
+        projectId: 'proj1',
+        organizationId: 'org123',
+        timestamp: new Date('2024-01-15T10:00:00Z'),
+        payload: expect.objectContaining({
+          riskScore: expect.any(Number),
+          rowNumber: 1,
+          source: 'batch'
+        })
+      }));
     });
 
     it('nên trả về flaggedCount = 0 cho non-spam feedback', async () => {

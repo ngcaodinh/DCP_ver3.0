@@ -689,6 +689,20 @@ export async function recordDonationFromTransactionHash(authenticatedUserId: str
   }
 
   await upsertDonationRecordByTransactionHash(donationEventRecord);
+  // Ghi event ngay sau khi donation đã được upsert để đường /donations/record không phụ thuộc indexer thủ công.
+  eventLoggerService.logEvent({
+    eventType: 'DONATION_CONFIRMED',
+    projectId: donationEventRecord.projectId,
+    walletAddress: donationEventRecord.donorAddress,
+    amount: donationEventRecord.amount,
+    correlationId: generateDonationCorrelationId(donationEventRecord.transactionHash),
+    timestamp: donationEventRecord.timestamp,
+    payload: {
+      transactionHash: donationEventRecord.transactionHash,
+      blockNumber: donationEventRecord.blockNumber,
+      isAnonymous: donationEventRecord.isAnonymous
+    }
+  });
   await createDonationReceivedNotification(donationEventRecord);
 
   // Ghi chú logic phức tạp: KHÔNG dùng handleDonationPostIndex ở đây vì:

@@ -18,6 +18,7 @@ const DEFAULT_TICK_INTERVAL_MS = 5_000;
 const DEFAULT_BATCH_SIZE = 100;
 const DEFAULT_FLUSH_INTERVAL_MS = 5 * 60 * 1_000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
+const DEFAULT_INFLIGHT_RECOVERY_INTERVAL_MS = 60_000;
 const INFLIGHT_KEY_PREFIX = 'dcp:events:inflight:';
 const INFLIGHT_RECOVERY_AGE_MS = 5 * 60 * 1_000;
 
@@ -27,6 +28,7 @@ let intervalId: ReturnType<typeof setInterval> | null = null;
 let activeFlushPromise: Promise<void> | null = null;
 let isFlushing = false;
 let lastFlushAt = Date.now();
+let lastInflightRecoveryAt = 0;
 
 /** Đọc env bounded để timer và batch size không nhận giá trị âm hoặc không an toàn. */
 function readPositiveIntegerEnv(name: string, fallback: number): number {
@@ -116,7 +118,7 @@ async function recoverInflightKeys(redis: RedisClient): Promise<void> {
 }
 
 /** Thực hiện một tick duy nhất; cả ngưỡng số lượng và thời gian được đánh giá cùng một timer. */
-async function runEventLoggerTickInternal(): Promise<void> {
+async function runEventLoggerTickInternal(forceFlush = false): Promise<void> {
   if (isFlushing) return;
   isFlushing = true;
   const startedAt = Date.now();
@@ -125,12 +127,19 @@ async function runEventLoggerTickInternal(): Promise<void> {
     const redis = getRedisClientIfReady();
     if (!redis) return;
 
-    await recoverInflightKeys(redis);
+    const recoveryIntervalMs = readPositiveIntegerEnv(
+      'EVENT_LOGGER_INFLIGHT_RECOVERY_INTERVAL_MS',
+      DEFAULT_INFLIGHT_RECOVERY_INTERVAL_MS
+    );
+    if (Date.now() - lastInflightRecoveryAt >= recoveryIntervalMs) {
+      await recoverInflightKeys(redis);
+      lastInflightRecoveryAt = Date.now();
+    }
     const bufferLength = await redis.lLen(EVENT_LOGGER_BUFFER_KEY);
     eventLoggerBufferDepth.set(bufferLength);
     const batchSize = readPositiveIntegerEnv('EVENT_LOGGER_BATCH_SIZE', DEFAULT_BATCH_SIZE);
     const flushIntervalMs = readPositiveIntegerEnv('EVENT_LOGGER_FLUSH_INTERVAL_MS', DEFAULT_FLUSH_INTERVAL_MS);
-    const shouldFlush = bufferLength >= batchSize || Date.now() - lastFlushAt >= flushIntervalMs;
+    const shouldFlush = forceFlush || bufferLength >= batchSize || Date.now() - lastFlushAt >= flushIntervalMs;
     if (!shouldFlush) return;
 
     if (bufferLength === 0) {
@@ -163,15 +172,15 @@ async function runEventLoggerTickInternal(): Promise<void> {
 }
 
 /** Chạy một vòng worker trong correlation context để toàn bộ log có workerRunId. */
-export async function runEventLoggerOnce(): Promise<void> {
-  await runWithWorkerContext('event-logger', runEventLoggerTickInternal);
+export async function runEventLoggerOnce(forceFlush = false): Promise<void> {
+  await runWithWorkerContext('event-logger', () => runEventLoggerTickInternal(forceFlush));
 }
 
 /** Khởi động một timer duy nhất cho cả điều kiện flush theo số lượng và theo thời gian. */
 export function startEventLoggerWorker(): void {
   if (intervalId) return;
   if (process.env.EVENT_LOGGER_ENABLED === 'false') {
-    logger.warn('Event logger worker chưa bật: EVENT_LOGGER_ENABLED khác "true".');
+    logger.warn('Event logger worker chưa bật: EVENT_LOGGER_ENABLED=false.');
     return;
   }
 
@@ -194,10 +203,14 @@ function triggerEventLoggerTick(): void {
 
 /** Dừng timer và chờ một lượt flush cuối với giới hạn 10 giây để shutdown không bị treo. */
 export async function stopEventLoggerWorker(): Promise<void> {
+  if (process.env.EVENT_LOGGER_ENABLED === 'false') return;
+
   if (intervalId) clearInterval(intervalId);
   intervalId = null;
 
-  const finalFlush = activeFlushPromise ?? runEventLoggerOnce();
+  const finalFlush = activeFlushPromise
+    ? activeFlushPromise.then(() => runEventLoggerOnce(true))
+    : runEventLoggerOnce(true);
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
   await Promise.race([
     finalFlush,
@@ -216,4 +229,5 @@ export function __resetEventLoggerWorkerState(): void {
   activeFlushPromise = null;
   isFlushing = false;
   lastFlushAt = Date.now();
+  lastInflightRecoveryAt = 0;
 }
