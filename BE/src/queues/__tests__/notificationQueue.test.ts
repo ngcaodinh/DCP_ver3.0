@@ -95,7 +95,10 @@ describe('NotificationQueue - DLQ Config', () => {
 });
 
 describe('NotificationQueue - moveNotificationToDLQ', () => {
-  let moveNotificationToDLQ: (job: any) => Promise<void>;
+  // Mock job type — chỉ cần các field thực sự dùng trong implementation
+  type MockJob = { id: string; data: Record<string, unknown>; remove: ReturnType<typeof vi.fn> };
+  type MoveToDlqFn = (job: MockJob) => Promise<void>;
+  let moveNotificationToDLQ: MoveToDlqFn;
   let mockAdd: ReturnType<typeof vi.fn>;
   let mockRemove: ReturnType<typeof vi.fn>;
 
@@ -107,7 +110,7 @@ describe('NotificationQueue - moveNotificationToDLQ', () => {
     mockRemove = BullMock.__mockRemove;
 
     const module = await import('../notificationQueue');
-    moveNotificationToDLQ = module.moveNotificationToDLQ;
+    moveNotificationToDLQ = module.moveNotificationToDLQ as unknown as MoveToDlqFn;
   });
 
   it('nên add job vào DLQ queue', async () => {

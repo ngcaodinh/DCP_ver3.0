@@ -105,7 +105,7 @@ describe('Unsubscribe - Token Processing Logic', () => {
 
   it('processUnsubscribe nên return false khi token không tồn tại', async () => {
     const { UserNotificationPreferenceModel } = await import('../../models/notificationPreferenceModel');
-    (UserNotificationPreferenceModel.findOne as any).mockResolvedValue(null);
+    (UserNotificationPreferenceModel.findOne as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(null);
 
     const { processUnsubscribe } = await import('../../services/notificationService');
     const result = await processUnsubscribe('invalid-token-xyz');
@@ -122,7 +122,7 @@ describe('Unsubscribe - Token Processing Logic', () => {
       unsubscribeToken: 'valid-token-abc123',
       save: vi.fn().mockResolvedValue(true)
     };
-    (UserNotificationPreferenceModel.findOne as any).mockResolvedValue(mockPref);
+    (UserNotificationPreferenceModel.findOne as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(mockPref);
 
     const { processUnsubscribe } = await import('../../services/notificationService');
     const result = await processUnsubscribe('valid-token-abc123');
@@ -141,7 +141,7 @@ describe('Unsubscribe - Token Processing Logic', () => {
       unsubscribeToken: 'test-token',
       save: vi.fn().mockResolvedValue(true)
     };
-    (UserNotificationPreferenceModel.findOne as any).mockResolvedValue(mockPref);
+    (UserNotificationPreferenceModel.findOne as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(mockPref);
 
     const { processUnsubscribe } = await import('../../services/notificationService');
     await processUnsubscribe('test-token');
@@ -160,13 +160,15 @@ describe('Unsubscribe - Token Generation Integration', () => {
   it('generateUnsubscribeToken nên upsert preference record với token 64 ký tự', async () => {
     const { UserNotificationPreferenceModel } = await import('../../models/notificationPreferenceModel');
 
-    (UserNotificationPreferenceModel.findOneAndUpdate as any).mockImplementation((query: { userId: string }, update: { $set: { unsubscribeToken: string } }) => {
-      // Mock trả về token thực được tạo
-      return Promise.resolve({
-        userId: query.userId,
-        unsubscribeToken: update.$set.unsubscribeToken
-      });
-    });
+    (UserNotificationPreferenceModel.findOneAndUpdate as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      (query: Record<string, unknown>, update: { $set: { unsubscribeToken: string } }) => {
+        // Mock trả về token thực được tạo
+        return Promise.resolve({
+          userId: query.userId,
+          unsubscribeToken: update.$set.unsubscribeToken
+        });
+      }
+    );
 
     const { generateUnsubscribeToken } = await import('../../services/notificationService');
     const token = await generateUnsubscribeToken('user-123');
@@ -185,13 +187,15 @@ describe('Unsubscribe - Token Generation Integration', () => {
     const { UserNotificationPreferenceModel } = await import('../../models/notificationPreferenceModel');
 
     let capturedToken = '';
-    (UserNotificationPreferenceModel.findOneAndUpdate as any).mockImplementation((query: { userId: string }, update: { $set: { unsubscribeToken: string } }) => {
-      capturedToken = update.$set.unsubscribeToken;
-      return Promise.resolve({
-        userId: query.userId,
-        unsubscribeToken: capturedToken
-      });
-    });
+    (UserNotificationPreferenceModel.findOneAndUpdate as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      (query: Record<string, unknown>, update: { $set: { unsubscribeToken: string } }) => {
+        capturedToken = update.$set.unsubscribeToken;
+        return Promise.resolve({
+          userId: query.userId,
+          unsubscribeToken: capturedToken
+        });
+      }
+    );
 
     const { generateUnsubscribeToken } = await import('../../services/notificationService');
     await generateUnsubscribeToken('user-456');

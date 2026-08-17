@@ -43,7 +43,8 @@ function getTwilioClient(): ReturnType<typeof twilio> | null {
     const accountSid = process.env.TWILIO_ACCOUNT_SID!;
     const authToken = process.env.TWILIO_AUTH_TOKEN!;
 
-    twilioClient = twilio(accountSid, authToken, { accountSid });
+    // Truyền credentials vào constructor của Twilio — options thứ 3 là ClientOpts không có authToken.
+    twilioClient = twilio(accountSid, authToken);
 
     logger.info('Twilio client đã được khởi tạo thành công.', {
       accountSid: accountSid.substring(0, 10) + '...'
@@ -110,16 +111,24 @@ export async function sendSms(options: {
       };
     }
 
-    const result = await Promise.race([
-      client.messages.create({
-        body: options.body,
-        from,
-        to: normalizedTo
-      }),
-      new Promise<'timeout'>((_, reject) =>
-        setTimeout(() => reject(new Error('Twilio timeout')), SMS_TIMEOUT_MS)
-      )
-    ]) as { sid: string; status: string };
+    // Lưu timeout handle để clear khi operation resolve trước deadline — tránh timer tồn tại đến hết TTL.
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutHandle = setTimeout(() => reject(new Error('Twilio timeout')), SMS_TIMEOUT_MS);
+    });
+    let result: { sid: string; status: string };
+    try {
+      result = await Promise.race([
+        client.messages.create({
+          body: options.body,
+          from,
+          to: normalizedTo
+        }),
+        timeoutPromise
+      ]) as { sid: string; status: string };
+    } finally {
+      if (timeoutHandle !== null) clearTimeout(timeoutHandle);
+    }
 
     const latencyMs = Date.now() - startTime;
 

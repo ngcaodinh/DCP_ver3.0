@@ -54,7 +54,7 @@ export function isLargeDonationThresholdMet(metadata?: Record<string, unknown>):
   }
 
   const met = donationAmount >= threshold;
-  logger.info('LARGE_DONATION threshold check.', { donationAmount, threshold, thresholdMet: met });
+  logger.info('LARGE_DONATION threshold check.', { donationAmount, thresholdMet: met });
 
   return met;
 }
@@ -330,16 +330,15 @@ export async function dispatchNotification(
       logger.info(`Channel ${channel} dispatch thành công.`, {
         notificationId,
         userId: dispatchContext.userId,
-        channel,
+        channels: channel,
         providerMessageId: result.providerMessageId
       });
     } else {
       logger.warn(`Channel ${channel} dispatch thất bại.`, {
         notificationId,
         userId: dispatchContext.userId,
-        channel,
-        errorMessage: result.errorMessage,
-        retryable: result.retryable
+        channels: channel,
+        errorMessage: result.errorMessage
       });
     }
 

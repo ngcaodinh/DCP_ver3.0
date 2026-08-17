@@ -24,6 +24,7 @@ import { createFeedbackRoutes } from './routes/feedback.routes';
 import { createPublicFeedbackRoutes } from './routes/public-feedback.routes';
 import { createTileProxyRoutes } from './routes/tileProxyRoutes';
 import { createAuditLogRoutes } from './routes/audit-log.routes';
+import { createTrustScoreRoutes } from './routes/trustScoreRoutes';
 import { validateGuestJwtConfig } from './config/guestJsonWebToken';
 import { applySeoAndCacheHeaders } from './middleware/seoCacheMiddleware';
 import { API_GUEST_PREFIX } from './config/apiPrefixes';
@@ -174,6 +175,7 @@ function registerRoutes(): void {
   application.use('/api/feedback', createFeedbackRoutes());
   application.use('/api/feedback', createPublicFeedbackRoutes());
   application.use('/api/tiles', createTileProxyRoutes()); // [A-NEW3 fix] Tile proxy để tránh lộ GPS ra third-party
+  application.use('/api/trust-score', createTrustScoreRoutes());
   application.use(API_GUEST_PREFIX, createGuestRoutes());
 }
 

@@ -3,8 +3,8 @@
  * Mock external dependencies (nodemailer, twilio, firebase-admin, fs, path) only.
  * Real service implementations run — fake timers chi can cho email retry delay.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { DeliveryResult, DispatchContext } from '../types/delivery.types';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { DeliverySuccess, DeliveryFailure } from '../types/delivery.types';
 
 // Hoisted mock refs — chia se giua vi.mock factories va tests
 const mocks = vi.hoisted(() => ({
@@ -150,11 +150,9 @@ describe('E2 SMS Service', () => {
     mocks.mockTwilioCreate.mockResolvedValue({ sid: 'SM1', status: 'queued' });
     const { sendSms } = await import('../sms.service');
     const result = await sendSms({ to: '+84912345678', body: 'Test' });
-    expect(result).toMatchObject({
-      success: true,
-      channel: 'SMS',
-      providerMessageId: 'SM1'
-    });
+    expect(result.success).toBe(true);
+    expect(result.channel).toBe('SMS');
+    expect((result as DeliverySuccess).providerMessageId).toBe('SM1');
   });
 
   it('normalize 0xxx thanh +84xxx', async () => {
@@ -186,10 +184,8 @@ describe('E2 SMS Service', () => {
     mocks.mockTwilioCreate.mockRejectedValue(new Error('Twilio server error'));
     const { sendSms } = await import('../sms.service');
     const result = await sendSms({ to: '+84912345678', body: 'T' });
-    expect(result).toMatchObject({
-      success: false,
-      retryable: true
-    });
+    expect(result.success).toBe(false);
+    expect((result as DeliveryFailure).retryable).toBe(true);
   });
 });
 
@@ -380,19 +376,30 @@ describe('E2 Dispatcher', () => {
 
 describe('E2 Types', () => {
   it('DeliveryResult discriminated union', async () => {
-    const s: DeliveryResult = { success: true, channel: 'EMAIL', providerMessageId: 'm1', latencyMs: 150 };
+    // Dynamic import trả về const sentinel DeliveryResult; dùng typeof DeliveryResult.types làm type annotation
+    const { DeliveryResult } = await import('../types/delivery.types');
+    const s: typeof DeliveryResult.types = { success: true, channel: 'EMAIL', providerMessageId: 'm1', latencyMs: 150 };
     expect(s.success).toBe(true);
-    const f: DeliveryResult = { success: false, channel: 'SMS', errorMessage: 'err', retryable: true };
+    const f: typeof DeliveryResult.types = { success: false, channel: 'SMS', errorMessage: 'err', retryable: true };
     expect(f.success).toBe(false);
-    expect(f.retryable).toBe(true);
+    // Narrow để truy cập retryable — chỉ tồn tại trên DeliveryFailure
+    if (!f.success) {
+      expect(f.retryable).toBe(true);
+    }
+    expect(DeliveryResult.isSuccess(s)).toBe(true);
+    expect(DeliveryResult.isFailure(f)).toBe(true);
   });
 
   it('DispatchContext type', async () => {
-    const ctx: DispatchContext = {
+    const { DispatchContext } = await import('../types/delivery.types');
+    const ctx: typeof DispatchContext.contextType = {
       userId: 'u1', userEmail: 'u@e.com', fcmDeviceToken: 'tok',
       phoneNumber: '+84912345678', unsubscribeToken: 'tok', donationAmountVnd: 50_000_000
     };
     expect(ctx.userId).toBe('u1');
     expect(ctx.donationAmountVnd).toBe(50_000_000);
+    expect(DispatchContext.hasEmail(ctx)).toBe(true);
+    expect(DispatchContext.hasPush(ctx)).toBe(true);
+    expect(DispatchContext.hasSms(ctx)).toBe(true);
   });
 });

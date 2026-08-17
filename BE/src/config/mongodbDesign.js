@@ -436,6 +436,25 @@ const mongodbDesign = {
         { keys: { walletAddress: 1, eventTimestamp: 1 }, reason: 'Tối ưu tra cứu theo ví và thời gian.' },
         { keys: { correlationId: 1 }, unique: true, reason: 'Đảm bảo không trùng correlationId.' }
       ]
+    },
+    {
+      name: 'donor_trust_scores',
+      purpose: 'Lưu trust score tổng hợp và breakdown chi tiết của từng donor cho hệ thống Trust-Weighted QF (Lane G).',
+      fields: [
+        { name: 'trustId', type: 'String', description: 'UUID duy nhất của bản ghi trust score.' },
+        { name: 'donorAddress', type: 'String', description: 'Wallet address của donor (lowercase, unique).' },
+        { name: 'donorUserId', type: 'String', description: 'UUID tham chiếu đến collection users.' },
+        { name: 'trustScore', type: 'Number', description: 'Trust score tổng hợp trong khoảng [0.0, 1.0].' },
+        { name: 'factorBreakdown', type: 'Object', description: 'Chi tiết điểm thô từng factor: kycScore, donationHistoryScore, donationCount, socialVerificationScore, isSocialVerified, accountAgeScore, accountAgeDays, deviceBindingScore, isDeviceBound.' },
+        { name: 'lastCalculatedAt', type: 'Date', description: 'Thời điểm lần cuối tính lại trust score.' },
+        { name: 'createdAt', type: 'Date', description: 'Thời điểm tạo bản ghi.' },
+        { name: 'updatedAt', type: 'Date', description: 'Thời điểm cập nhật bản ghi.' }
+      ],
+      indexes: [
+        { keys: { trustId: 1 }, unique: true, reason: 'Đảm bảo mỗi bản ghi trust score có định danh duy nhất.' },
+        { keys: { donorAddress: 1 }, unique: true, reason: 'Mỗi donor chỉ có 1 bản ghi trust score (upsert pattern).' },
+        { keys: { trustScore: -1 }, reason: 'Tối ưu sort khi G2 truy vấn top donors theo trust score.' }
+      ]
     }
   ]
 };
