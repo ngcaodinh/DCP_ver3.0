@@ -11,7 +11,7 @@ import {
   scheduleSbtStatusProjectionEventRetry,
   type SbtStatusProjectionEventRecord
 } from '../models/sbtStatusProjectionModel';
-import { invalidateSbtGalleryTotalCache } from './sbtMetadataCacheService';
+import { invalidateSbtGalleryTotalCache, invalidateSbtTokenCache } from './sbtMetadataCacheService';
 
 const logger = getLogger();
 
@@ -83,6 +83,7 @@ export async function projectSbtTokenStatusUpdate(event: SbtTokenStatusUpdateEve
     return false;
   }
 
+  await invalidateSbtTokenCache(event.tokenId);
   if ((SBT_HIDDEN_FROM_GALLERY_STATUSES as readonly string[]).includes(event.newStatus)) {
     await invalidateSbtGalleryTotalCache(updatedRecord.projectId);
   }

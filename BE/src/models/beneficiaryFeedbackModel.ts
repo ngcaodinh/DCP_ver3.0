@@ -286,6 +286,15 @@ export async function countFlaggedBeneficiaryFeedback(
   return BeneficiaryFeedbackModel.countDocuments(filter).exec();
 }
 
+/** Đếm beneficiary distinct theo project từ feedback active, dùng làm fallback authoritative cho mint metadata. */
+export async function countBeneficiariesByProjectId(projectId: string): Promise<number> {
+  const distinctBeneficiaryHashes = await BeneficiaryFeedbackModel.distinct(
+    'beneficiaryNameHash',
+    { projectId, deletedAt: null }
+  ).exec();
+  return distinctBeneficiaryHashes.length;
+}
+
 /** Lấy các field tối thiểu để worker purge không đọc comment hoặc dữ liệu nhận diện. */
 export async function findSoftDeletedFeedbackForPurge(
   cutoff: Date,

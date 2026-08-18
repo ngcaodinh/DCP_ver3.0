@@ -33,12 +33,6 @@ export type EvidenceUploadedEventPayload = {
  */
 export type OracleVerifiedEventPayload = {
   verificationId: string;
-  projectId: string;
-  organizationId: string;
-  evidenceCid: string;
-  isValid: boolean | null;
-  distance: number | null;    // mét, null nếu GPS_EXIF_MISSING
-  reason: string | null;
 };
 
 /**

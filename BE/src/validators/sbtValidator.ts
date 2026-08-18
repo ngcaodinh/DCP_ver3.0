@@ -5,8 +5,9 @@ import type { Request, Response, NextFunction } from 'express';
  * Schema cho pagination query params (dùng chung cho DLQ list).
  */
 export const paginationQuerySchema = z.object({
-  page: z.coerce.number().int().min(1).default(1),
+  page: z.coerce.number().int().min(1).max(500).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(20),
+  cursor: z.string().trim().regex(/^[A-Za-z0-9_-]{1,256}$/).optional(),
   status: z.enum(['OPEN', 'RECOVERED', 'ABANDONED']).optional()
 });
 

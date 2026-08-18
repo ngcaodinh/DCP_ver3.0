@@ -17,6 +17,8 @@ export interface SbtMintDlqEntry {
   recoveredAt: string | null;
   recoveredBy: string | null;
   recoveryAttemptNumber: number;
+  lastRecoveryError?: string | null;
+  lastRecoveryAt?: string | null;
   status: SbtDlqStatus;
   createdAt: string;
   updatedAt: string;
@@ -30,6 +32,7 @@ export interface SbtDlqPagination {
   limit: number;
   total: number;
   totalPages: number;
+  nextCursor?: string | null;
 }
 
 /** Payload data của API GET /api/sbt/dlq. */

@@ -283,6 +283,36 @@ async function fetchMilestoneEntries(projectId: string): Promise<ImpactSbtGaller
   );
 }
 
+/** Render timeline từ dữ liệu đã resolve ở server để không trả Promise vào React client renderer. */
+function SbtMilestoneSection({
+  detail,
+  milestoneEntries
+}: {
+  detail: SbtTokenDetailResponse;
+  milestoneEntries: ImpactSbtGalleryEntry[] | null;
+}): ReactElement {
+  if (detail.offChain === null) {
+    return (
+      <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+        <h2 className="text-lg font-semibold text-slate-900">Milestone</h2>
+        <p className="mt-3 text-sm text-slate-600">
+          Milestone: {detail.onChain.milestone} (không có dữ liệu timeline chi tiết)
+        </p>
+      </div>
+    );
+  }
+
+  if (milestoneEntries === null) {
+    return (
+      <div className="rounded-xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-800">
+        Không tải được danh sách milestone.
+      </div>
+    );
+  }
+
+  return <SbtMilestoneTimeline entries={milestoneEntries} currentTokenId={detail.onChainTokenId} />;
+}
+
 /** Render trang detail SBT public với các trạng thái 404, lỗi hạ tầng và timeline degrade độc lập. */
 export default async function SbtTokenPage({ params }: SbtTokenPageProps): Promise<ReactElement> {
   const tokenDetailResult = await fetchTokenDetail(params.tokenId);
@@ -305,11 +335,9 @@ export default async function SbtTokenPage({ params }: SbtTokenPageProps): Promi
   }
 
   const { detail } = tokenDetailResult;
-  // Chỉ có thể tải milestone sau khi detail cung cấp projectId off-chain tương ứng.
   const milestoneEntries = detail.offChain
     ? await fetchMilestoneEntries(detail.offChain.projectId)
     : null;
-
   return (
     <main className="min-h-screen bg-slate-50 px-4 py-8 sm:py-12">
       <div className="mx-auto w-full max-w-6xl">
@@ -353,20 +381,7 @@ export default async function SbtTokenPage({ params }: SbtTokenPageProps): Promi
         </section>
 
         <section className="mt-6">
-          {detail.offChain === null ? (
-            <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-              <h2 className="text-lg font-semibold text-slate-900">Milestone</h2>
-              <p className="mt-3 text-sm text-slate-600">
-                Milestone: {detail.onChain.milestone} (không có dữ liệu timeline chi tiết)
-              </p>
-            </div>
-          ) : milestoneEntries === null ? (
-            <div className="rounded-xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-800">
-              Không tải được danh sách milestone.
-            </div>
-          ) : (
-            <SbtMilestoneTimeline entries={milestoneEntries} currentTokenId={detail.onChainTokenId} />
-          )}
+          <SbtMilestoneSection detail={detail} milestoneEntries={milestoneEntries} />
         </section>
       </div>
     </main>

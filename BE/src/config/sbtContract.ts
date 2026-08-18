@@ -72,9 +72,9 @@ export function getReadOnlyImpactSbtProvider(): ethers.JsonRpcProvider {
  * Mục đích: dùng cho hàm mint(). Yêu cầu địa chỉ ví này được cấp ORACLE_ROLE trên contract
  * (do owner grant qua transferOracleRole hoặc cấu hình ban đầu trong constructor).
  *
- * Lưu ý: Hiện tại task C2 dùng lại BACKEND_MINTER_PRIVATE_KEY (đã có sẵn trong env và
- * đang được dùng cho CharityToken). Nếu sau này tách Oracle signer riêng, chỉ cần
- * đổi biến môi trường ở đây, các service/worker vẫn giữ nguyên pattern.
+ * SBT signer phải là EOA riêng, chỉ được cấp ORACLE_ROLE trên ImpactSBT.
+ * Không dùng chung với BACKEND_MINTER_PRIVATE_KEY của CharityToken để tránh
+ * collision nonce giữa hai contract và giới hạn blast radius của khóa.
  *
  * [B-B2] Cache signer để tránh tạo mới mỗi lần. ethers.Wallet nhẹ, nhưng cache giúp
  * đảm bảo singleton và giảm GC overhead trong hot path mint.
@@ -83,16 +83,26 @@ function getOracleSigner(): ethers.Wallet {
   if (_oracleSigner) {
     return _oracleSigner;
   }
-  const privateKey = process.env.BACKEND_MINTER_PRIVATE_KEY?.trim() ?? '';
+  const privateKey = process.env.IMPACT_SBT_MINTER_PRIVATE_KEY?.trim() ?? '';
   if (!privateKey) {
-    throw new Error('Thiếu BACKEND_MINTER_PRIVATE_KEY khi khởi tạo ImpactSBT Oracle signer.');
+    throw new Error('Thiếu IMPACT_SBT_MINTER_PRIVATE_KEY khi khởi tạo ImpactSBT Oracle signer.');
   }
   // Validate format: phải là 0x + 64 ký tự hex (256-bit key) — BLOCKER #1 fix
   if (!/^0x[a-fA-F0-9]{64}$/.test(privateKey)) {
-    throw new Error('BACKEND_MINTER_PRIVATE_KEY không đúng format (0x + 64 ký tự hex).');
+    throw new Error('IMPACT_SBT_MINTER_PRIVATE_KEY không đúng format (0x + 64 ký tự hex).');
+  }
+  const charityPrivateKey = process.env.BACKEND_MINTER_PRIVATE_KEY?.trim() ?? '';
+  const normalizedCharityKey = charityPrivateKey.replace(/^0x/i, '').toLowerCase();
+  if (/^[a-f0-9]{64}$/.test(normalizedCharityKey) && normalizedCharityKey === privateKey.slice(2).toLowerCase()) {
+    throw new Error('IMPACT_SBT_MINTER_PRIVATE_KEY phải khác BACKEND_MINTER_PRIVATE_KEY.');
   }
   _oracleSigner = new ethers.Wallet(privateKey);
   return _oracleSigner;
+}
+
+/** Trả về public address của EOA mint để allocator nonce không bao giờ log hoặc đọc private key. */
+export function getImpactSbtMintSignerAddress(): string {
+  return getOracleSigner().address;
 }
 
 /**

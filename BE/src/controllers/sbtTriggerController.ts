@@ -1,7 +1,7 @@
 import { Response } from 'express';
 import { getLogger } from '../config/logger';
 import { AuthenticatedRequest } from '../middleware/authenticationMiddleware';
-import { triggerSbtMintFromOracle, isTransactionStuck } from '../services/sbt-trigger.service';
+import { triggerSbtMintFromOracle, isTransactionStuck, verifyOracleTriggerRequest } from '../services/sbt-trigger.service';
 import { validateSbtTriggerBody } from '../validators/sbtTrigger.validator';
 import { sendSuccessResponse, sendErrorResponse } from '../utils/apiResponse';
 
@@ -21,7 +21,7 @@ const logger = getLogger();
  *
  * Ràng buộc:
  * - Non-oracle role → 403 (middleware đã handle)
- * - Gas sponsorship: EOA signing với BACKEND_MINTER_PRIVATE_KEY (không dùng Account Abstraction)
+ * - Gas sponsorship: EOA signing với IMPACT_SBT_MINTER_PRIVATE_KEY (không dùng Account Abstraction)
  * - Stuck tx: được xử lý bởi cron-based sbtMintRecoveryScheduler (C2)
  *
  * @param req - AuthenticatedRequest với authenticatedUser.role = "oracle"
@@ -44,6 +44,12 @@ export async function handleSbtTrigger(
       );
       return;
     }
+
+    await verifyOracleTriggerRequest(validationResult.data.verificationId, {
+      signature: req.get('x-oracle-signature') ?? undefined,
+      timestamp: req.get('x-oracle-timestamp') ?? undefined,
+      nonce: req.get('x-oracle-nonce') ?? undefined
+    });
 
     // Trigger mint — service xử lý idempotency (duplicate = return existing)
     // Controller đã validate req.body, nên service nhận validated data trực tiếp
@@ -80,6 +86,16 @@ export async function handleSbtTrigger(
     });
 
     // Validation errors đã được format từ service
+    const applicationError = error as { statusCode?: number; code?: string; errorCode?: string };
+    if (typeof applicationError.statusCode === 'number') {
+      sendErrorResponse(
+        res,
+        applicationError.statusCode,
+        errorMessage,
+        applicationError.errorCode ?? applicationError.code ?? 'REQUEST_FAILED'
+      );
+      return;
+    }
     if (errorMessage.startsWith('Validation failed:')) {
       sendErrorResponse(res, 400, errorMessage, 'VALIDATION_ERROR');
       return;

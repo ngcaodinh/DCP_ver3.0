@@ -6,10 +6,14 @@ vi.mock('../../config/redis', () => ({
 
 import {
   buildSbtGalleryTotalCacheKey,
+  buildSbtTokenCacheKey,
+  getSbtTokenCache,
   getOrLoadSbtGalleryTotal,
   getSbtGalleryTotalCache,
   invalidateSbtGalleryTotalCache,
   setSbtGalleryTotalCache,
+  setSbtTokenCache,
+  invalidateSbtTokenCache,
   SBT_GALLERY_TOTAL_CACHE_TTL_SECONDS
 } from '../../services/sbtMetadataCacheService';
 import { getRedisClientIfReady } from '../../config/redis';
@@ -235,5 +239,17 @@ describe('sbt gallery total cache', () => {
 
     await expect(getSbtGalleryTotalCache()).resolves.toBeNull();
     await expect(getSbtGalleryTotalCache('all')).resolves.toBeNull();
+  });
+});
+
+describe('sbt token detail cache', () => {
+  it('scopes token keys by environment, chain and contract and invalidates detail snapshots', async () => {
+    const cacheKey = buildSbtTokenCacheKey(42);
+    expect(cacheKey).toMatch(/^sbt:token:v2:[^:]+:[^:]+:[^:]+:42$/);
+
+    await setSbtTokenCache(42, '{"status":"ACTIVE"}');
+    await expect(getSbtTokenCache(42)).resolves.toBe('{"status":"ACTIVE"}');
+    await invalidateSbtTokenCache(42);
+    await expect(getSbtTokenCache(42)).resolves.toBeNull();
   });
 });

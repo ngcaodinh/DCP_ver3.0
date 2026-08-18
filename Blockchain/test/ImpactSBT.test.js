@@ -226,6 +226,8 @@ describe('ImpactSBT', function () {
       expect(await impactSBT.getTokenStatus(0)).to.equal(TokenStatus.Frozen);
     });
 
+    // Known accepted contract behavior: owner is also authorized to freeze status.
+    // Keep this regression test until a separately audited role-policy upgrade changes the deployed ABI.
     it('should allow owner to update status to Frozen', async function () {
       const { impactSBT, oracle, owner, recipient } = await deployImpactSBTFixture();
 
@@ -473,6 +475,8 @@ describe('ImpactSBT', function () {
         .to.equal(false);
     });
 
+    // Known accepted contract behavior: ownership transfer grants the new owner role-admin capability.
+    // Backend must therefore protect role changes operationally with multisig/timelock policy.
     it('should allow new owner to grant roles after ownership transfer', async function () {
       const { impactSBT, owner, newOracle, otherAccount } = await deployImpactSBTFixture();
       const ORACLE_ROLE = await impactSBT.ORACLE_ROLE();
@@ -693,6 +697,8 @@ describe('ImpactSBT', function () {
   // Multi-oracle scenario
   // ============================================================
   describe('Multi-Oracle Scenario', function () {
+    // Known accepted contract behavior: ORACLE_ROLE is intentionally multi-holder at contract level;
+    // signer isolation, rotation and grant alerts are enforced by deployment operations.
     it('should have multiple oracles after adding role directly', async function () {
       const { impactSBT, owner, oracle, newOracle, recipient, ethers } = await deployImpactSBTFixture();
 
@@ -812,6 +818,8 @@ describe('ImpactSBT', function () {
       await impactSBT.connect(owner).transferOracleRole(oracle.address);
     });
 
+    // Known accepted contract behavior: both ORACLE_ROLE and owner may update token status.
+    // Do not silently narrow this permission in backend code; upgrade the contract via a separate ADR.
     it('should allow both oracle and owner to updateTokenStatus', async function () {
       const { impactSBT, oracle, owner, recipient } = await deployImpactSBTFixture();
 

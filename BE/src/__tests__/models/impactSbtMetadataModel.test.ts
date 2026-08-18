@@ -3,10 +3,14 @@ import mongoose from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import {
   countImpactSbtGallery,
+  claimImpactSbtForSubmission,
   findEarliestConfirmedImpactSbtBackfillAnchor,
   findEarliestConfirmedImpactSbtBlock,
   findImpactSbtGallery,
-  updateImpactSbtOnChainStatus
+  updateImpactSbtOnChainStatus,
+  markImpactSbtAsFailed,
+  releaseExpiredSbtSubmissionWithoutNonce,
+  markImpactSbtAsDlq
 } from '../../models/impactSbtMetadataModel';
 
 let mongoServer: MongoMemoryServer;
@@ -164,5 +168,75 @@ describe('impactSbtMetadataModel gallery visibility', () => {
       blockNumber: 101,
       confirmedAt: new Date('2026-08-02T10:00:00.000Z')
     });
+  });
+
+  it('atomic submission claim chỉ cho một worker giữ lease trong race thật với Mongo', async () => {
+    await mongoose.connection.collection('impact_sbt_metadata').updateOne(
+      { mintRequestId: 'MINT-1' },
+      { $set: { status: 'PENDING' } }
+    );
+    const leaseExpiry = new Date('2030-08-17T12:02:00.000Z');
+    const claimResults = await Promise.all([
+      claimImpactSbtForSubmission('MINT-1', {
+        attemptNumber: 1,
+        leaseOwner: 'worker-a',
+        leaseExpiresAt: leaseExpiry
+      }),
+      claimImpactSbtForSubmission('MINT-1', {
+        attemptNumber: 1,
+        leaseOwner: 'worker-b',
+        leaseExpiresAt: leaseExpiry
+      })
+    ]);
+
+    expect(claimResults.filter(Boolean)).toHaveLength(1);
+    const claimedRecord = await mongoose.connection.collection('impact_sbt_metadata').findOne({ mintRequestId: 'MINT-1' });
+    expect(claimedRecord?.status).toBe('SUBMITTING');
+    expect(['worker-a', 'worker-b']).toContain(claimedRecord?.submissionLeaseOwner);
+  });
+
+  it('chỉ một worker được release lease SUBMITTING hết hạn trước nonce', async () => {
+    await mongoose.connection.collection('impact_sbt_metadata').updateOne(
+      { mintRequestId: 'MINT-1' },
+      {
+        $set: {
+          status: 'SUBMITTING',
+          transactionHash: null,
+          transactionNonce: null,
+          submissionLeaseOwner: 'worker-a',
+          submissionLeaseExpiresAt: new Date('2020-08-17T12:02:00.000Z')
+        }
+      }
+    );
+
+    const releaseResults = await Promise.all([
+      releaseExpiredSbtSubmissionWithoutNonce('MINT-1', 'expired-a'),
+      releaseExpiredSbtSubmissionWithoutNonce('MINT-1', 'expired-b')
+    ]);
+
+    expect(releaseResults.filter(Boolean)).toHaveLength(1);
+    const releasedRecord = await mongoose.connection.collection('impact_sbt_metadata').findOne({ mintRequestId: 'MINT-1' });
+    expect(releasedRecord).toMatchObject({ status: 'PENDING', lastErrorMessage: expect.stringMatching(/^expired-/) });
+  });
+
+  it('chặn duplicate failure và DLQ transition trong race thật với Mongo', async () => {
+    await mongoose.connection.collection('impact_sbt_metadata').updateOne(
+      { mintRequestId: 'MINT-1' },
+      { $set: { status: 'SUBMITTED', transactionHash: '0xsubmitted', attemptNumber: 7 } }
+    );
+
+    const failureResults = await Promise.all([
+      markImpactSbtAsFailed('MINT-1', { attemptNumber: 7, errorMessage: 'reverted-a' }),
+      markImpactSbtAsFailed('MINT-1', { attemptNumber: 7, errorMessage: 'reverted-b' })
+    ]);
+    expect(failureResults.filter(Boolean)).toHaveLength(1);
+
+    const dlqResults = await Promise.all([
+      markImpactSbtAsDlq('MINT-1', { attemptNumber: 7, errorMessage: 'reverted', dlqAt: new Date() }),
+      markImpactSbtAsDlq('MINT-1', { attemptNumber: 7, errorMessage: 'reverted', dlqAt: new Date() })
+    ]);
+    expect(dlqResults.filter(Boolean)).toHaveLength(1);
+    await expect(mongoose.connection.collection('impact_sbt_metadata').findOne({ mintRequestId: 'MINT-1' }))
+      .resolves.toMatchObject({ status: 'DLQ' });
   });
 });

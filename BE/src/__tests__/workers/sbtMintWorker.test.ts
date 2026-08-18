@@ -1,8 +1,9 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Dùng vi.hoisted để mock emit function nằm trong cùng scope với factory
 const mockOracleEmit = vi.hoisted(() => vi.fn());
 const reportTerminalErrorMock = vi.hoisted(() => vi.fn());
+const triggerSbtMintFromOracleMock = vi.hoisted(() => vi.fn().mockResolvedValue({ enqueued: true, duplicate: false }));
 
 // Mock oracleEvents before importing the worker
 vi.mock('../../events/oracleEvents', () => ({
@@ -31,7 +32,7 @@ vi.mock('../../queues/sbtMintQueue', () => ({
     close: vi.fn().mockResolvedValue(undefined)
   })),
   SBT_MINT_RETRY_DELAYS_MS: [300000, 900000, 3600000, 3600000, 14400000, 86400000],
-  SBT_MINT_MAX_ATTEMPTS: 6,
+  SBT_MINT_MAX_ATTEMPTS: 7,
   enqueueSbtMint: vi.fn().mockResolvedValue({ jobId: 'job-123', enqueued: true }),
   removePendingSbtMintJobsByRequestId: vi.fn().mockResolvedValue(0)
 }));
@@ -39,8 +40,12 @@ vi.mock('../../queues/sbtMintQueue', () => ({
 vi.mock('../../services/sbtMintService', () => ({
   executeSbtMint: vi.fn(),
   handleSbtMintFailure: vi.fn(),
-  createSbtMintRequest: vi.fn(),
-  extractErrorMessage: vi.fn((e) => e instanceof Error ? e.message : String(e))
+  extractErrorMessage: vi.fn((e) => e instanceof Error ? e.message : String(e)),
+  SbtSubmissionPersistenceError: class SbtSubmissionPersistenceError extends Error {}
+}));
+
+vi.mock('../../services/sbt-trigger.service', () => ({
+  triggerSbtMintFromOracle: triggerSbtMintFromOracleMock
 }));
 
 vi.mock('../../events/sbtEvents', () => ({
@@ -48,17 +53,12 @@ vi.mock('../../events/sbtEvents', () => ({
 }));
 
 vi.mock('../../models/impactSbtMetadataModel', () => ({
-  createBlockedImpactSbtMetadata: vi.fn().mockResolvedValue({
-    sbtId: 'SBT-blocked',
-    mintRequestId: 'SBT-MINT-BLOCKED-123'
-  })
+  createBlockedImpactSbtMetadata: vi.fn()
 }));
 
 import { Job } from 'bull';
 import { oracleEvents } from '../../events/oracleEvents';
-import { sbtEvents } from '../../events/sbtEvents';
-import { createBlockedImpactSbtMetadata } from '../../models/impactSbtMetadataModel';
-import { executeSbtMint, handleSbtMintFailure, createSbtMintRequest } from '../../services/sbtMintService';
+import { executeSbtMint, handleSbtMintFailure } from '../../services/sbtMintService';
 
 // =============================================================================
 // Test: processSbtMintJob
@@ -126,7 +126,7 @@ describe('sbtMintWorker - processSbtMintJob', () => {
 
     expect(thrownError).toBeInstanceOf(Error);
     expect(thrownError).toMatchObject({
-      message: 'SBT mint moved to DLQ after 6 attempts: contract revert'
+      message: 'SBT mint moved to DLQ after 6 attempts (1 initial attempt plus retries): contract revert'
     });
     expect(reportTerminalErrorMock).toHaveBeenCalledWith(
       expect.any(String),
@@ -195,7 +195,12 @@ describe('sbtMintWorker - attachOracleEventListener', () => {
     vi.clearAllMocks();
   });
 
-  it('bỏ qua khi payload.isValid !== true', async () => {
+  afterEach(async () => {
+    const { stopSbtMintWorker } = await import('../../workers/sbtMintWorker');
+    await stopSbtMintWorker();
+  });
+
+  it('bỏ qua payload có field dư hoặc thiếu verificationId', async () => {
     const { startSbtMintWorker } = await import('../../workers/sbtMintWorker');
     startSbtMintWorker();
 
@@ -203,45 +208,26 @@ describe('sbtMintWorker - attachOracleEventListener', () => {
     const onHandler = (oracleEvents.on as ReturnType<typeof vi.fn>).mock.calls[0]?.[1];
     expect(onHandler).toBeDefined();
 
-    // Emit với isValid = false
+    // Payload cũ có field client-controlled nên bị reject ở boundary.
     await onHandler({
-      verificationId: 'ver-false',
-      projectId: 'proj-1',
-      organizationId: 'org-1',
-      evidenceCid: 'QmTest',
-      isValid: false,
-      reason: 'OUT_OF_GEOFENCE',
-      distance: 500
+      projectId: 'proj-1'
     });
 
-    expect(createSbtMintRequest).not.toHaveBeenCalled();
-    expect(createBlockedImpactSbtMetadata).not.toHaveBeenCalled();
+    expect(triggerSbtMintFromOracleMock).not.toHaveBeenCalled();
   });
 
-  it('khi PLACEHOLDER_BENEFICIARY_BLOCKED=true: emit sbt.mint-blocked + tạo BLOCKED record + KHÔNG gọi createSbtMintRequest', async () => {
+  it('dispatch chỉ verificationId và không tạo BLOCKED placeholder', async () => {
     const { startSbtMintWorker } = await import('../../workers/sbtMintWorker');
     startSbtMintWorker();
 
     const onHandler = (oracleEvents.on as ReturnType<typeof vi.fn>).mock.calls[0]?.[1];
     expect(onHandler).toBeDefined();
 
-    // Emit với isValid = true
+    // Event nhẹ; worker/service tự lookup verification + authoritative fields.
     await onHandler({
-      verificationId: 'ver-valid',
-      projectId: 'proj-1',
-      organizationId: 'org-1',
-      evidenceCid: 'QmTest',
-      isValid: true,
-      reason: null,
-      distance: 10
+      verificationId: 'ver-valid'
     });
 
-    expect(createBlockedImpactSbtMetadata).toHaveBeenCalledWith('ver-valid', 'proj-1', 'org-1');
-    expect(sbtEvents.emit).toHaveBeenCalledWith('sbt.mint-blocked', expect.objectContaining({
-      verificationId: 'ver-valid',
-      projectId: 'proj-1',
-      reason: 'NO_DONOR_ADDRESS'
-    }));
-    expect(createSbtMintRequest).not.toHaveBeenCalled();
+    expect(triggerSbtMintFromOracleMock).toHaveBeenCalledWith({ verificationId: 'ver-valid' });
   });
 });

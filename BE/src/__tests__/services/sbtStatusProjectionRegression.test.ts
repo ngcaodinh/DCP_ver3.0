@@ -3,11 +3,13 @@ import mongoose from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 
 const mocks = vi.hoisted(() => ({
-  invalidateGalleryTotal: vi.fn()
+  invalidateGalleryTotal: vi.fn(),
+  invalidateToken: vi.fn()
 }));
 
 vi.mock('../../services/sbtMetadataCacheService', () => ({
-  invalidateSbtGalleryTotalCache: mocks.invalidateGalleryTotal
+  invalidateSbtGalleryTotalCache: mocks.invalidateGalleryTotal,
+  invalidateSbtTokenCache: mocks.invalidateToken
 }));
 
 vi.mock('../../config/logger', () => ({
@@ -64,6 +66,8 @@ describe('SBT status projection regression', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    mocks.invalidateGalleryTotal.mockResolvedValue(undefined);
+    mocks.invalidateToken.mockResolvedValue(undefined);
     await Promise.all([
       mongoose.connection.collection('impact_sbt_metadata').deleteMany({}),
       mongoose.connection.collection('sbt_status_projection_events').deleteMany({})

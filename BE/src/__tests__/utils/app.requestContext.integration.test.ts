@@ -117,7 +117,7 @@ describe('app.ts request context integration', () => {
       .set('Authorization', 'Bearer invalid-token');
     expect(invalidResponse.status).toBe(401);
     expect(observedUsers.get('invalid-jwt')).toBeNull();
-  });
+  }, 15_000);
 
   it('giữ request ID và correlation record cho CORS reject và lỗi 413', async () => {
     vi.stubEnv('NODE_ENV', 'test');

@@ -37,6 +37,8 @@ export type OracleVerificationResultRecord = {
   radiusMeters: number;                  // Bán kính per-project tại thời điểm verify
   geofenceSnapshot: GeofenceSnapshot | null; // Ảnh chụp geofence bất biến lúc verify (B3), null khi NO_GEOFENCE
   overrideRequestId: string | null;      // Liên kết đến oracle_override_requests nếu có
+  disbursementRequestId: string | null;  // Nguồn authoritative của beneficiary khi verification gắn với giải ngân
+  sbtMintDispatchStatus: 'PENDING' | 'ENQUEUED';
   processedAt: Date;
   createdAt: Date;
   updatedAt: Date;
@@ -71,6 +73,8 @@ const oracleVerificationResultSchema = new Schema<OracleVerificationResultRecord
     // Snapshot bất biến của geofence lúc verify — null khi project chưa có geofence
     geofenceSnapshot: { type: geofenceSnapshotSchema, default: null },
     overrideRequestId: { type: String, default: null, index: true },
+    disbursementRequestId: { type: String, default: null, index: true, sparse: true },
+    sbtMintDispatchStatus: { type: String, required: true, enum: ['PENDING', 'ENQUEUED'], default: 'PENDING', index: true },
     processedAt: { type: Date, required: true }
   },
   { timestamps: true }
@@ -109,6 +113,41 @@ export async function findVerificationById(
   verificationId: string
 ): Promise<OracleVerificationResultRecord | null> {
   return OracleVerificationResultMongoModel.findOne({ verificationId }).lean().exec();
+}
+
+/** Lấy verification VALID chưa dispatch mint để worker replay khi API/worker tách process hoặc Redis gián đoạn. */
+export async function findPendingSbtMintVerifications(
+  limit = 50
+): Promise<OracleVerificationResultRecord[]> {
+  return OracleVerificationResultMongoModel.find({
+    status: 'VALID',
+    $or: [
+      { sbtMintDispatchStatus: 'PENDING' },
+      { sbtMintDispatchStatus: { $exists: false } }
+    ]
+  })
+    .sort({ processedAt: 1 })
+    .limit(Math.max(1, Math.min(100, limit)))
+    .lean<OracleVerificationResultRecord[]>()
+    .exec();
+}
+
+/** Đánh dấu verification đã được đưa vào queue sau khi metadata upsert và enqueue thành công. */
+export async function markVerificationSbtMintEnqueued(
+  verificationId: string
+): Promise<boolean> {
+  const result = await OracleVerificationResultMongoModel.updateOne(
+    {
+      verificationId,
+      status: 'VALID',
+      $or: [
+        { sbtMintDispatchStatus: 'PENDING' },
+        { sbtMintDispatchStatus: { $exists: false } }
+      ]
+    },
+    { $set: { sbtMintDispatchStatus: 'ENQUEUED' } }
+  ).exec();
+  return result.modifiedCount === 1 || result.matchedCount === 1;
 }
 
 /** Lấy danh sách kết quả xác minh của một project (phân trang). */

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { createAuthenticationMiddleware } from '../middleware/authenticationMiddleware';
-import { createRoleAuthorizationMiddleware } from '../middleware/roleAuthorizationMiddleware';
+import { createFreshRoleAuthorizationMiddleware } from '../middleware/roleAuthorizationMiddleware';
 import { createRateLimitMiddleware } from '../middleware/rateLimitMiddleware';
 import { handleSbtTrigger } from '../controllers/sbtTriggerController';
 
@@ -18,7 +18,7 @@ export function createSbtTriggerRoutes(): Router {
   const router = Router();
 
   const authMiddleware = createAuthenticationMiddleware();
-  const oracleMiddleware = createRoleAuthorizationMiddleware(['oracle']);
+  const oracleMiddleware = createFreshRoleAuthorizationMiddleware(['oracle']);
   const rateLimitMiddleware = createRateLimitMiddleware(30, 60 * 1000, { bucketName: 'oracle:sbt-trigger' });
 
   // POST /api/oracle/sbt-trigger

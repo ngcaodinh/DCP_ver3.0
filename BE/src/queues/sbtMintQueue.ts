@@ -8,10 +8,10 @@ const sbtMintQueueName = 'sbt-mint';
 
 /**
  * Backoff delays cho retry mint SBT (tính bằng milliseconds).
- * Theo spec C2: 6 retry với backoff tăng dần để chờ network/RPC recover.
+ * Theo spec C2: 6 lần retry sau attempt đầu, với backoff tăng dần để chờ network/RPC recover.
  * - 3 retry đầu: 5 phút, 15 phút, 60 phút (network issue ngắn hạn)
  * - 3 retry sau: 1 giờ, 4 giờ, 24 giờ (RPC provider hoặc indexer lâu recover)
- * Tổng tối đa 6 retry, sau đó vào DLQ.
+ * Tổng tối đa 7 attempt (1 attempt đầu + 6 retry), sau đó vào DLQ.
  */
 export const SBT_MINT_RETRY_DELAYS_MS = [
   5 * 60_000,        // Retry 1: 5 phút
@@ -26,12 +26,12 @@ export const SBT_MINT_RETRY_DELAYS_MS = [
  * Tổng số retry tối đa — nếu vượt quá → chuyển DLQ.
  * Phải khớp với độ dài SBT_MINT_RETRY_DELAYS_MS.
  */
-export const SBT_MINT_MAX_ATTEMPTS = SBT_MINT_RETRY_DELAYS_MS.length;
+export const SBT_MINT_MAX_ATTEMPTS = SBT_MINT_RETRY_DELAYS_MS.length + 1;
 
 /**
  * Ngưỡng thời gian để xác định tx bị stuck (5 phút).
- * Nếu tx SUBMITTED mà chưa confirm sau khoảng thời gian này → auto-fail để retry.
- * Tránh dùng magic number 5 * 60 * 1000 trong code.
+ * Nếu tx SUBMITTED quá thời gian này, controller chỉ cảnh báo để operator theo dõi.
+ * Reconciler là thành phần duy nhất quyết định trạng thái dựa trên receipt; không auto-fail theo đồng hồ.
  */
 export const SBT_MINT_STUCK_TX_THRESHOLD_MS = 5 * 60 * 1000;
 
@@ -127,8 +127,17 @@ export async function enqueueSbtMint(
   try {
     const existingJob = await queue.getJob(jobId);
     if (existingJob) {
-      // Retry outbox sau khi queue đã nhận job phải được coi là thành công, không tạo audit failure giả.
-      return { jobId: existingJob.id, enqueued: true };
+      const existingState = await existingJob.getState();
+      if (['waiting', 'delayed', 'active', 'paused'].includes(existingState)) {
+        // Retry outbox sau khi queue đã nhận job phải được coi là thành công, không tạo audit failure giả.
+        return { jobId: existingJob.id, enqueued: true };
+      }
+
+      // Bull giữ lại job completed/failed theo removeOnComplete/removeOnFail; các job terminal này
+      // không còn được worker xử lý và không được phép chặn admin rerun hoặc durable replay.
+      if (existingState === 'completed' || existingState === 'failed') {
+        await existingJob.remove();
+      }
     }
     const job = await queue.add(jobData, { ...jobOptions, jobId });
     logger.info('SBT mint job enqueued.', {
@@ -143,7 +152,12 @@ export async function enqueueSbtMint(
   } catch (error) {
     // Race giữa hai producer: job cố định đã được producer khác tạo thì vẫn là dispatch thành công.
     const existingJob = await queue.getJob(jobId).catch(() => null);
-    if (existingJob) return { jobId: existingJob.id, enqueued: true };
+    if (existingJob) {
+      const existingState = await existingJob.getState().catch(() => null);
+      if (existingState && ['waiting', 'delayed', 'active', 'paused'].includes(existingState)) {
+        return { jobId: existingJob.id, enqueued: true };
+      }
+    }
     logger.error('Enqueue SBT mint job thất bại.', {
       mintRequestId: jobData.mintRequestId,
       sbtId: jobData.sbtId,
@@ -154,60 +168,19 @@ export async function enqueueSbtMint(
 }
 
 /**
- * Hàm lấy job đang active cho một mintRequestId.
- * Mục đích: check duplicate active job trước khi enqueue (idempotency).
- */
-export async function getActiveSbtMintJobByRequestId(
-  mintRequestId: string
-): Promise<Queue.Job<SbtMintJobData> | null> {
-  const queue = getSbtMintQueue();
-  if (!queue) return null;
-
-  const activeJobs = await queue.getActive();
-  return activeJobs.find(job => job.data.mintRequestId === mintRequestId) ?? null;
-}
-
-/**
- * Lấy index tất cả jobs theo mintRequestId (active + waiting + delayed).
- * Mục đích: batch fetch 1 lần duy nhất để tránh N+1 query khi loop nhiều records.
- * Lưu ý: Chỉ fetch 50 jobs mới nhất để tránh O(n) scan khi queue lớn.
- * @returns Map<mintRequestId, count> — count = số job trong tất cả các trạng thái
- */
-export async function getSbtMintJobIndexByRequestId(): Promise<Map<string, number>> {
-  const queue = getSbtMintQueue();
-  if (!queue) return new Map();
-  const [active, waiting, delayed] = await Promise.all([
-    queue.getActive(),
-    queue.getWaiting(0, 49), // Chỉ fetch 50 jobs mới nhất để tránh O(n) scan khi queue lớn
-    queue.getDelayed(0, 49)
-  ]);
-  const all = [...active, ...waiting, ...delayed];
-  const index = new Map<string, number>();
-  for (const job of all) {
-    const mintRequestId = job.data?.mintRequestId;
-    if (typeof mintRequestId === 'string') {
-      index.set(mintRequestId, (index.get(mintRequestId) ?? 0) + 1);
-    }
-  }
-  return index;
-}
-
-/**
  * Hàm đếm số job đang chờ (waiting + delayed) cho một mintRequestId.
  * Mục đích: tránh enqueue duplicate khi admin click re-run nhiều lần.
  */
 export async function countPendingSbtMintJobsByRequestId(mintRequestId: string): Promise<number> {
   const queue = getSbtMintQueue();
   if (!queue) return 0;
-
-  // [I-N1] Giới hạn fetch để tránh O(n) memory allocation khi queue lớn.
-  // Limit 100 là safety cap — thực tế mỗi mintRequestId chỉ có 1-2 pending job.
-  const [waitingJobs, delayedJobs] = await Promise.all([
-    queue.getWaiting(0, 99),
-    queue.getDelayed(0, 99)
-  ]);
-  const allPendingJobs = [...waitingJobs, ...delayedJobs];
-  return allPendingJobs.filter(job => job.data.mintRequestId === mintRequestId).length;
+  const jobs = await getDeterministicSbtMintJobs(queue, mintRequestId);
+  let pendingCount = 0;
+  for (const job of jobs) {
+    const state = await job.getState();
+    if (state === 'waiting' || state === 'delayed' || state === 'active') pendingCount += 1;
+  }
+  return pendingCount;
 }
 
 /**
@@ -226,12 +199,11 @@ export async function removePendingSbtMintJobsByRequestId(mintRequestId: string)
   // [N-B1] Giới hạn fetch 100 jobs mỗi loại — tránh O(n) scan khi queue lớn.
   // Thực tế: mỗi mintRequestId chỉ có tối đa 1-2 pending job tại bất kỳ thời điểm nào
   // (do BullMQ limiter max 3 jobs/10s). Limit 100 chỉ là safety cap.
-  const [waitingJobs, delayedJobs] = await Promise.all([
-    queue.getWaiting(0, 99),
-    queue.getDelayed(0, 99)
-  ]);
-  const allPendingJobs = [...waitingJobs, ...delayedJobs];
-  const matchingJobs = allPendingJobs.filter(job => job.data.mintRequestId === mintRequestId);
+  const matchingJobs = [];
+  for (const job of await getDeterministicSbtMintJobs(queue, mintRequestId)) {
+    const state = await job.getState();
+    if (state === 'waiting' || state === 'delayed') matchingJobs.push(job);
+  }
 
   const removeResults = await Promise.all(
     matchingJobs.map(async (job): Promise<number> => {
@@ -252,4 +224,17 @@ export async function removePendingSbtMintJobsByRequestId(mintRequestId: string)
     });
   }
   return removedCount;
+}
+
+/** Lấy các job theo ID deterministic trong bounded attempt range, không scan queue toàn cục. */
+async function getDeterministicSbtMintJobs(
+  queue: Queue.Queue<SbtMintJobData>,
+  mintRequestId: string
+): Promise<Queue.Job<SbtMintJobData>[]> {
+  const jobs = await Promise.all(
+    Array.from({ length: SBT_MINT_MAX_ATTEMPTS }, (_, index) =>
+      queue.getJob(`${mintRequestId}-attempt${index + 1}`)
+    )
+  );
+  return jobs.filter((job): job is Queue.Job<SbtMintJobData> => Boolean(job));
 }

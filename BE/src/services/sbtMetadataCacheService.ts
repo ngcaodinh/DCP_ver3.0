@@ -5,8 +5,13 @@ import { sanitizeProviderError } from '../utils/sanitizeProviderError';
 
 const logger = getLogger();
 const sbtFallbackCache = createInMemoryCache<string>();
-const SBT_CACHE_KEY_PREFIX = 'sbt:token:';
-const SBT_NOT_FOUND_CACHE_KEY_PREFIX = 'sbt:token:not-found:';
+const SBT_CACHE_SCOPE = [
+  process.env.NODE_ENV ?? 'development',
+  process.env.BLOCKCHAIN_CHAIN_ID ?? 'unknown-chain',
+  (process.env.IMPACT_SBT_ADDRESS ?? 'unconfigured-contract').toLowerCase()
+].map(value => encodeURIComponent(value)).join(':');
+const SBT_CACHE_KEY_PREFIX = `sbt:token:v2:${SBT_CACHE_SCOPE}:`;
+const SBT_NOT_FOUND_CACHE_KEY_PREFIX = `sbt:token:not-found:v2:${SBT_CACHE_SCOPE}:`;
 const SBT_GALLERY_TOTAL_CACHE_KEY_PREFIX = 'sbt:gallery:total:';
 const SBT_GALLERY_TOTAL_LOCK_KEY_SUFFIX = ':lock';
 const SBT_GALLERY_TOTAL_LOCK_TTL_MS = 5_000;

@@ -1,175 +1,159 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { createHmac } from 'crypto';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../../config/logger', () => ({
-  getLogger: () => ({
-    info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn()
-  })
-}));
-
-vi.mock('../../services/sbtMintService', () => ({
+const mocks = vi.hoisted(() => ({
+  findVerificationById: vi.fn(),
+  markVerificationSbtMintEnqueued: vi.fn(),
+  consumeOracleTriggerNonce: vi.fn(),
+  findDisbursementByRequestId: vi.fn(),
+  findDisbursementsByProjectId: vi.fn(),
+  findUserWalletAddressById: vi.fn(),
+  findDonationsByProjectId: vi.fn(),
+  countBeneficiariesByProjectId: vi.fn(),
+  countConfirmedImpactSbtByProjectId: vi.fn(),
   createSbtMintRequest: vi.fn()
 }));
 
-// No model mock needed - service only imports types, not functions from this module
+vi.mock('../../config/logger', () => ({
+  getLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() })
+}));
+vi.mock('../../models/oracleVerificationResultModel', () => ({
+  findVerificationById: mocks.findVerificationById,
+  markVerificationSbtMintEnqueued: mocks.markVerificationSbtMintEnqueued
+}));
+vi.mock('../../models/oracleTriggerNonceModel', () => ({
+  consumeOracleTriggerNonce: mocks.consumeOracleTriggerNonce
+}));
+vi.mock('../../models/disbursementModel', () => ({
+  findDisbursementByRequestId: mocks.findDisbursementByRequestId,
+  findDisbursementsByProjectId: mocks.findDisbursementsByProjectId
+}));
+vi.mock('../../models/authModel', () => ({ findUserWalletAddressById: mocks.findUserWalletAddressById }));
+vi.mock('../../models/donationModel', () => ({ findDonationsByProjectId: mocks.findDonationsByProjectId }));
+vi.mock('../../models/beneficiaryFeedbackModel', () => ({ countBeneficiariesByProjectId: mocks.countBeneficiariesByProjectId }));
+vi.mock('../../models/impactSbtMetadataModel', () => ({ countConfirmedImpactSbtByProjectId: mocks.countConfirmedImpactSbtByProjectId }));
+vi.mock('../../services/sbtMintService', () => ({ createSbtMintRequest: mocks.createSbtMintRequest }));
 
-import { triggerSbtMintFromOracle, isTransactionStuck } from '../../services/sbt-trigger.service';
-import { createSbtMintRequest } from '../../services/sbtMintService';
+import {
+  isTransactionStuck,
+  resolveSbtMintInputFromVerification,
+  triggerSbtMintFromOracle,
+  verifyOracleTriggerRequest
+} from '../../services/sbt-trigger.service';
 
-// =============================================================================
-// Test: isTransactionStuck
-// =============================================================================
-describe('sbt-trigger.service - isTransactionStuck', () => {
+const beneficiaryAddress = '0x1234567890123456789012345678901234567890';
+const validVerification = {
+  verificationId: 'ver-1',
+  projectId: 'project-1',
+  organizationId: 'org-1',
+  evidenceCid: 'QmEvidence',
+  status: 'VALID',
+  gpsFromImage: { lat: 10.1, lng: 106.2 },
+  gpsFromProject: { lat: 10.1, lng: 106.2 },
+  distanceMeters: 2,
+  radiusMeters: 50,
+  geofenceSnapshot: null,
+  overrideRequestId: null,
+  disbursementRequestId: 'disbursement-1',
+  sbtMintDispatchStatus: 'PENDING',
+  processedAt: new Date('2026-08-17T00:00:00Z'),
+  createdAt: new Date('2026-08-17T00:00:00Z'),
+  updatedAt: new Date('2026-08-17T00:00:00Z')
+} as const;
+
+function buildSignature(timestamp: number, nonce: string, verificationId: string): string {
+  return createHmac('sha256', 'test-secret')
+    .update(`${timestamp}.${nonce}.${verificationId}`)
+    .digest('hex');
+}
+
+describe('sbt-trigger.service', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2025-01-01T12:00:00Z'));
-  });
-
-  it('trả về false khi status không phải SUBMITTED', () => {
-    const record = { status: 'PENDING' } as any;
-    expect(isTransactionStuck(record)).toBe(false);
-  });
-
-  it('trả về false khi submittedAt là null', () => {
-    const record = { status: 'SUBMITTED', submittedAt: null } as any;
-    expect(isTransactionStuck(record)).toBe(false);
-  });
-
-  it('trả về false khi SUBMITTED dưới 5 phút', () => {
-    const recentDate = new Date('2025-01-01T11:56:00Z'); // 4 phút trước
-    const record = { status: 'SUBMITTED', submittedAt: recentDate } as any;
-    expect(isTransactionStuck(record)).toBe(false);
-  });
-
-  it('trả về true khi SUBMITTED hơn 5 phút', () => {
-    const oldDate = new Date('2025-01-01T11:54:00Z'); // 6 phút trước
-    const record = { status: 'SUBMITTED', submittedAt: oldDate } as any;
-    expect(isTransactionStuck(record)).toBe(true);
-  });
-});
-
-// =============================================================================
-// Test: triggerSbtMintFromOracle
-// =============================================================================
-describe('sbt-trigger.service - triggerSbtMintFromOracle', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it('tạo mint request mới + trả về duplicate=false', async () => {
-    const validPayload = {
-      verificationId: 'ver-new',
-      projectId: 'proj-1',
+    process.env.ORACLE_TRIGGER_SHARED_SECRET = 'test-secret';
+    mocks.findDisbursementByRequestId.mockResolvedValue({
+      requestId: 'disbursement-1',
+      projectId: 'project-1',
       organizationId: 'org-1',
-      beneficiaryAddress: '0x1234567890123456789012345678901234567890',
-      projectIdNumeric: 1,
-      milestone: 0,
-      beneficiaryCount: 1,
-      gpsCoordinates: '',
-      imageCid: 'QmTest',
-      tokenUri: 'ipfs://QmTest'
-    };
+      beneficiaryWalletAddress: beneficiaryAddress
+    });
+    mocks.findDisbursementsByProjectId.mockResolvedValue([]);
+    mocks.findDonationsByProjectId.mockResolvedValue([]);
+    mocks.findUserWalletAddressById.mockResolvedValue(null);
+    mocks.countBeneficiariesByProjectId.mockResolvedValue(2);
+    mocks.countConfirmedImpactSbtByProjectId.mockResolvedValue(3);
+    mocks.consumeOracleTriggerNonce.mockResolvedValue(true);
+  });
 
-    const expectedRecord = {
-      sbtId: 'SBT-new',
-      mintRequestId: 'SBT-MINT-new',
-      verificationId: 'ver-new',
-      projectId: 'proj-1',
-      status: 'PENDING'
-    };
+  it('chỉ resolve mint input từ verification và nguồn authoritative', async () => {
+    const input = await resolveSbtMintInputFromVerification(validVerification);
 
-    (createSbtMintRequest as ReturnType<typeof vi.fn>).mockResolvedValue({
-      record: expectedRecord as any,
-      jobId: 'job-123',
+    expect(input).toEqual(expect.objectContaining({
+      verificationId: 'ver-1',
+      projectId: 'project-1',
+      organizationId: 'org-1',
+      beneficiaryAddress,
+      milestone: 4,
+      beneficiaryCount: 2,
+      gpsCoordinates: '10.1,106.2',
+      tokenUri: 'ipfs://QmEvidence'
+    }));
+  });
+
+  it('reject verification không VALID hoặc thiếu GPS', async () => {
+    await expect(resolveSbtMintInputFromVerification({ ...validVerification, status: 'INVALID' }))
+      .rejects.toMatchObject({ errorCode: 'VERIFICATION_NOT_VALID' });
+    await expect(resolveSbtMintInputFromVerification({ ...validVerification, gpsFromImage: null }))
+      .rejects.toMatchObject({ errorCode: 'VERIFICATION_DATA_INCOMPLETE' });
+  });
+
+  it('xác thực HMAC, timestamp và chống replay nonce', async () => {
+    const timestamp = Math.floor(Date.now() / 1000);
+    const nonce = 'nonce-1234567890';
+    const signature = buildSignature(timestamp, nonce, 'ver-1');
+
+    await verifyOracleTriggerRequest('ver-1', { signature, timestamp: String(timestamp), nonce });
+    expect(mocks.consumeOracleTriggerNonce).toHaveBeenCalledOnce();
+
+    mocks.consumeOracleTriggerNonce.mockResolvedValueOnce(false);
+    await expect(verifyOracleTriggerRequest('ver-1', { signature, timestamp: String(timestamp), nonce }))
+      .rejects.toMatchObject({ errorCode: 'ORACLE_SIGNATURE_REPLAY' });
+  });
+
+  it('không chấp nhận signature sai', async () => {
+    const timestamp = Math.floor(Date.now() / 1000);
+    await expect(verifyOracleTriggerRequest('ver-1', {
+      signature: 'a'.repeat(64),
+      timestamp: String(timestamp),
+      nonce: 'nonce-1234567890'
+    })).rejects.toMatchObject({ errorCode: 'ORACLE_SIGNATURE_INVALID' });
+  });
+
+  it('trigger lookup verification trước khi tạo request và idempotently đánh dấu dispatch', async () => {
+    mocks.findVerificationById.mockResolvedValue(validVerification);
+    mocks.createSbtMintRequest.mockResolvedValue({
+      record: { sbtId: 'sbt-1', mintRequestId: 'mint-1', status: 'PENDING' },
+      jobId: 'mint-1-attempt1',
       enqueued: true,
       duplicate: false
     });
 
-    const result = await triggerSbtMintFromOracle(validPayload);
+    const result = await triggerSbtMintFromOracle({ verificationId: 'ver-1' });
 
+    expect(mocks.createSbtMintRequest).toHaveBeenCalledWith(expect.objectContaining({
+      beneficiaryAddress,
+      milestone: 4,
+      projectId: 'project-1'
+    }));
+    expect(mocks.markVerificationSbtMintEnqueued).toHaveBeenCalledWith('ver-1');
     expect(result.duplicate).toBe(false);
-    expect(result.record.sbtId).toBe('SBT-new');
-    expect(createSbtMintRequest).toHaveBeenCalledWith(
-      expect.objectContaining({
-        verificationId: 'ver-new',
-        projectId: 'proj-1',
-        organizationId: 'org-1',
-        beneficiaryAddress: '0x1234567890123456789012345678901234567890',
-        projectIdNumeric: 1,
-        milestone: 0,
-        beneficiaryCount: 1,
-        gpsCoordinates: '',
-        imageCid: 'QmTest',
-        tokenUri: 'ipfs://QmTest'
-      })
-    );
   });
 
-  it('trả về duplicate=true khi verificationId đã tồn tại', async () => {
-    const validPayload = {
-      verificationId: 'ver-existing',
-      projectId: 'proj-1',
-      organizationId: 'org-1',
-      beneficiaryAddress: '0x1234567890123456789012345678901234567890',
-      projectIdNumeric: 1,
-      milestone: 0,
-      beneficiaryCount: 1,
-      gpsCoordinates: '',
-      imageCid: 'QmTest',
-      tokenUri: 'ipfs://QmTest'
-    };
-
-    const existingRecord = {
-      sbtId: 'SBT-existing',
-      mintRequestId: 'SBT-MINT-existing',
-      verificationId: 'ver-existing',
-      projectId: 'proj-1',
-      status: 'PENDING'
-    };
-
-    (createSbtMintRequest as ReturnType<typeof vi.fn>).mockResolvedValue({
-      record: existingRecord as any,
-      jobId: undefined,
-      enqueued: false,
-      duplicate: true
-    });
-
-    const result = await triggerSbtMintFromOracle(validPayload);
-
-    expect(result.duplicate).toBe(true);
-    expect(result.record.mintRequestId).toBe('SBT-MINT-existing');
-  });
-
-  it('sử dụng giá trị default cho các trường optional (được apply bởi Zod ở controller)', async () => {
-    // Service nhận pre-validated data từ controller (Zod đã apply defaults)
-    const validatedPayload: Parameters<typeof triggerSbtMintFromOracle>[0] = {
-      verificationId: 'ver-defaults',
-      projectId: 'proj-1',
-      organizationId: 'org-1',
-      beneficiaryAddress: '0x1234567890123456789012345678901234567890',
-      projectIdNumeric: 1,
-      milestone: 0,        // default đã được Zod apply ở controller
-      beneficiaryCount: 0, // default đã được Zod apply ở controller
-      gpsCoordinates: '',  // default đã được Zod apply ở controller
-      imageCid: 'QmTest',
-      tokenUri: 'ipfs://QmTest'
-    };
-
-    (createSbtMintRequest as ReturnType<typeof vi.fn>).mockResolvedValue({
-      record: { sbtId: 'SBT-defaults', mintRequestId: 'SBT-MINT-defaults' } as any,
-      jobId: 'job-defaults',
-      enqueued: true,
-      duplicate: false
-    });
-
-    await triggerSbtMintFromOracle(validatedPayload);
-
-    expect(createSbtMintRequest).toHaveBeenCalledWith(
-      expect.objectContaining({
-        milestone: 0,
-        beneficiaryCount: 0,
-        gpsCoordinates: ''
-      })
-    );
+  it('isTransactionStuck chỉ cảnh báo SUBMITTED quá 5 phút', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-17T12:00:00Z'));
+    expect(isTransactionStuck({ status: 'SUBMITTED', submittedAt: new Date('2026-08-17T11:54:00Z') } as never)).toBe(true);
+    expect(isTransactionStuck({ status: 'PENDING', submittedAt: null } as never)).toBe(false);
+    vi.useRealTimers();
   });
 });

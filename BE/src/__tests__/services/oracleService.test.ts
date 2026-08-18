@@ -526,7 +526,9 @@ describe('verifyEvidenceImage', () => {
 
     await verifyEvidenceImage(Buffer.alloc(64), mockProjectId, mockOrgId, mockCid);
 
-    expect(vi.mocked(oracleEvents.emit)).toHaveBeenCalledWith('oracle.verified', expect.objectContaining({ isValid: false }));
+    expect(vi.mocked(oracleEvents.emit)).toHaveBeenCalledWith('oracle.verified', expect.objectContaining({
+      verificationId: expect.any(String)
+    }));
     expect(vi.mocked(oracleEvents.emit)).toHaveBeenCalledWith('override.requested', expect.objectContaining({ reason: 'OUT_OF_GEOFENCE' }));
     expect(logEvent).toHaveBeenCalledWith(expect.objectContaining({ eventType: 'ORACLE_VERIFIED' }));
     expect(logEvent).toHaveBeenCalledWith(expect.objectContaining({

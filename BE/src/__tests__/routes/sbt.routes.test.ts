@@ -39,6 +39,8 @@ vi.mock('../../services/sbt-metadata.service', () => ({
 
 const dlqMocks = vi.hoisted(() => ({
   findByStatus: vi.fn(),
+  findByStatusCursor: vi.fn(),
+  decodeCursor: vi.fn(),
   countByStatus: vi.fn()
 }));
 
@@ -48,6 +50,8 @@ const roleMocks = vi.hoisted(() => ({
 
 vi.mock('../../models/sbtMintDlqModel', () => ({
   findSbtMintDlqByStatus: dlqMocks.findByStatus,
+  findSbtMintDlqByStatusCursor: dlqMocks.findByStatusCursor,
+  decodeSbtMintDlqCursor: dlqMocks.decodeCursor,
   countSbtMintDlqByStatus: dlqMocks.countByStatus
 }));
 
@@ -206,6 +210,8 @@ describe('sbt routes - GET /api/sbt/dlq', () => {
     vi.clearAllMocks();
     roleMocks.freshRoleAllowed = true;
     dlqMocks.findByStatus.mockResolvedValue([]);
+    dlqMocks.findByStatusCursor.mockResolvedValue({ entries: [], nextCursor: null });
+    dlqMocks.decodeCursor.mockReturnValue(null);
     dlqMocks.countByStatus.mockResolvedValue(0);
     projectMocks.findProjectNames.mockResolvedValue([]);
   });
@@ -258,10 +264,46 @@ describe('sbt routes - GET /api/sbt/dlq', () => {
     expect(dlqMocks.findByStatus).toHaveBeenCalledWith('ABANDONED', 50, 50);
   });
 
+  it('rejects malformed cursor before querying DLQ data', async () => {
+    dlqMocks.decodeCursor.mockReturnValue(null);
+    const response = await supertest(createTestApp())
+      .get('/api/sbt/dlq?cursor=invalid-cursor&limit=20')
+      .set('Authorization', 'Bearer test-token-admin');
+
+    expect(response.status).toBe(400);
+    expect(dlqMocks.findByStatusCursor).not.toHaveBeenCalled();
+  });
+
+  it('uses cursor query for bounded DLQ pagination', async () => {
+    dlqMocks.decodeCursor.mockReturnValue({ dlqAt: '2026-08-17T00:00:00.000Z', dlqId: 'DLQ-1' });
+    dlqMocks.findByStatusCursor.mockResolvedValue({ entries: [], nextCursor: 'next-cursor' });
+    const response = await supertest(createTestApp())
+      .get('/api/sbt/dlq?cursor=eyJkbHFJZCI6IkRMUS0xIn0&limit=20&status=OPEN')
+      .set('Authorization', 'Bearer test-token-admin');
+
+    expect(response.status).toBe(200);
+    expect(dlqMocks.findByStatusCursor).toHaveBeenCalledWith('OPEN', 20, 'eyJkbHFJZCI6IkRMUS0xIn0');
+    expect((response.body as { data: { pagination: { nextCursor: string } } }).data.pagination.nextCursor).toBe('next-cursor');
+  });
+
   it('admin → bổ sung projectName theo projectId nhưng giữ nguyên thứ tự và field cũ', async () => {
     const entries = [
-      { mintRequestId: 'MINT-1', projectId: 'PROJECT-1', status: 'OPEN' },
-      { mintRequestId: 'MINT-2', projectId: 'PROJECT-2', status: 'OPEN' }
+      {
+        dlqId: 'DLQ-1', mintRequestId: 'MINT-1', sbtId: 'SBT-1', projectId: 'PROJECT-1', organizationId: 'ORG-1',
+        beneficiaryAddress: '0x0000000000000000000000000000000000000001', attemptNumber: 7,
+        lastErrorMessage: 'revert', firstAttemptedAt: new Date('2026-08-17T00:00:00.000Z'),
+        dlqAt: new Date('2026-08-17T01:00:00.000Z'), recoveredAt: null, recoveredBy: null,
+        recoveryAttemptNumber: 0, lastRecoveryError: null, lastRecoveryAt: null, status: 'OPEN',
+        createdAt: new Date('2026-08-17T00:00:00.000Z'), updatedAt: new Date('2026-08-17T01:00:00.000Z')
+      },
+      {
+        dlqId: 'DLQ-2', mintRequestId: 'MINT-2', sbtId: 'SBT-2', projectId: 'PROJECT-2', organizationId: 'ORG-2',
+        beneficiaryAddress: '0x0000000000000000000000000000000000000002', attemptNumber: 7,
+        lastErrorMessage: 'timeout', firstAttemptedAt: new Date('2026-08-17T00:00:00.000Z'),
+        dlqAt: new Date('2026-08-17T01:00:00.000Z'), recoveredAt: null, recoveredBy: null,
+        recoveryAttemptNumber: 0, lastRecoveryError: null, lastRecoveryAt: null, status: 'OPEN',
+        createdAt: new Date('2026-08-17T00:00:00.000Z'), updatedAt: new Date('2026-08-17T01:00:00.000Z')
+      }
     ];
     dlqMocks.findByStatus.mockResolvedValue(entries);
     projectMocks.findProjectNames.mockResolvedValue([
@@ -303,7 +345,14 @@ describe('sbt routes - GET /api/sbt/dlq', () => {
 
   it('admin → project không tồn tại hoặc lookup lỗi vẫn trả projectName null', async () => {
     const entries = [
-      { mintRequestId: 'MINT-1', projectId: 'PROJECT-MISSING', status: 'OPEN' }
+      {
+        dlqId: 'DLQ-1', mintRequestId: 'MINT-1', sbtId: 'SBT-1', projectId: 'PROJECT-MISSING', organizationId: 'ORG-1',
+        beneficiaryAddress: '0x0000000000000000000000000000000000000001', attemptNumber: 7,
+        lastErrorMessage: 'revert', firstAttemptedAt: new Date('2026-08-17T00:00:00.000Z'),
+        dlqAt: new Date('2026-08-17T01:00:00.000Z'), recoveredAt: null, recoveredBy: null,
+        recoveryAttemptNumber: 0, lastRecoveryError: null, lastRecoveryAt: null, status: 'OPEN',
+        createdAt: new Date('2026-08-17T00:00:00.000Z'), updatedAt: new Date('2026-08-17T01:00:00.000Z')
+      }
     ];
     dlqMocks.findByStatus.mockResolvedValue(entries);
     projectMocks.findProjectNames.mockResolvedValue([]);
@@ -485,7 +534,8 @@ import { isTransactionStuck } from '../../services/sbt-trigger.service';
 
 vi.mock('../../services/sbt-trigger.service', () => ({
   triggerSbtMintFromOracle: vi.fn(),
-  isTransactionStuck: vi.fn()
+  isTransactionStuck: vi.fn(),
+  verifyOracleTriggerRequest: vi.fn().mockResolvedValue(undefined)
 }));
 
 function createSbtTriggerTestApp(): Express {
@@ -496,16 +546,7 @@ function createSbtTriggerTestApp(): Express {
 }
 
 const VALID_TRIGGER_BODY = {
-  verificationId: 'ver-123e4567-e89b-12d3-a456-426614174000',
-  projectId: 'proj-123e4567-e89b-12d3-a456-426614174000',
-  organizationId: 'org-123e4567-e89b-12d3-a456-426614174000',
-  beneficiaryAddress: '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045',
-  projectIdNumeric: 42,
-  milestone: 1,
-  beneficiaryCount: 10,
-  gpsCoordinates: '10.8231,106.6297',
-  imageCid: 'QmTzQ1JRkWErjk39mryYw2WVenhAZmvR4nYLvMMHvwRag',
-  tokenUri: 'ipfs://QmTzQ1JRkWErjk39mryYw2WVenhAZmvR4nYLvMMHvwRag'
+  verificationId: 'ver-123e4567-e89b-12d3-a456-426614174000'
 };
 
 function createSbtTriggerRequest(app: Express, method: 'post', path: string, options?: {
@@ -614,10 +655,7 @@ describe('sbt routes - POST /api/oracle/sbt-trigger', () => {
 
     expect(res.status).toBe(201);
     expect(triggerSbtMintFromOracle).toHaveBeenCalledWith(
-      expect.objectContaining({
-        verificationId: VALID_TRIGGER_BODY.verificationId,
-        beneficiaryAddress: VALID_TRIGGER_BODY.beneficiaryAddress
-      })
+      { verificationId: VALID_TRIGGER_BODY.verificationId }
     );
   });
 
@@ -646,27 +684,30 @@ describe('sbt routes - POST /api/oracle/sbt-trigger', () => {
     expect(body.data?.duplicate).toBe(true);
   });
 
-  it('oracle role → 400 khi thiếu required fields', async () => {
+  it('oracle role → 400 khi thiếu verificationId', async () => {
     const app = createSbtTriggerTestApp();
     const res = await createSbtTriggerRequest(app, 'post', '/api/oracle/sbt-trigger', {
       headers: { authorization: 'Bearer test-token-oracle' },
-      body: { verificationId: 'ver-123' } // missing other required fields
+      body: {}
     });
 
     expect(res.status).toBe(400);
     expect(triggerSbtMintFromOracle).not.toHaveBeenCalled();
   });
 
-  it('oracle role → 400 khi beneficiaryAddress không hợp lệ', async () => {
+  it('oracle role → bỏ qua client-controlled mint fields', async () => {
+    (triggerSbtMintFromOracle as ReturnType<typeof vi.fn>).mockResolvedValue({
+      record: { sbtId: 'SBT-safe', mintRequestId: 'SBT-MINT-safe', status: 'PENDING', transactionHash: null },
+      duplicate: false,
+      enqueued: true
+    });
     const app = createSbtTriggerTestApp();
     const res = await createSbtTriggerRequest(app, 'post', '/api/oracle/sbt-trigger', {
       headers: { authorization: 'Bearer test-token-oracle' },
-      body: { ...VALID_TRIGGER_BODY, beneficiaryAddress: 'invalid-address' }
+      body: { ...VALID_TRIGGER_BODY, beneficiaryAddress: 'invalid-address', milestone: 999 }
     });
 
-    expect(res.status).toBe(400);
-    const body = res.body as { details?: unknown };
-    expect(body.details).toBeDefined();
-    expect(triggerSbtMintFromOracle).not.toHaveBeenCalled();
+    expect(res.status).toBe(201);
+    expect(triggerSbtMintFromOracle).toHaveBeenCalledWith({ verificationId: VALID_TRIGGER_BODY.verificationId });
   });
 });

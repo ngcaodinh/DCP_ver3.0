@@ -1,6 +1,7 @@
 import { getLogger } from '../config/logger';
 import { runWithWorkerContext } from '../config/requestContext';
 import { recoverStuckSbtMints } from '../services/sbtMintService';
+import { replayPendingOracleSbtMints } from './sbtMintWorker';
 
 /**
  * Khoảng thời gian chạy recovery (15 phút).
@@ -85,11 +86,14 @@ export function startSbtMintRecoveryScheduler(): void {
           lastRunTimestamp = now;
           logger.info('SBT mint recovery scheduler bắt đầu kiểm tra stuck jobs.');
 
+          const replayed = await replayPendingOracleSbtMints();
+
           const result = await recoverStuckSbtMints(STUCK_THRESHOLD_MINUTES);
 
           logger.info('SBT mint recovery scheduler hoàn tất cycle.', {
             candidatesFound: result.recovered,
             enqueued: result.enqueued > 0,
+            oracleDispatchReplayed: replayed,
             thresholdMinutes: STUCK_THRESHOLD_MINUTES
           });
         } catch (error) {

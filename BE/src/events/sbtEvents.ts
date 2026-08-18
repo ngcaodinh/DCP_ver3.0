@@ -49,7 +49,7 @@ export type SbtMintFailedEventPayload = {
 };
 
 /**
- * Payload cho sbt.mint-dlq — phát ra khi hết 6 retry.
+ * Payload cho sbt.mint-dlq — phát ra khi hết 7 attempt (1 attempt đầu + 6 retry).
  * Mục đích: notification service gửi email cho admin (Q5 — SBT_MINT_FAILED thuộc allowlist).
  */
 export type SbtMintDlqEventPayload = {

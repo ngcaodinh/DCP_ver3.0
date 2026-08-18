@@ -5,8 +5,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // =============================================================================
 
 // Dùng vi.hoisted để tạo mock functions có thể reference trong vi.mock factories
-const { mockRecoverStuckSbtMints, mockGetRedisClient, mockLogger } = vi.hoisted(() => ({
+const { mockRecoverStuckSbtMints, mockReplayPendingOracleSbtMints, mockGetRedisClient, mockLogger } = vi.hoisted(() => ({
   mockRecoverStuckSbtMints: vi.fn().mockResolvedValue({ recovered: 0, enqueued: 0 }),
+  mockReplayPendingOracleSbtMints: vi.fn().mockResolvedValue(0),
   mockGetRedisClient: vi.fn(() => ({ options: { url: 'redis://localhost' } })),
   mockLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn() })
 }));
@@ -21,6 +22,10 @@ vi.mock('../../config/redis', () => ({
 
 vi.mock('../../config/logger', () => ({
   getLogger: mockLogger
+}));
+
+vi.mock('../../workers/sbtMintWorker', () => ({
+  replayPendingOracleSbtMints: mockReplayPendingOracleSbtMints
 }));
 
 describe('sbtMintRecoveryScheduler', () => {

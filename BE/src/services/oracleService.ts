@@ -214,7 +214,8 @@ export async function verifyEvidenceImage(
   if (isInsidePolygon) {
     return await handleValid(
       verificationId, projectId, organizationId, evidenceCid,
-      gpsFromImage, projectCentroid, distanceMeters, radiusMeters, geofenceSnapshot
+      gpsFromImage, projectCentroid, distanceMeters, radiusMeters, geofenceSnapshot,
+      disbursementRequestId
     );
   } else {
     return await handleOutOfGeofence(
@@ -271,7 +272,8 @@ async function handleValid(
   gpsFromProject: GpsCoordinate,
   distanceMeters: number,
   radiusMeters: number,
-  geofenceSnapshot: GeofenceSnapshot
+  geofenceSnapshot: GeofenceSnapshot,
+  disbursementRequestId: string | null
 ): Promise<OracleVerificationResult> {
   await createOracleVerificationResult({
     verificationId,
@@ -285,13 +287,13 @@ async function handleValid(
     radiusMeters,
     geofenceSnapshot,
     overrideRequestId: null,
+    disbursementRequestId,
+    sbtMintDispatchStatus: 'PENDING',
     processedAt: new Date()
   });
 
-  oracleEvents.emit('oracle.verified', {
-    verificationId, projectId, organizationId, evidenceCid,
-    isValid: true, distance: distanceMeters, reason: null
-  } satisfies OracleVerifiedEventPayload);
+  // Chỉ phát verificationId; worker phải đọc lại bản ghi đã xác minh, không tin payload do caller tự dựng.
+  oracleEvents.emit('oracle.verified', { verificationId } satisfies OracleVerifiedEventPayload);
   eventLoggerService.logEvent({
     eventType: 'ORACLE_VERIFIED',
     projectId,
@@ -336,6 +338,8 @@ async function handleOutOfGeofence(
     radiusMeters,
     geofenceSnapshot,
     overrideRequestId: null,
+    disbursementRequestId,
+    sbtMintDispatchStatus: 'ENQUEUED',
     processedAt: new Date()
   });
 
@@ -406,6 +410,8 @@ async function handleNoGps(
     radiusMeters,
     geofenceSnapshot,
     overrideRequestId: null,
+    disbursementRequestId,
+    sbtMintDispatchStatus: 'ENQUEUED',
     processedAt: new Date()
   });
 
@@ -475,6 +481,8 @@ async function handleNoGeofence(
     // Project chưa có geofence → không có snapshot để lưu (B3 Q2)
     geofenceSnapshot: null,
     overrideRequestId: null,
+    disbursementRequestId,
+    sbtMintDispatchStatus: 'ENQUEUED',
     processedAt: new Date()
   });
 
@@ -564,10 +572,8 @@ function emitVerifiedAndOverride(
   overrideReason: 'OUT_OF_GEOFENCE' | 'GPS_EXIF_MISSING' | 'NO_GEOFENCE',
   commissionerCount: number
 ): void {
-  oracleEvents.emit('oracle.verified', {
-    verificationId, projectId, organizationId, evidenceCid,
-    isValid, distance, reason: verifiedReason
-  } satisfies OracleVerifiedEventPayload);
+  // Worker chỉ cần identity; mọi dữ liệu mint phải đọc từ verification record đã lưu.
+  oracleEvents.emit('oracle.verified', { verificationId } satisfies OracleVerifiedEventPayload);
   eventLoggerService.logEvent({
     eventType: 'ORACLE_VERIFIED',
     projectId,

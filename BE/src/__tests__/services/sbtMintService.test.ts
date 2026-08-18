@@ -3,6 +3,11 @@ import { ethers } from 'ethers';
 
 const recordBlockchainTransactionMock = vi.hoisted(() => vi.fn());
 const eventLoggerLogEventMock = vi.hoisted(() => vi.fn());
+const providerMock = vi.hoisted(() => ({
+  getTransactionCount: vi.fn().mockResolvedValue(0),
+  getTransactionReceipt: vi.fn().mockResolvedValue(null)
+}));
+const reserveNonceMock = vi.hoisted(() => vi.fn().mockResolvedValue(0));
 
 // vi.mock hoists above imports, so ethers needs to be imported before any vi.mock calls
 // that reference it. The sbtMintService module creates SBT_MINTED_EVENT_IFACE at module
@@ -15,12 +20,18 @@ vi.mock('../../config/logger', () => ({
 }));
 
 vi.mock('../../config/sbtContract', () => ({
-  getWritableImpactSbtContract: vi.fn()
+  getWritableImpactSbtContract: vi.fn(),
+  getReadOnlyImpactSbtProvider: vi.fn(() => providerMock),
+  getImpactSbtMintSignerAddress: vi.fn(() => '0x0000000000000000000000000000000000000001')
 }));
 
 // Reset cache for each test to avoid stale contract instances
 beforeEach(() => {
   vi.clearAllMocks();
+  providerMock.getTransactionCount.mockResolvedValue(0);
+  providerMock.getTransactionReceipt.mockResolvedValue(null);
+  reserveNonceMock.mockResolvedValue(0);
+  (claimImpactSbtForSubmission as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'SUBMITTING' });
   // Reset module-level cached contract by clearing the internal state
   // The cached contract is created lazily on first call to getWritableContract
 });
@@ -29,29 +40,37 @@ vi.mock('../../models/impactSbtMetadataModel', () => ({
   createImpactSbtMetadata: vi.fn(),
   findImpactSbtMetadataByMintRequestId: vi.fn(),
   findImpactSbtMetadataByVerificationId: vi.fn(),
-  markImpactSbtAsSubmitted: vi.fn(),
-  markImpactSbtAsConfirmed: vi.fn(),
+  claimImpactSbtForSubmission: vi.fn().mockResolvedValue({ status: 'SUBMITTING' }),
+  reserveImpactSbtSubmissionNonce: vi.fn().mockResolvedValue({ status: 'SUBMITTING' }),
+  markImpactSbtAsSubmitted: vi.fn().mockResolvedValue({ status: 'SUBMITTED' }),
+  markImpactSbtAsConfirmed: vi.fn().mockResolvedValue({ status: 'CONFIRMED' }),
   markImpactSbtAsFailed: vi.fn(),
+  releaseExpiredSbtSubmissionWithoutNonce: vi.fn(),
   markImpactSbtAsDlq: vi.fn(),
   resetImpactSbtForReRun: vi.fn(),
   createBlockedImpactSbtMetadata: vi.fn(),
-  findImpactSbtNeedingRecovery: vi.fn()
+  findImpactSbtNeedingRecovery: vi.fn(),
+  countConfirmedImpactSbtByProjectId: vi.fn()
+}));
+
+vi.mock('../../models/sbtMintNonceModel', () => ({
+  reserveNextSbtMintNonce: reserveNonceMock
 }));
 
 vi.mock('../../models/sbtMintDlqModel', () => ({
   createSbtMintDlqEntry: vi.fn(),
   markSbtMintDlqAsRecovered: vi.fn(),
-  findSbtMintDlqByMintRequestId: vi.fn()
+  findSbtMintDlqByMintRequestId: vi.fn(),
+  markSbtMintDlqRerunStarted: vi.fn(),
+  markSbtMintDlqRerunFailed: vi.fn()
 }));
 
 vi.mock('../../queues/sbtMintQueue', () => ({
   enqueueSbtMint: vi.fn().mockResolvedValue({ jobId: 'job-123', enqueued: true }),
-  getSbtMintJobIndexByRequestId: vi.fn().mockResolvedValue(new Map()),
   countPendingSbtMintJobsByRequestId: vi.fn().mockResolvedValue(0),
-  getActiveSbtMintJobByRequestId: vi.fn().mockResolvedValue(null),
   removePendingSbtMintJobsByRequestId: vi.fn().mockResolvedValue(0),
   SBT_MINT_RETRY_DELAYS_MS: [300000, 900000, 3600000, 3600000, 14400000, 86400000],
-  SBT_MINT_MAX_ATTEMPTS: 6,
+  SBT_MINT_MAX_ATTEMPTS: 7,
   SBT_MINT_STUCK_TX_THRESHOLD_MS: 300000
 }));
 
@@ -101,15 +120,17 @@ import {
   createImpactSbtMetadata,
   findImpactSbtMetadataByVerificationId,
   findImpactSbtMetadataByMintRequestId,
+  claimImpactSbtForSubmission,
   markImpactSbtAsSubmitted,
   markImpactSbtAsConfirmed,
   markImpactSbtAsFailed,
+  releaseExpiredSbtSubmissionWithoutNonce,
   markImpactSbtAsDlq,
   resetImpactSbtForReRun,
   findImpactSbtNeedingRecovery
 } from '../../models/impactSbtMetadataModel';
 import { createSbtMintDlqEntry, findSbtMintDlqByMintRequestId } from '../../models/sbtMintDlqModel';
-import { enqueueSbtMint, getSbtMintJobIndexByRequestId, countPendingSbtMintJobsByRequestId, removePendingSbtMintJobsByRequestId, SBT_MINT_RETRY_DELAYS_MS, SBT_MINT_MAX_ATTEMPTS } from '../../queues/sbtMintQueue';
+import { enqueueSbtMint, countPendingSbtMintJobsByRequestId, removePendingSbtMintJobsByRequestId, SBT_MINT_RETRY_DELAYS_MS, SBT_MINT_MAX_ATTEMPTS } from '../../queues/sbtMintQueue';
 import { sbtEvents } from '../../events/sbtEvents';
 import { invalidateSbtGalleryTotalCache } from '../../services/sbtMetadataCacheService';
 import { ApplicationError } from '../../utils/applicationError';
@@ -122,6 +143,7 @@ import {
   handleSbtMintFailure,
   rerunSbtMintJob,
   recoverStuckSbtMints,
+  reconcileSubmittedSbtMint,
   resetWritableContractForTest
 } from '../../services/sbtMintService';
 
@@ -140,7 +162,8 @@ describe('sbtMintService - createSbtMintRequest', () => {
       sbtId: 'SBT-existing', // Khác với sbtId sẽ được generate
       mintRequestId: 'SBT-MINT-existing',
       verificationId: 'ver-123',
-      status: 'PENDING'
+      status: 'PENDING',
+      attemptNumber: 0
     } as any;
     // Upsert trả về existing record khi verificationId đã tồn tại
     (createImpactSbtMetadata as ReturnType<typeof vi.fn>).mockResolvedValue(existingRecord);
@@ -162,7 +185,7 @@ describe('sbtMintService - createSbtMintRequest', () => {
 
     expect(result.duplicate).toBe(true);
     expect(result.record.mintRequestId).toBe('SBT-MINT-existing');
-    expect(enqueueSbtMint).not.toHaveBeenCalled();
+    expect(enqueueSbtMint).toHaveBeenCalledWith(expect.objectContaining({ attemptNumber: 1 }), expect.objectContaining({ priority: 5 }));
   });
 
   it('tạo record mới + enqueue job + trả về duplicate=false khi chưa tồn tại', async () => {
@@ -211,7 +234,8 @@ describe('sbtMintService - createSbtMintRequest', () => {
       sbtId: 'SBT-existing', // Khác với sbtId sẽ được generate bên trong
       mintRequestId: 'SBT-MINT-existing',
       verificationId: 'ver-race',
-      status: 'PENDING'
+      status: 'PENDING',
+      attemptNumber: 0
     } as any;
     (createImpactSbtMetadata as ReturnType<typeof vi.fn>).mockResolvedValue(existingRecord);
 
@@ -233,7 +257,7 @@ describe('sbtMintService - createSbtMintRequest', () => {
     // Duplicate được detect bằng sbtId khác nhau
     expect(result.duplicate).toBe(true);
     expect(result.record.mintRequestId).toBe('SBT-MINT-existing');
-    expect(enqueueSbtMint).not.toHaveBeenCalled();
+    expect(enqueueSbtMint).toHaveBeenCalledWith(expect.objectContaining({ attemptNumber: 1 }), expect.objectContaining({ priority: 5 }));
   });
 
   it('throw error khi beneficiaryAddress không hợp lệ', async () => {
@@ -364,7 +388,7 @@ describe('sbtMintService - executeSbtMint', () => {
       pendingRecord.gpsCoordinates,
       pendingRecord.imageCid,
       pendingRecord.tokenUri,
-      { gasLimit: expect.any(BigInt) }
+      { gasLimit: expect.any(BigInt), nonce: expect.any(Number) }
     );
     expect(recordBlockchainTransaction).toHaveBeenCalledWith(expect.objectContaining({
       operation: 'mint_sbt',
@@ -395,6 +419,50 @@ describe('sbtMintService - executeSbtMint', () => {
         transactionHash: '0xtxhash456'
       }
     }));
+  });
+
+  it('trả SUBMITTED khi wait receipt timeout và không broadcast lại', async () => {
+    vi.useFakeTimers();
+    resetWritableContractForTest();
+    (findImpactSbtMetadataByMintRequestId as ReturnType<typeof vi.fn>).mockResolvedValue({
+      sbtId: 'SBT-timeout', mintRequestId: 'SBT-MINT-timeout', projectId: 'proj-1', organizationId: 'org-1',
+      beneficiaryAddress: '0x1234567890123456789012345678901234567890', projectIdNumeric: 1,
+      milestone: 1, beneficiaryCount: 1, gpsCoordinates: '', imageCid: 'QmTest', tokenUri: 'ipfs://QmTest',
+      status: 'PENDING', onChainTokenId: null, transactionHash: null, blockNumber: null
+    });
+    const mockContract = {
+      mint: vi.fn().mockResolvedValue({ hash: '0xtimeout', wait: vi.fn(() => new Promise(() => undefined)) })
+    };
+    (mockContract.mint as any).estimateGas = vi.fn().mockResolvedValue(BigInt(100000));
+    (getWritableImpactSbtContract as ReturnType<typeof vi.fn>).mockReturnValue(mockContract as any);
+
+    const resultPromise = executeSbtMint('SBT-MINT-timeout', 1);
+    await vi.advanceTimersByTimeAsync(60_001);
+    const result = await resultPromise;
+
+    expect(result).toMatchObject({ status: 'SUBMITTED', transactionHash: '0xtimeout' });
+    expect(markImpactSbtAsConfirmed).not.toHaveBeenCalled();
+    expect(mockContract.mint).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
+  it('dừng sau broadcast nếu không persist được tx hash để tránh retry double-mint', async () => {
+    resetWritableContractForTest();
+    (findImpactSbtMetadataByMintRequestId as ReturnType<typeof vi.fn>).mockResolvedValue({
+      sbtId: 'SBT-persist-fail', mintRequestId: 'SBT-MINT-persist-fail', projectId: 'proj-1', organizationId: 'org-1',
+      beneficiaryAddress: '0x1234567890123456789012345678901234567890', projectIdNumeric: 1,
+      milestone: 1, beneficiaryCount: 1, gpsCoordinates: '', imageCid: 'QmTest', tokenUri: 'ipfs://QmTest',
+      status: 'PENDING', onChainTokenId: null, transactionHash: null, blockNumber: null
+    });
+    (markImpactSbtAsSubmitted as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+    const mockContract = {
+      mint: vi.fn().mockResolvedValue({ hash: '0xpersist-fail', wait: vi.fn() })
+    };
+    (mockContract.mint as any).estimateGas = vi.fn().mockResolvedValue(BigInt(100000));
+    (getWritableImpactSbtContract as ReturnType<typeof vi.fn>).mockReturnValue(mockContract as any);
+
+    await expect(executeSbtMint('SBT-MINT-persist-fail', 1)).rejects.toThrow('Không ghi được tx hash sau broadcast');
+    expect(markImpactSbtAsConfirmed).not.toHaveBeenCalled();
   });
 
   it('throw "revert on-chain" khi receipt.status=0', async () => {
@@ -495,15 +563,9 @@ describe('sbtMintService - executeSbtMint', () => {
   });
 
   it('concurrent executeSbtMint chỉ một tx thành công (race protection)', async () => {
-    // Mock state machine: call 1 = PENDING → SUBMITTED → CONFIRMED; call 2 = CONFIRMED
+    // Hai caller cùng đọc PENDING; chỉ atomic submission lease đầu tiên được phép broadcast.
     resetWritableContractForTest();
-    let findCallCount = 0;
-    const mockFind = async () => {
-      // First call returns PENDING record, subsequent calls return CONFIRMED (mimics DB state after first call updates)
-      findCallCount += 1;
-      const isFirst = findCallCount === 1;
-      if (isFirst) {
-        return {
+    const pendingRaceRecord = {
           sbtId: 'SBT-race',
           mintRequestId: 'SBT-MINT-race',
           projectId: 'proj-1',
@@ -520,28 +582,11 @@ describe('sbtMintService - executeSbtMint', () => {
           transactionHash: null,
           blockNumber: null
         } as any;
-      }
-      // Subsequent calls: record đã CONFIRMED (do call 1 đã update)
-      return {
-        sbtId: 'SBT-race',
-        mintRequestId: 'SBT-MINT-race',
-        projectId: 'proj-1',
-        organizationId: 'org-1',
-        beneficiaryAddress: '0x1234567890123456789012345678901234567890',
-        projectIdNumeric: 1,
-        milestone: 0,
-        beneficiaryCount: 1,
-        gpsCoordinates: '',
-        imageCid: 'QmTest',
-        tokenUri: 'ipfs://QmTest',
-        status: 'CONFIRMED',
-        onChainTokenId: 99,
-        transactionHash: '0xtxhash-first',
-        blockNumber: 67890
-      } as any;
-    };
 
-    (findImpactSbtMetadataByMintRequestId as ReturnType<typeof vi.fn>).mockImplementation(mockFind);
+    (findImpactSbtMetadataByMintRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(pendingRaceRecord);
+    (claimImpactSbtForSubmission as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({ status: 'SUBMITTING' })
+      .mockResolvedValueOnce(null);
     (markImpactSbtAsSubmitted as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'SUBMITTED' } as any);
     (markImpactSbtAsConfirmed as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'CONFIRMED' } as any);
     (findSbtMintDlqByMintRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(null);
@@ -581,8 +626,8 @@ describe('sbtMintService - executeSbtMint', () => {
     (getWritableImpactSbtContract as ReturnType<typeof vi.fn>).mockReturnValue(mockContract as any);
 
     // Race protection: chỉ tối đa 1 tx thành công.
-    // Call 1: PENDING → gọi contract → CONFIRMED
-    // Call 2: CONFIRMED → early return CONFIRMED (không gọi contract)
+    // Call 1: claim thành công → gọi contract → CONFIRMED
+    // Call 2: claim thất bại → trả SUBMITTED, không gọi contract
     // Dùng Promise.allSettled để cả 2 chạy đồng thời
     const results = await Promise.allSettled([
       executeSbtMint('SBT-MINT-race', 1),
@@ -654,14 +699,14 @@ describe('sbtMintService - handleSbtMintFailure', () => {
     }));
   });
 
-  it('move to DLQ + emit sbt.mint-dlq khi attemptNumber >= MAX (6)', async () => {
+  it('move to DLQ + emit sbt.mint-dlq khi attemptNumber >= MAX (7)', async () => {
     const record = {
       sbtId: 'SBT-dlq',
       mintRequestId: 'SBT-MINT-dlq',
       projectId: 'proj-1',
       organizationId: 'org-1',
       beneficiaryAddress: '0x1234567890123456789012345678901234567890',
-      attemptNumber: 6,
+      attemptNumber: 7,
       createdAt: new Date()
     } as any;
     (findImpactSbtMetadataByMintRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(record);
@@ -669,7 +714,7 @@ describe('sbtMintService - handleSbtMintFailure', () => {
     (markImpactSbtAsDlq as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'DLQ' } as any);
     (createSbtMintDlqEntry as ReturnType<typeof vi.fn>).mockResolvedValue({ dlqId: 'DLQ-1' } as any);
 
-    const result = await handleSbtMintFailure('SBT-MINT-dlq', 6, 'All retries exhausted');
+    const result = await handleSbtMintFailure('SBT-MINT-dlq', 7, 'All retries exhausted');
 
     expect(result.willRetry).toBe(false);
     expect(result.movedToDlq).toBe(true);
@@ -802,6 +847,98 @@ describe('sbtMintService - recoverStuckSbtMints', () => {
     vi.useRealTimers();
   });
 
+  it('reconcile late confirmation ghi CONFIRMED mà không broadcast mint lại', async () => {
+    const submittedRecord = {
+      sbtId: 'SBT-late-confirmed',
+      mintRequestId: 'SBT-MINT-late-confirmed',
+      projectId: 'proj-1',
+      organizationId: 'org-1',
+      beneficiaryAddress: '0x1234567890123456789012345678901234567890',
+      imageCid: 'QmImage',
+      tokenUri: 'ipfs://QmMetadata',
+      milestone: 2,
+      beneficiaryCount: 1,
+      status: 'SUBMITTED',
+      attemptNumber: 1,
+      transactionHash: '0xlate-confirmed',
+      onChainTokenId: null
+    } as any;
+    const iface = new ethers.Interface([
+      'event SBTMinted(address indexed to, uint256 indexed tokenId, string tokenURI_)'
+    ]);
+    const encoded = iface.encodeEventLog('SBTMinted', [
+      submittedRecord.beneficiaryAddress,
+      BigInt(77),
+      submittedRecord.tokenUri
+    ]);
+    (findImpactSbtMetadataByMintRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(submittedRecord);
+    providerMock.getTransactionReceipt.mockResolvedValue({
+      status: 1,
+      blockNumber: 700,
+      logs: [{ address: '0xContractAddress', topics: encoded.topics, data: encoded.data }]
+    });
+    (markImpactSbtAsConfirmed as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'CONFIRMED' } as any);
+
+    await expect(reconcileSubmittedSbtMint(submittedRecord.mintRequestId)).resolves.toBe('CONFIRMED');
+
+    expect(markImpactSbtAsConfirmed).toHaveBeenCalledWith(submittedRecord.mintRequestId, expect.objectContaining({
+      onChainTokenId: 77,
+      blockNumber: 700
+    }));
+    expect(getWritableImpactSbtContract).not.toHaveBeenCalled();
+    expect(sbtEvents.emit).toHaveBeenCalledWith('sbt.minted', expect.objectContaining({
+      transactionHash: submittedRecord.transactionHash,
+      onChainTokenId: 77
+    }));
+  });
+
+  it('reconcile receipt revert chuyển sang failure/DLQ mà không resend nonce', async () => {
+    const submittedRecord = {
+      sbtId: 'SBT-late-revert',
+      mintRequestId: 'SBT-MINT-late-revert',
+      projectId: 'proj-1',
+      organizationId: 'org-1',
+      beneficiaryAddress: '0x1234567890123456789012345678901234567890',
+      status: 'SUBMITTED',
+      attemptNumber: 7,
+      transactionHash: '0xlate-revert',
+      createdAt: new Date('2026-08-17T00:00:00Z'),
+      reRunCount: 0
+    } as any;
+    (findImpactSbtMetadataByMintRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(submittedRecord);
+    providerMock.getTransactionReceipt.mockResolvedValue({ status: 0, blockNumber: 701, logs: [] });
+    (markImpactSbtAsFailed as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'FAILED' } as any);
+    (markImpactSbtAsDlq as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'DLQ' } as any);
+
+    await expect(reconcileSubmittedSbtMint(submittedRecord.mintRequestId)).resolves.toBe('FAILED');
+
+    expect(markImpactSbtAsFailed).toHaveBeenCalledWith(submittedRecord.mintRequestId, expect.objectContaining({ attemptNumber: 7 }));
+    expect(markImpactSbtAsDlq).toHaveBeenCalledWith(submittedRecord.mintRequestId, expect.objectContaining({ attemptNumber: 7 }));
+    expect(getWritableImpactSbtContract).not.toHaveBeenCalled();
+  });
+
+  it('bỏ qua side effect khi failure transition đã được reconciler khác claim', async () => {
+    const submittedRecord = {
+      sbtId: 'SBT-race',
+      mintRequestId: 'SBT-MINT-race',
+      projectId: 'proj-1',
+      organizationId: 'org-1',
+      beneficiaryAddress: '0x1234567890123456789012345678901234567890',
+      status: 'SUBMITTED',
+      attemptNumber: 1,
+      transactionHash: '0xrace'
+    } as any;
+    (findImpactSbtMetadataByMintRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(submittedRecord);
+    providerMock.getTransactionReceipt.mockResolvedValue({ status: 0, blockNumber: 702, logs: [] });
+    (markImpactSbtAsFailed as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+
+    await expect(reconcileSubmittedSbtMint(submittedRecord.mintRequestId)).resolves.toBe('FAILED');
+
+    expect(markImpactSbtAsDlq).not.toHaveBeenCalled();
+    expect(sbtEvents.emit).not.toHaveBeenCalledWith('sbt.mint-failed', expect.anything());
+    expect(enqueueSbtMint).not.toHaveBeenCalled();
+  });
+
   it('trả về {recovered:0, enqueued:0} khi không có candidates', async () => {
     (findImpactSbtNeedingRecovery as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
@@ -811,7 +948,7 @@ describe('sbtMintService - recoverStuckSbtMints', () => {
     expect(result.enqueued).toBe(0);
   });
 
-  it('mark SUBMITTED > 5min thành FAILED rồi enqueue', async () => {
+  it('không auto-fail SUBMITTED khi receipt chưa có, dù quá 5 phút', async () => {
     const oldDate = new Date('2025-01-01T11:54:00Z'); // 6 phút trước
     const submittedRecord = {
       sbtId: 'SBT-stuck',
@@ -822,18 +959,13 @@ describe('sbtMintService - recoverStuckSbtMints', () => {
       transactionHash: '0xstucktx'
     } as any;
     (findImpactSbtNeedingRecovery as ReturnType<typeof vi.fn>).mockResolvedValue([submittedRecord]);
-    (getSbtMintJobIndexByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(new Map([['SBT-MINT-stuck', 0]]));
-    (markImpactSbtAsFailed as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'FAILED' } as any);
-    (enqueueSbtMint as ReturnType<typeof vi.fn>).mockResolvedValue({ jobId: 'job-stuck', enqueued: true });
+    providerMock.getTransactionReceipt.mockResolvedValue(null);
 
     const result = await recoverStuckSbtMints(15);
 
-    expect(markImpactSbtAsFailed).toHaveBeenCalledWith('SBT-MINT-stuck', expect.objectContaining({
-      attemptNumber: 1,
-      errorMessage: expect.stringContaining('auto-fail')
-    }));
-    // Status đã chuyển thành FAILED nên enqueue tiếp
-    expect(result.enqueued).toBe(1);
+    expect(markImpactSbtAsFailed).not.toHaveBeenCalled();
+    expect(enqueueSbtMint).not.toHaveBeenCalled();
+    expect(result.enqueued).toBe(0);
   });
 
   it('skip SUBMITTED < 5min (không enqueue)', async () => {
@@ -847,7 +979,7 @@ describe('sbtMintService - recoverStuckSbtMints', () => {
       transactionHash: '0xrecenttx'
     } as any;
     (findImpactSbtNeedingRecovery as ReturnType<typeof vi.fn>).mockResolvedValue([recentRecord]);
-    (getSbtMintJobIndexByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(new Map([['SBT-MINT-recent', 0]]));
+    providerMock.getTransactionReceipt.mockResolvedValue(null);
 
     const result = await recoverStuckSbtMints(15);
 
@@ -865,7 +997,7 @@ describe('sbtMintService - recoverStuckSbtMints', () => {
       submittedAt: null
     } as any;
     (findImpactSbtNeedingRecovery as ReturnType<typeof vi.fn>).mockResolvedValue([pendingRecord]);
-    (getSbtMintJobIndexByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(new Map()); // empty — no jobs
+    (countPendingSbtMintJobsByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(0);
     (enqueueSbtMint as ReturnType<typeof vi.fn>).mockResolvedValue({ jobId: 'job-pending', enqueued: true });
 
     const result = await recoverStuckSbtMints(15);
@@ -882,6 +1014,32 @@ describe('sbtMintService - recoverStuckSbtMints', () => {
     expect(result.enqueued).toBe(1);
   });
 
+  it('release expired SUBMITTING lease before nonce reservation and enqueue again', async () => {
+    const submittingRecord = {
+      sbtId: 'SBT-submitting-expired',
+      mintRequestId: 'SBT-MINT-submitting-expired',
+      status: 'SUBMITTING',
+      attemptNumber: 1,
+      transactionNonce: null,
+      transactionHash: null,
+      submissionLeaseExpiresAt: new Date(Date.now() - 60_000)
+    } as any;
+    const releasedRecord = { ...submittingRecord, status: 'PENDING' };
+    (findImpactSbtNeedingRecovery as ReturnType<typeof vi.fn>).mockResolvedValue([submittingRecord]);
+    (releaseExpiredSbtSubmissionWithoutNonce as ReturnType<typeof vi.fn>).mockResolvedValue(releasedRecord);
+    (countPendingSbtMintJobsByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(0);
+    (enqueueSbtMint as ReturnType<typeof vi.fn>).mockResolvedValue({ jobId: 'job-recovered', enqueued: true });
+
+    const result = await recoverStuckSbtMints(15);
+
+    expect(releaseExpiredSbtSubmissionWithoutNonce).toHaveBeenCalledWith(
+      submittingRecord.mintRequestId,
+      'Submission lease expired before nonce reservation.'
+    );
+    expect(enqueueSbtMint).toHaveBeenCalledWith(expect.objectContaining({ attemptNumber: 2 }), { delay: 0 });
+    expect(result.enqueued).toBe(1);
+  });
+
   it('skip PENDING records khi jobIndex chứa mintRequestId (có job đang chạy/chờ)', async () => {
     const pendingRecord = {
       sbtId: 'SBT-has-job',
@@ -891,7 +1049,7 @@ describe('sbtMintService - recoverStuckSbtMints', () => {
       submittedAt: null
     } as any;
     (findImpactSbtNeedingRecovery as ReturnType<typeof vi.fn>).mockResolvedValue([pendingRecord]);
-    (getSbtMintJobIndexByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(new Map([['SBT-MINT-has-job', 1]])); // 1 job đang chờ
+    (countPendingSbtMintJobsByRequestId as ReturnType<typeof vi.fn>).mockResolvedValue(1); // 1 job deterministic đang chờ
 
     const result = await recoverStuckSbtMints(15);
 

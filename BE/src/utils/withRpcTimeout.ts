@@ -24,12 +24,20 @@ export function withRpcTimeout<T>(
     promise.then(
       value => {
         clearTimeout(timeout);
-        if (timedOut) return;
+        if (timedOut) {
+          // Promise provider không thể abort từ wrapper; giảm gauge khi request nền thực sự settle.
+          orphanedRpcPromiseCount = Math.max(0, orphanedRpcPromiseCount - 1);
+          return;
+        }
         resolve(value);
       },
       error => {
         clearTimeout(timeout);
-        if (timedOut) return;
+        if (timedOut) {
+          // Cả nhánh resolve và reject đều phải giải phóng counter để metric không tăng vĩnh viễn.
+          orphanedRpcPromiseCount = Math.max(0, orphanedRpcPromiseCount - 1);
+          return;
+        }
         reject(error);
       }
     );

@@ -13,10 +13,10 @@ import {
  * SUBMITTED : tx đã gửi lên blockchain, đang chờ confirm
  * CONFIRMED : tx đã được mine on-chain, token đã mint thành công
  * FAILED    : tx revert hoặc RPC lỗi — sẽ retry theo backoff
- * DLQ       : đã hết retry (6 lần) — chờ admin re-run job
+ * DLQ       : đã hết 7 attempt (1 attempt đầu + 6 retry) — chờ admin re-run job
  * BLOCKED   : mint bị chặn (chưa có donor address) — chờ implement C4
  */
-export type ImpactSbtMintStatus = 'PENDING' | 'SUBMITTED' | 'CONFIRMED' | 'FAILED' | 'DLQ' | 'BLOCKED';
+export type ImpactSbtMintStatus = 'PENDING' | 'SUBMITTING' | 'SUBMITTED' | 'CONFIRMED' | 'FAILED' | 'DLQ' | 'BLOCKED';
 
 /**
  * Bản ghi metadata cho mỗi SBT.
@@ -24,7 +24,7 @@ export type ImpactSbtMintStatus = 'PENDING' | 'SUBMITTED' | 'CONFIRMED' | 'FAILE
  * mà không phải đọc IPFS mỗi lần.
  *
  * Mỗi lần Oracle verify thành công → tạo 1 record ở trạng thái PENDING → worker mint() on-chain
- * → update SUBMITTED/CONFIRMED. Khi fail hết 6 retry → chuyển DLQ nhưng vẫn giữ record (không xóa).
+ * → update SUBMITTED/CONFIRMED. Khi fail hết 7 attempt → chuyển DLQ nhưng vẫn giữ record (không xóa).
  *
  * Lưu ý về 2-ID pattern:
  * - sbtId: UUID bản thân record metadata (dùng để query detail từ admin UI, định danh bản ghi độc lập)
@@ -50,10 +50,13 @@ export type ImpactSbtMetadataRecord = {
   imageCid: string;                       // IPFS CID ảnh minh chứng
   tokenUri: string;                       // URI metadata IPFS đầy đủ (ipfs://...)
   status: ImpactSbtMintStatus;
-  attemptNumber: number;                  // Số lần đã thử (1..6, hoặc 0 nếu chưa chạy)
+  attemptNumber: number;                  // Số attempt đã chạy (1..7, hoặc 0 nếu chưa chạy)
   lastErrorMessage: string | null;        // Lỗi của attempt gần nhất
   onChainTokenId: number | null;          // tokenId thật trên contract (set khi CONFIRMED)
   transactionHash: string | null;         // Tx hash gửi mint (set khi SUBMITTED)
+  transactionNonce?: number | null;       // Nonce EOA đã reserve cho attempt hiện tại
+  submissionLeaseOwner?: string | null;   // Worker lease owner khi đang SUBMITTING
+  submissionLeaseExpiresAt?: Date | null; // Lease timeout để reconciler xử lý crash
   blockNumber: number | null;             // Block number confirm
   confirmedAt: Date | null;               // Thời điểm CONFIRMED
   onChainTokenStatus?: SbtTokenStatusName | null;
@@ -98,7 +101,7 @@ const impactSbtMetadataSchema = new Schema<ImpactSbtMetadataRecord>(
     status: {
       type: String,
       required: true,
-      enum: ['PENDING', 'SUBMITTED', 'CONFIRMED', 'FAILED', 'DLQ', 'BLOCKED'],
+      enum: ['PENDING', 'SUBMITTING', 'SUBMITTED', 'CONFIRMED', 'FAILED', 'DLQ', 'BLOCKED'],
       default: 'PENDING',
       index: true
     },
@@ -106,6 +109,9 @@ const impactSbtMetadataSchema = new Schema<ImpactSbtMetadataRecord>(
     lastErrorMessage: { type: String, default: null },
     onChainTokenId: { type: Number, default: null },
     transactionHash: { type: String, default: null },
+    transactionNonce: { type: Number, default: null, min: 0 },
+    submissionLeaseOwner: { type: String, default: null, index: true },
+    submissionLeaseExpiresAt: { type: Date, default: null, index: true },
     blockNumber: { type: Number, default: null },
     confirmedAt: { type: Date, default: null },
     onChainTokenStatus: {
@@ -223,6 +229,9 @@ export async function createBlockedImpactSbtMetadata(
     lastErrorMessage: 'NO_DONOR_ADDRESS: chưa có donor address từ oracle.verified event',
     onChainTokenId: null,
     transactionHash: null,
+    transactionNonce: null,
+    submissionLeaseOwner: null,
+    submissionLeaseExpiresAt: null,
     blockNumber: null,
     confirmedAt: null,
     submittedAt: null,
@@ -425,6 +434,48 @@ export async function updateImpactSbtOnChainStatus(
   ).lean().exec();
 }
 
+/** Claim atomic một mint attempt trước khi gọi RPC, ngăn hai worker broadcast cùng mintRequestId. */
+export async function claimImpactSbtForSubmission(
+  mintRequestId: string,
+  payload: { attemptNumber: number; leaseOwner: string; leaseExpiresAt: Date }
+): Promise<ImpactSbtMetadataRecord | null> {
+  return ImpactSbtMetadataMongoModel.findOneAndUpdate(
+    {
+      mintRequestId,
+      $or: [
+        { status: { $in: ['PENDING', 'FAILED'] } },
+        { status: 'SUBMITTING', submissionLeaseExpiresAt: { $lte: new Date() } }
+      ]
+    },
+    {
+      $set: {
+        status: 'SUBMITTING',
+        attemptNumber: payload.attemptNumber,
+        submissionLeaseOwner: payload.leaseOwner,
+        submissionLeaseExpiresAt: payload.leaseExpiresAt,
+        transactionHash: null,
+        transactionNonce: null,
+        submittedAt: null,
+        lastErrorMessage: null
+      }
+    },
+    { returnDocument: 'after' }
+  ).lean().exec();
+}
+
+/** Ghi nonce đã reserve vào đúng lease trước khi broadcast để reconciler xử lý crash an toàn. */
+export async function reserveImpactSbtSubmissionNonce(
+  mintRequestId: string,
+  leaseOwner: string,
+  transactionNonce: number
+): Promise<ImpactSbtMetadataRecord | null> {
+  return ImpactSbtMetadataMongoModel.findOneAndUpdate(
+    { mintRequestId, status: 'SUBMITTING', submissionLeaseOwner: leaseOwner },
+    { $set: { transactionNonce } },
+    { returnDocument: 'after' }
+  ).lean().exec();
+}
+
 /**
  * Lấy danh sách SBT theo trạng thái (PENDING/SUBMITTED/FAILED/DLQ) cho admin/debug.
  * Mục đích: admin UI xem pending mint hoặc stuck transactions.
@@ -451,19 +502,24 @@ export async function markImpactSbtAsSubmitted(
   mintRequestId: string,
   payload: {
     transactionHash: string;
+    transactionNonce: number;
     attemptNumber: number;
     submittedAt: Date;
+    leaseOwner: string;
   }
 ): Promise<ImpactSbtMetadataRecord | null> {
   return ImpactSbtMetadataMongoModel.findOneAndUpdate(
-    { mintRequestId, status: { $in: ['PENDING', 'FAILED'] } },
+    { mintRequestId, status: 'SUBMITTING', submissionLeaseOwner: payload.leaseOwner },
     {
       $set: {
         status: 'SUBMITTED',
         transactionHash: payload.transactionHash,
+        transactionNonce: payload.transactionNonce,
         attemptNumber: payload.attemptNumber,
         submittedAt: payload.submittedAt,
-        lastErrorMessage: null
+        lastErrorMessage: null,
+        submissionLeaseOwner: null,
+        submissionLeaseExpiresAt: null
       }
     },
     { returnDocument: 'after' }
@@ -491,7 +547,9 @@ export async function markImpactSbtAsConfirmed(
         onChainTokenId: payload.onChainTokenId,
         blockNumber: payload.blockNumber,
         confirmedAt: payload.confirmedAt,
-        lastErrorMessage: null
+        lastErrorMessage: null,
+        submissionLeaseOwner: null,
+        submissionLeaseExpiresAt: null
       }
     },
     { returnDocument: 'after' }
@@ -511,12 +569,39 @@ export async function markImpactSbtAsFailed(
   }
 ): Promise<ImpactSbtMetadataRecord | null> {
   return ImpactSbtMetadataMongoModel.findOneAndUpdate(
-    { mintRequestId, status: { $in: ['PENDING', 'SUBMITTED', 'FAILED'] } },
+    { mintRequestId, status: { $in: ['PENDING', 'SUBMITTING', 'SUBMITTED'] } },
     {
       $set: {
         status: 'FAILED',
         attemptNumber: payload.attemptNumber,
-        lastErrorMessage: payload.errorMessage
+        lastErrorMessage: payload.errorMessage,
+        submissionLeaseOwner: null,
+        submissionLeaseExpiresAt: null
+      }
+    },
+    { returnDocument: 'after' }
+  ).lean().exec();
+}
+
+/** Giải phóng lease đã hết hạn trước broadcast khi chưa reserve nonce, bảo đảm recovery có thể thử lại an toàn. */
+export async function releaseExpiredSbtSubmissionWithoutNonce(
+  mintRequestId: string,
+  errorMessage: string
+): Promise<ImpactSbtMetadataRecord | null> {
+  return ImpactSbtMetadataMongoModel.findOneAndUpdate(
+    {
+      mintRequestId,
+      status: 'SUBMITTING',
+      transactionHash: null,
+      transactionNonce: null,
+      submissionLeaseExpiresAt: { $lte: new Date() }
+    },
+    {
+      $set: {
+        status: 'PENDING',
+        lastErrorMessage: errorMessage,
+        submissionLeaseOwner: null,
+        submissionLeaseExpiresAt: null
       }
     },
     { returnDocument: 'after' }
@@ -524,7 +609,7 @@ export async function markImpactSbtAsFailed(
 }
 
 /**
- * Chuyển metadata sang DLQ sau khi hết 6 retry.
+ * Chuyển metadata sang DLQ sau khi hết 7 attempt.
  * Mục đích: đánh dấu cần admin xử lý. Không xóa record — giữ để audit.
  * Đây là trạng thái cuối cùng nếu không có re-run.
  */
@@ -533,7 +618,7 @@ export async function markImpactSbtAsDlq(
   payload: { dlqAt: Date; errorMessage: string; attemptNumber: number }
 ): Promise<ImpactSbtMetadataRecord | null> {
   return ImpactSbtMetadataMongoModel.findOneAndUpdate(
-    { mintRequestId, status: { $ne: 'CONFIRMED' } },
+    { mintRequestId, status: 'FAILED' },
     {
       $set: {
         status: 'DLQ',
@@ -565,7 +650,10 @@ export async function resetImpactSbtForReRun(
         lastErrorMessage: null,
         dlqAt: null,
         transactionHash: null,
+        transactionNonce: null,
         submittedAt: null,
+        submissionLeaseOwner: null,
+        submissionLeaseExpiresAt: null,
         lastReRunBy: payload.reRunBy,
         lastReRunAt: payload.reRunAt
       },
@@ -588,11 +676,16 @@ export async function findImpactSbtNeedingRecovery(
 ): Promise<ImpactSbtMetadataRecord[]> {
   const cutoffTime = new Date(Date.now() - olderThanMinutes * 60 * 1000);
   return ImpactSbtMetadataMongoModel.find({
-    status: { $in: ['PENDING', 'SUBMITTED', 'FAILED'] },
+    status: { $in: ['PENDING', 'SUBMITTING', 'SUBMITTED', 'FAILED'] },
     updatedAt: { $lt: cutoffTime }
   })
     .sort({ updatedAt: 1 })
     .limit(limit)
     .lean()
     .exec();
+}
+
+/** Đếm SBT CONFIRMED của project để sinh milestone canonical trong trigger Oracle. */
+export async function countConfirmedImpactSbtByProjectId(projectId: string): Promise<number> {
+  return ImpactSbtMetadataMongoModel.countDocuments({ projectId, status: 'CONFIRMED' }).exec();
 }

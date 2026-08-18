@@ -6,24 +6,10 @@ import { z } from 'zod';
  *
  * Ràng buộc:
  * - verificationId: unique ID từ oracle verification results
- * - projectIdNumeric: uint256 tương ứng projectId trên contract
- * - beneficiaryAddress: EVM address hợp lệ (sẽ normalize về lowercase)
- * - Các trường GPS/imageCid/tokenUri phải là chuỗi không rỗng
+ * - Không nhận beneficiary/GPS/token URI từ request; các giá trị mint phải được derive từ DB.
  */
 export const sbtTriggerBodySchema = z.object({
-  verificationId: z.string().trim().min(1, 'verificationId là bắt buộc.'),
-  projectId: z.string().trim().min(1, 'projectId là bắt buộc.'),
-  organizationId: z.string().trim().min(1, 'organizationId là bắt buộc.'),
-  beneficiaryAddress: z.string()
-    .trim()
-    .min(1, 'beneficiaryAddress là bắt buộc.')
-    .regex(/^0x[a-fA-F0-9]{40}$/, 'beneficiaryAddress phải là địa chỉ EVM hợp lệ (0x + 40 hex).'),
-  projectIdNumeric: z.number().int().nonnegative('projectIdNumeric phải là số nguyên không âm.'),
-  milestone: z.number().int().nonnegative('milestone phải là số nguyên không âm.').default(0),
-  beneficiaryCount: z.number().int().nonnegative('beneficiaryCount phải là số nguyên không âm.').default(0),
-  gpsCoordinates: z.string().default(''),
-  imageCid: z.string().trim().min(1, 'imageCid là bắt buộc.'),
-  tokenUri: z.string().trim().min(1, 'tokenUri là bắt buộc.')
+  verificationId: z.string().trim().min(1, 'verificationId là bắt buộc.')
 });
 
 export type SbtTriggerBody = z.infer<typeof sbtTriggerBodySchema>;

@@ -8,6 +8,8 @@ import { findProjectNamesByProjectIdList } from '../models/projectModel';
 import { extractAuditRequestContext } from '../utils/auditRequestContext';
 import {
   findSbtMintDlqByStatus,
+  findSbtMintDlqByStatusCursor,
+  decodeSbtMintDlqCursor,
   countSbtMintDlqByStatus,
   type SbtMintDlqRecord
 } from '../models/sbtMintDlqModel';
@@ -34,6 +36,8 @@ function toSbtMintDlqListEntry(entry: SbtMintDlqRecord, projectName: string | nu
     recoveredAt: entry.recoveredAt,
     recoveredBy: entry.recoveredBy,
     recoveryAttemptNumber: entry.recoveryAttemptNumber,
+    lastRecoveryError: entry.lastRecoveryError ?? null,
+    lastRecoveryAt: entry.lastRecoveryAt ?? null,
     status: entry.status,
     createdAt: entry.createdAt,
     updatedAt: entry.updatedAt
@@ -46,23 +50,37 @@ function toSbtMintDlqListEntry(entry: SbtMintDlqRecord, projectName: string | nu
  * GET /api/sbt/dlq
  * Lấy danh sách DLQ entries (phân trang) cho admin UI.
  * Actor: Admin hệ thống.
- * Query params: page, limit, status (optional, default 'OPEN').
+ * Query params: page hoặc cursor, limit, status (optional, default 'OPEN').
  */
 export async function handleGetSbtDlqList(req: Request, res: Response): Promise<void> {
   try {
     // req.query đã được validate + coerce bởi createZodValidatorMiddleware (paginationQuerySchema)
     // Dùng validated data từ req.query thay vì manual Number() coercion — I-A5 fix
-    const validatedQuery = req.query as unknown as { page: number; limit: number; status?: 'OPEN' | 'RECOVERED' | 'ABANDONED' };
+    const validatedQuery = req.query as unknown as {
+      page: number;
+      limit: number;
+      cursor?: string;
+      status?: 'OPEN' | 'RECOVERED' | 'ABANDONED';
+    };
     const page = Math.max(1, Math.floor(validatedQuery.page)) || 1;
     const limit = Math.max(1, Math.min(100, Math.floor(validatedQuery.limit))) || 20;
     const skip = (page - 1) * limit;
     const status = validatedQuery.status ?? 'OPEN';
+    const cursor = validatedQuery.cursor?.trim() || undefined;
 
-    const [entries, totalCount, openCount] = await Promise.all([
-      findSbtMintDlqByStatus(status, limit, skip),
+    if (cursor && !decodeSbtMintDlqCursor(cursor)) {
+      sendErrorResponse(res, 400, 'DLQ cursor không hợp lệ.', 'VALIDATION_ERROR');
+      return;
+    }
+
+    const [listResult, totalCount, openCount] = await Promise.all([
+      cursor
+        ? findSbtMintDlqByStatusCursor(status, limit, cursor)
+        : findSbtMintDlqByStatus(status, limit, skip).then(entries => ({ entries, nextCursor: null })),
       countSbtMintDlqByStatus(status),
       countSbtMintDlqByStatus('OPEN')
     ]);
+    const { entries, nextCursor } = listResult;
 
     let entriesWithProjectNames: SbtMintDlqListEntry[];
     try {
@@ -86,7 +104,8 @@ export async function handleGetSbtDlqList(req: Request, res: Response): Promise<
         page,
         limit,
         total: totalCount,
-        totalPages: Math.ceil(totalCount / limit)
+        totalPages: Math.ceil(totalCount / limit),
+        nextCursor
       },
       openCount
     });

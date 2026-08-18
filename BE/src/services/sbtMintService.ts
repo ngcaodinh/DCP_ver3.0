@@ -46,9 +46,12 @@ export { extractErrorMessage };
 import {
   createImpactSbtMetadata,
   findImpactSbtMetadataByMintRequestId,
+  claimImpactSbtForSubmission,
+  reserveImpactSbtSubmissionNonce,
   markImpactSbtAsSubmitted,
   markImpactSbtAsConfirmed,
   markImpactSbtAsFailed,
+  releaseExpiredSbtSubmissionWithoutNonce,
   markImpactSbtAsDlq,
   resetImpactSbtForReRun,
   type ImpactSbtMetadataRecord
@@ -56,9 +59,16 @@ import {
 import {
   createSbtMintDlqEntry,
   markSbtMintDlqAsRecovered,
-  findSbtMintDlqByMintRequestId
+  findSbtMintDlqByMintRequestId,
+  markSbtMintDlqRerunStarted,
+  markSbtMintDlqRerunFailed
 } from '../models/sbtMintDlqModel';
-import { getWritableImpactSbtContract } from '../config/sbtContract';
+import {
+  getWritableImpactSbtContract,
+  getReadOnlyImpactSbtProvider,
+  getImpactSbtMintSignerAddress
+} from '../config/sbtContract';
+import { reserveNextSbtMintNonce } from '../models/sbtMintNonceModel';
 import {
   sbtEvents,
   type SbtMintedEventPayload,
@@ -68,11 +78,9 @@ import {
 import {
   enqueueSbtMint,
   countPendingSbtMintJobsByRequestId,
-  getSbtMintJobIndexByRequestId,
   removePendingSbtMintJobsByRequestId,
   SBT_MINT_RETRY_DELAYS_MS,
-  SBT_MINT_MAX_ATTEMPTS,
-  SBT_MINT_STUCK_TX_THRESHOLD_MS
+  SBT_MINT_MAX_ATTEMPTS
 } from '../queues/sbtMintQueue';
 import { findImpactSbtNeedingRecovery } from '../models/impactSbtMetadataModel';
 import { invalidateSbtGalleryTotalCache } from './sbtMetadataCacheService';
@@ -95,6 +103,35 @@ const SBT_MINTED_EVENT_IFACE = new ethers.Interface([
   'event SBTMinted(address indexed to, uint256 indexed tokenId, string tokenURI_)'
 ]);
 
+const SBT_MINT_RECEIPT_WAIT_TIMEOUT_MS = 60_000;
+const SBT_SUBMISSION_LEASE_MS = 120_000;
+
+/** Lỗi persistence sau broadcast không được retry vì retry có thể tạo transaction thứ hai. */
+export class SbtSubmissionPersistenceError extends Error {
+  public readonly doNotRetry = true;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'SbtSubmissionPersistenceError';
+  }
+}
+
+/** Chờ receipt có timeout để worker slot được giải phóng; reconciler tiếp tục theo dõi tx hash. */
+async function waitForReceiptWithTimeout(
+  txResponse: ethers.TransactionResponse,
+  confirmations: number
+): Promise<ethers.TransactionReceipt | null> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<null>(resolve => {
+    timeoutHandle = setTimeout(() => resolve(null), SBT_MINT_RECEIPT_WAIT_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([txResponse.wait(confirmations), timeoutPromise]);
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
+}
+
 // ============================================================
 // SECTION 1: Mint Request Creation (createSbtMintRequest)
 // ============================================================
@@ -115,6 +152,38 @@ export type CreateSbtMintRequestInput = {
   imageCid: string;
   tokenUri: string;
 };
+
+/** Bảo đảm record cũ vẫn có job runnable sau khi event hoặc lần ghi trạng thái trước đó bị mất. */
+async function ensureExistingSbtMintDispatch(
+  record: ImpactSbtMetadataRecord
+): Promise<{ jobId: string | number | undefined; enqueued: boolean }> {
+  if (record.status !== 'PENDING' && record.status !== 'FAILED') {
+    return { jobId: undefined, enqueued: false };
+  }
+
+  const pendingJobCount = await countPendingSbtMintJobsByRequestId(record.mintRequestId);
+  if (pendingJobCount > 0) {
+    return { jobId: undefined, enqueued: true };
+  }
+
+  if (record.status === 'FAILED' && record.attemptNumber >= SBT_MINT_MAX_ATTEMPTS) {
+    return { jobId: undefined, enqueued: false };
+  }
+
+  const currentAttempt = Number.isFinite(record.attemptNumber) ? record.attemptNumber : 0;
+  const nextAttempt = record.status === 'PENDING'
+    ? Math.max(1, currentAttempt)
+    : Math.min(currentAttempt + 1, SBT_MINT_MAX_ATTEMPTS);
+  return enqueueSbtMint(
+    {
+      mintRequestId: record.mintRequestId,
+      sbtId: record.sbtId,
+      attemptNumber: nextAttempt,
+      enqueuedBy: 'oracle_event'
+    },
+    { priority: 5 }
+  );
+}
 
 /**
  * Validate địa chỉ EVM — throws nếu không hợp lệ.
@@ -178,6 +247,9 @@ export async function createSbtMintRequest(
     lastErrorMessage: null,
     onChainTokenId: null,
     transactionHash: null,
+    transactionNonce: null,
+    submissionLeaseOwner: null,
+    submissionLeaseExpiresAt: null,
     blockNumber: null,
     confirmedAt: null,
     submittedAt: null,
@@ -194,17 +266,19 @@ export async function createSbtMintRequest(
   // Kiểm tra duplicate: nếu returned record có sbtId khác với sbtId vừa generate,
   // có nghĩa là đã có record tồn tại (upsert không insert)
   if (record.sbtId !== sbtId) {
-    // Duplicate — trả về existing record mà không enqueue
+    const dispatchResult = await ensureExistingSbtMintDispatch(record);
+    // Duplicate vẫn phải đảm bảo dispatch; nếu job cũ đã mất, enqueue lại theo idempotency key.
     logger.info('SBT mint request đã tồn tại cho verification này — bỏ qua duplicate (atomic upsert).', {
       mintRequestId: record.mintRequestId,
       sbtId: record.sbtId,
       verificationId: input.verificationId,
-      status: record.status
+      status: record.status,
+      enqueued: dispatchResult.enqueued
     });
     return {
       record,
-      jobId: undefined,
-      enqueued: false,
+      jobId: dispatchResult.jobId,
+      enqueued: dispatchResult.enqueued,
       duplicate: true
     };
   }
@@ -341,7 +415,46 @@ export async function executeSbtMint(
   // Nếu thật sự có race giữa 2 jobs retry cùng mintRequestId, transaction on-chain
   // sẽ revert vì duplicate nonce/SUBMITTED state — Bull sẽ retry và lần sau skip nhờ CONFIRMED check.
 
+  const leaseOwner = randomUUID();
+  const claimedRecord = await claimImpactSbtForSubmission(mintRequestId, {
+    attemptNumber,
+    leaseOwner,
+    leaseExpiresAt: new Date(Date.now() + SBT_SUBMISSION_LEASE_MS)
+  });
+  if (!claimedRecord) {
+    const latestRecord = await findImpactSbtMetadataByMintRequestId(mintRequestId);
+    if (latestRecord?.status === 'CONFIRMED' && latestRecord.onChainTokenId !== null) {
+      return {
+        onChainTokenId: latestRecord.onChainTokenId,
+        transactionHash: latestRecord.transactionHash,
+        blockNumber: latestRecord.blockNumber,
+        status: 'CONFIRMED'
+      };
+    }
+    // Worker khác đang giữ lease hoặc đã broadcast; tuyệt đối không gọi mint() lần hai.
+    return {
+      onChainTokenId: null,
+      transactionHash: latestRecord?.transactionHash ?? null,
+      blockNumber: latestRecord?.blockNumber ?? null,
+      status: 'SUBMITTED'
+    };
+  }
+
   const contract = getWritableContract();
+  const provider = getReadOnlyImpactSbtProvider();
+  const signerAddress = getImpactSbtMintSignerAddress();
+  const chainPendingNonce = await provider.getTransactionCount(signerAddress, 'pending');
+  const transactionNonce = await reserveNextSbtMintNonce(signerAddress, chainPendingNonce);
+  const nonceReservation = await reserveImpactSbtSubmissionNonce(
+    mintRequestId,
+    leaseOwner,
+    transactionNonce
+  );
+  if (!nonceReservation) {
+    throw new SbtSubmissionPersistenceError(
+      `Không ghi được nonce reservation cho mintRequestId=${mintRequestId}; dừng để reconciler xử lý.`
+    );
+  }
 
   // Ghi chú logic phức tạp: bước gọi contract có thể fail vì nhiều lý do:
   // - gas estimation fail (contract paused, thiếu ORACLE_ROLE)
@@ -382,7 +495,7 @@ export async function executeSbtMint(
     record.gpsCoordinates,
     record.imageCid,
     record.tokenUri,
-    { gasLimit }
+    { gasLimit, nonce: transactionNonce }
   );
 
   // ethers v6 ContractFunction trả về transaction response với .hash + .wait()
@@ -393,11 +506,18 @@ export async function executeSbtMint(
   validateSubmittedAtNotFuture(submittedAt);
 
   // Cập nhật SUBMITTED trước khi chờ receipt — an toàn nếu worker crash sau bước này
-  await markImpactSbtAsSubmitted(mintRequestId, {
+  const submittedRecord = await markImpactSbtAsSubmitted(mintRequestId, {
     transactionHash: txHash,
+    transactionNonce,
     attemptNumber,
-    submittedAt
+    submittedAt,
+    leaseOwner
   });
+  if (!submittedRecord) {
+    throw new SbtSubmissionPersistenceError(
+      `Không ghi được tx hash sau broadcast cho mintRequestId=${mintRequestId}; dừng retry để tránh double-mint.`
+    );
+  }
 
   logger.info('Đã submit tx mint SBT — đang chờ confirm.', {
     mintRequestId,
@@ -407,10 +527,20 @@ export async function executeSbtMint(
   });
 
   // [I-A4] Dùng SBT_MINT_CONFIRMATION_BLOCKS từ env (default 2) cho giao dịch tài chính
-  const receipt = await txResponse.wait(SBT_MINT_CONFIRMATION_BLOCKS);
+  const receipt = await waitForReceiptWithTimeout(txResponse, SBT_MINT_CONFIRMATION_BLOCKS);
 
   if (!receipt) {
-    throw new Error(`Không nhận được receipt cho tx mint SBT (hash=${txHash}).`);
+    logger.warn('Tx mint SBT chưa có receipt trong timeout; reconciler sẽ tiếp tục theo dõi.', {
+      mintRequestId,
+      transactionHash: txHash,
+      timeoutMs: SBT_MINT_RECEIPT_WAIT_TIMEOUT_MS
+    });
+    return {
+      onChainTokenId: null,
+      transactionHash: txHash,
+      blockNumber: null,
+      status: 'SUBMITTED'
+    };
   }
 
   recordBlockchainTransaction({
@@ -429,7 +559,7 @@ export async function executeSbtMint(
   const blockNumber = receipt.blockNumber;
   const confirmedAt = new Date();
 
-  await markImpactSbtAsConfirmed(mintRequestId, {
+  const confirmedRecord = await markImpactSbtAsConfirmed(mintRequestId, {
     onChainTokenId,
     blockNumber,
     confirmedAt
@@ -445,9 +575,22 @@ export async function executeSbtMint(
     });
   }
 
-  // DLQ status check được thực hiện fire-and-forget bên dưới sau khi emit event
+  if (!confirmedRecord) {
+    const latestRecord = await findImpactSbtMetadataByMintRequestId(mintRequestId);
+    if (latestRecord?.status === 'CONFIRMED') {
+      return {
+        onChainTokenId: latestRecord.onChainTokenId,
+        transactionHash: latestRecord.transactionHash,
+        blockNumber: latestRecord.blockNumber,
+        status: 'CONFIRMED'
+      };
+    }
+    throw new SbtSubmissionPersistenceError(
+      `Không ghi được confirmation cho mintRequestId=${mintRequestId}; reconciler sẽ retry reconcile.`
+    );
+  }
 
-  // Emit sbt.minted event để socket + notification forward
+  // Chỉ phát event sau khi trạng thái CONFIRMED đã được ghi bền vững, tránh thông báo mint thành công giả.
   const eventPayload: SbtMintedEventPayload = {
     sbtId: record.sbtId,
     mintRequestId,
@@ -578,11 +721,18 @@ export async function handleSbtMintFailure(
     return { willRetry: false, movedToDlq: false, nextDelayMs: null };
   }
 
-  // Đánh dấu FAILED trong DB
-  await markImpactSbtAsFailed(mintRequestId, {
+  // Atomic transition là barrier chống hai reconciler cùng phát retry/event cho một failure.
+  const failedRecord = await markImpactSbtAsFailed(mintRequestId, {
     attemptNumber,
     errorMessage: safeErrorMessage
   });
+  if (!failedRecord) {
+    logger.info('SBT mint failure đã được xử lý bởi worker/reconciler khác — bỏ qua side effect trùng.', {
+      mintRequestId,
+      attemptNumber
+    });
+    return { willRetry: false, movedToDlq: false, nextDelayMs: null };
+  }
 
   // Emit sbt.mint-failed event cho notification service (không bắt buộc — chỉ alert nếu nhiều fail liên tiếp)
   sbtEvents.emit('sbt.mint-failed', {
@@ -608,11 +758,18 @@ export async function handleSbtMintFailure(
     const dlqAt = new Date();
     const firstAttemptedAt = record.createdAt;
 
-    await markImpactSbtAsDlq(mintRequestId, {
+    const dlqRecord = await markImpactSbtAsDlq(mintRequestId, {
       dlqAt,
       errorMessage: safeErrorMessage,
       attemptNumber
     });
+    if (!dlqRecord) {
+      logger.info('SBT mint DLQ transition đã được xử lý bởi worker/reconciler khác — bỏ qua side effect trùng.', {
+        mintRequestId,
+        attemptNumber
+      });
+      return { willRetry: false, movedToDlq: false, nextDelayMs: null };
+    }
 
     const dlqEntry = await createSbtMintDlqEntry({
       dlqId: `DLQ-${randomUUID()}`,
@@ -626,6 +783,12 @@ export async function handleSbtMintFailure(
       firstAttemptedAt,
       dlqAt
     });
+    if ((failedRecord.reRunCount ?? record.reRunCount ?? 0) > 0) {
+      await markSbtMintDlqRerunFailed(mintRequestId, {
+        failedAt: dlqAt,
+        errorMessage: safeErrorMessage
+      });
+    }
 
     sbtEvents.emit('sbt.mint-dlq', {
       sbtId: record.sbtId,
@@ -758,7 +921,11 @@ export async function rerunSbtMintJob(
       'Không thể reset mint request (có thể đã chuyển CONFIRMED).',
       409,
       'CONFLICT'
-    );
+      );
+    }
+
+    if (record.status === 'DLQ') {
+      await markSbtMintDlqRerunStarted(mintRequestId, { startedAt: reRunAt }, session);
     }
 
     await recordAdminAuditLog({
@@ -804,6 +971,13 @@ export async function rerunSbtMintJob(
     enqueued: dispatched > 0
   }));
 
+  if (!enqueueResult.enqueued && record.status === 'DLQ') {
+    await markSbtMintDlqRerunFailed(mintRequestId, {
+      failedAt: new Date(),
+      errorMessage: 'Không dispatch được admin rerun job vào durable queue.'
+    });
+  }
+
   logger.info('Admin re-run SBT mint job.', {
     mintRequestId,
     sbtId: updatedRecord.sbtId,
@@ -817,6 +991,80 @@ export async function rerunSbtMintJob(
   return { record: updatedRecord, jobId: enqueueResult.jobId, enqueued: enqueueResult.enqueued };
 }
 
+/** Reconcile receipt của SUBMITTED record; không broadcast transaction mới trong mọi nhánh. */
+export async function reconcileSubmittedSbtMint(
+  mintRequestId: string
+): Promise<'PENDING' | 'CONFIRMED' | 'FAILED' | 'UNKNOWN'> {
+  const record = await findImpactSbtMetadataByMintRequestId(mintRequestId);
+  if (!record || record.status === 'CONFIRMED') return 'CONFIRMED';
+  if (record.status !== 'SUBMITTED' || !record.transactionHash) return 'UNKNOWN';
+
+  const provider = getReadOnlyImpactSbtProvider();
+  const receipt = await provider.getTransactionReceipt(record.transactionHash);
+  if (!receipt) return 'PENDING';
+
+  if (receipt.status !== 1) {
+    await handleSbtMintFailure(
+      mintRequestId,
+      record.attemptNumber,
+      `Tx mint SBT revert on-chain (hash=${record.transactionHash}, status=${receipt.status}).`
+    );
+    return 'FAILED';
+  }
+
+  const onChainTokenId = parseSbtMintedTokenId(receipt.logs, record.sbtId);
+  const confirmed = await markImpactSbtAsConfirmed(mintRequestId, {
+    onChainTokenId,
+    blockNumber: receipt.blockNumber,
+    confirmedAt: new Date()
+  });
+  if (!confirmed) {
+    const latest = await findImpactSbtMetadataByMintRequestId(mintRequestId);
+    return latest?.status === 'CONFIRMED' ? 'CONFIRMED' : 'UNKNOWN';
+  }
+
+  try {
+    await invalidateSbtGalleryTotalCache(record.projectId);
+  } catch (error) {
+    logger.warn('Invalidate total gallery SBT thất bại trong reconcile.', {
+      mintRequestId,
+      errorMessage: sanitizeProviderError(error) ?? 'UNKNOWN_ERROR'
+    });
+  }
+
+  const eventPayload: SbtMintedEventPayload = {
+    sbtId: record.sbtId,
+    mintRequestId,
+    projectId: record.projectId,
+    organizationId: record.organizationId,
+    beneficiaryAddress: record.beneficiaryAddress,
+    onChainTokenId,
+    transactionHash: record.transactionHash,
+    blockNumber: receipt.blockNumber,
+    imageCid: record.imageCid,
+    tokenUri: record.tokenUri,
+    milestone: record.milestone,
+    beneficiaryCount: record.beneficiaryCount,
+    mintedAt: new Date()
+  };
+  sbtEvents.emit('sbt.minted', eventPayload);
+  eventLoggerService.logEvent({
+    eventType: 'SBT_MINTED',
+    projectId: eventPayload.projectId,
+    organizationId: eventPayload.organizationId,
+    walletAddress: eventPayload.beneficiaryAddress,
+    timestamp: eventPayload.mintedAt,
+    payload: {
+      tokenId: eventPayload.onChainTokenId,
+      milestone: eventPayload.milestone,
+      beneficiaryCount: eventPayload.beneficiaryCount,
+      sbtId: eventPayload.sbtId,
+      transactionHash: eventPayload.transactionHash
+    }
+  });
+  return 'CONFIRMED';
+}
+
 // ============================================================
 // SECTION 5: Mint Recovery (recoverStuckSbtMints)
 // ============================================================
@@ -826,7 +1074,7 @@ export async function rerunSbtMintJob(
  * Mục đích: an toàn khi:
  * - Redis restart mất queue → re-enqueue
  * - Worker crash giữa chừng → re-enqueue
- * - Tx SUBMITTED > 5 phút chưa confirm → mark FAILED để retry (transaction stuck handling)
+ * - Tx SUBMITTED quá lâu → reconcile receipt; không tự đánh dấu FAILED chỉ vì timeout
  */
 export async function recoverStuckSbtMints(olderThanMinutes: number = 15): Promise<{ recovered: number; enqueued: number }> {
   const candidates = await findImpactSbtNeedingRecovery(olderThanMinutes, 50);
@@ -835,11 +1083,41 @@ export async function recoverStuckSbtMints(olderThanMinutes: number = 15): Promi
     return { recovered: 0, enqueued: 0 };
   }
 
-  // [I5 fix] Batch fetch tất cả jobs 1 lần duy nhất — tránh N+1 Redis calls
-  const jobIndex = await getSbtMintJobIndexByRequestId();
-
   let enqueuedCount = 0;
-  for (const record of candidates) {
+  for (let record of candidates) {
+    if (record.status === 'SUBMITTED') {
+      // Receipt chưa có không đồng nghĩa tx thất bại; giữ SUBMITTED để tránh double-mint.
+      await reconcileSubmittedSbtMint(record.mintRequestId);
+      continue;
+    }
+
+    // SUBMITTING không có tx hash vẫn là trạng thái không chắc chắn sau crash; tuyệt đối không broadcast nonce khác.
+    if (record.status === 'SUBMITTING') {
+      const leaseExpired = record.submissionLeaseExpiresAt instanceof Date
+        && record.submissionLeaseExpiresAt.getTime() <= Date.now();
+      const hasReservedNonce = record.transactionNonce !== null && record.transactionNonce !== undefined;
+      const hasTransactionHash = Boolean(record.transactionHash);
+
+      if (!leaseExpired || hasReservedNonce || hasTransactionHash) {
+      logger.warn('SBT mint đang SUBMITTING nhưng chưa có tx hash; giữ nguyên để operator/reconciler xử lý.', {
+        mintRequestId: record.mintRequestId,
+        sbtId: record.sbtId,
+        transactionNonce: record.transactionNonce ?? undefined,
+        submissionLeaseExpiresAt: record.submissionLeaseExpiresAt?.toISOString()
+      });
+      continue;
+      }
+
+      const releasedRecord = await releaseExpiredSbtSubmissionWithoutNonce(
+        record.mintRequestId,
+        'Submission lease expired before nonce reservation.'
+      );
+      if (!releasedRecord) {
+        continue;
+      }
+      record = releasedRecord;
+    }
+
     // [I5 fix] Guard: nếu record đã đạt MAX_ATTEMPTS thì KHÔNG re-enqueue.
     // Nếu vẫn ở status FAILED (không phải DLQ) thì recovery nên moveToDLQ thay vì retry thêm.
     if (record.attemptNumber >= SBT_MINT_MAX_ATTEMPTS) {
@@ -852,34 +1130,8 @@ export async function recoverStuckSbtMints(olderThanMinutes: number = 15): Promi
       continue;
     }
 
-    // [I5 fix] Tra cứu từ index đã batch-fetch thay vì gọi Redis mỗi iteration
-    const jobCount = jobIndex.get(record.mintRequestId) ?? 0;
-    if (jobCount > 0) {
-      continue;
-    }
-
-    // Nếu SUBMITTED > SBT_MINT_STUCK_TX_THRESHOLD_MS → mark FAILED để retry path xử lý
-    // Lưu ý: Date.now() vs record.submittedAt.getTime() có thể có clock drift < 1s.
-    // Với cron job 15 phút, drift này chấp nhận được. Nếu cần sub-second accuracy,
-    // cần truyền referenceTime từ scheduler hoặc dùng MongoDB server time.
-    if (record.status === 'SUBMITTED' && record.submittedAt) {
-      const stuckMs = Date.now() - record.submittedAt.getTime();
-      if (stuckMs > SBT_MINT_STUCK_TX_THRESHOLD_MS) {
-        await markImpactSbtAsFailed(record.mintRequestId, {
-          attemptNumber: record.attemptNumber,
-          errorMessage: `Tx submitted > ${SBT_MINT_STUCK_TX_THRESHOLD_MS / 60_000} phút chưa confirm (stuck ${Math.round(stuckMs / 1000)}s) — auto-fail để retry.`
-        });
-        logger.warn('SBT mint tx bị stuck — auto-fail để retry.', {
-          mintRequestId: record.mintRequestId,
-          sbtId: record.sbtId,
-          stuckMintTxHash: record.transactionHash ?? undefined,
-          stuckSeconds: Math.round(stuckMs / 1000)
-        });
-      } else {
-        // Vẫn trong ngưỡng — skip, chờ thêm
-        continue;
-      }
-    }
+    const jobCount = await countPendingSbtMintJobsByRequestId(record.mintRequestId);
+    if (jobCount > 0) continue;
 
     // Enqueue retry với attemptNumber = current + 1, bounded không vượt MAX
     // [S1 fix] Nếu current = 5 → nextAttempt = 6 (hợp lệ)

@@ -6,7 +6,8 @@ const mocks = vi.hoisted(() => ({
   scheduleEventRetry: vi.fn(),
   updateMongo: vi.fn(),
   findMetadataByTokenId: vi.fn(),
-  invalidateGalleryTotal: vi.fn()
+  invalidateGalleryTotal: vi.fn(),
+  invalidateToken: vi.fn()
 }));
 
 vi.mock('../../models/sbtStatusProjectionModel', () => ({
@@ -21,7 +22,8 @@ vi.mock('../../models/impactSbtMetadataModel', () => ({
 }));
 
 vi.mock('../../services/sbtMetadataCacheService', () => ({
-  invalidateSbtGalleryTotalCache: mocks.invalidateGalleryTotal
+  invalidateSbtGalleryTotalCache: mocks.invalidateGalleryTotal,
+  invalidateSbtTokenCache: mocks.invalidateToken
 }));
 
 vi.mock('../../config/logger', () => ({
@@ -51,6 +53,7 @@ describe('projectSbtTokenStatusUpdate', () => {
     mocks.markEventApplied.mockResolvedValue(undefined);
     mocks.scheduleEventRetry.mockResolvedValue(undefined);
     mocks.invalidateGalleryTotal.mockResolvedValue(undefined);
+    mocks.invalidateToken.mockResolvedValue(undefined);
   });
 
   it('projects a direct on-chain revoke, invalidates global/project totals, and marks the event applied', async () => {
@@ -65,6 +68,7 @@ describe('projectSbtTokenStatusUpdate', () => {
       }
     }));
     expect(mocks.invalidateGalleryTotal).toHaveBeenCalledWith('project-1');
+    expect(mocks.invalidateToken).toHaveBeenCalledWith(12);
     expect(mocks.markEventApplied).toHaveBeenCalledWith(expect.objectContaining({
       chainId: '490000',
       transactionHash: '0xstatus-event',
@@ -79,6 +83,7 @@ describe('projectSbtTokenStatusUpdate', () => {
 
     expect(mocks.updateMongo).not.toHaveBeenCalled();
     expect(mocks.invalidateGalleryTotal).not.toHaveBeenCalled();
+    expect(mocks.invalidateToken).not.toHaveBeenCalled();
     expect(mocks.markEventApplied).not.toHaveBeenCalled();
   });
 
