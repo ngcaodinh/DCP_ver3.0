@@ -7,6 +7,7 @@ import {
   OrganizationKycSubmission,
   createOrganizationKycSubmission,
   findExistingBankAccountOwner,
+  findFoundationKycSubmissions,
   findLatestSubmissionByOrganizationId,
   findPendingKycSubmissions,
   findSubmissionBySubmissionId,
@@ -271,7 +272,7 @@ async function uploadFileToPinata(file: OrganizationKycFileInput): Promise<strin
  * Hàm upload file với cơ chế retry giới hạn.
  * Mục đích: tăng độ ổn định khi Pinata timeout hoặc lỗi tạm thời.
  */
-async function uploadFileToPinataWithRetry(file: OrganizationKycFileInput): Promise<string> {
+export async function uploadFileToPinataWithRetry(file: OrganizationKycFileInput): Promise<string> {
   let latestUploadError: Error | null = null;
 
   for (let retryAttempt = 1; retryAttempt <= pinataMaximumRetryCount; retryAttempt += 1) {
@@ -394,8 +395,63 @@ export type OrganizationKycReviewResult = {
     previousAccountStatus: AuthUser['accountStatus'];
     updatedAccountStatus: AuthUser['accountStatus'];
     roleUpdated: boolean;
-  };
+  } | null;
 };
+
+/**
+ * Review hồ sơ FOUNDATION chỉ cập nhật trạng thái off-chain và audit log.
+ * Mục đích: bảo đảm quỹ đại diện không bị tìm user, đổi role hoặc gọi contract.
+ */
+async function reviewFoundationKycSubmission(
+  reviewerUserId: string,
+  existingSubmission: OrganizationKycSubmission,
+  reviewPayload: OrganizationKycReviewPayload
+): Promise<OrganizationKycReviewResult> {
+  if (reviewPayload.action !== 'approve' && reviewPayload.action !== 'reject') {
+    throw new Error('Hành động review hồ sơ KYC FOUNDATION không hợp lệ.');
+  }
+
+  const normalizedRejectionReason = reviewPayload.rejectionReason?.trim() || '';
+  if (reviewPayload.action === 'reject' && normalizedRejectionReason.length === 0) {
+    throw new Error('Vui lòng nhập lý do từ chối hồ sơ KYC FOUNDATION.');
+  }
+
+  const reviewStatus: OrganizationKycFile['reviewStatus'] = reviewPayload.action === 'approve'
+    ? 'APPROVED'
+    : 'REJECTED';
+  const reviewDateTime = new Date();
+  const reviewedFiles: OrganizationKycFile[] = existingSubmission.files.map((fileItem) => ({
+    ...fileItem,
+    reviewStatus,
+    reviewedBy: reviewerUserId,
+    reviewedAt: reviewDateTime,
+    rejectionReason: reviewPayload.action === 'reject' ? normalizedRejectionReason : null
+  }));
+  const updatedSubmission = await updateOrganizationKycSubmissionReview(existingSubmission.submissionId, {
+    status: reviewStatus,
+    reviewedBy: reviewerUserId,
+    reviewedAt: reviewDateTime,
+    rejectionReason: reviewPayload.action === 'reject' ? normalizedRejectionReason : null,
+    files: reviewedFiles
+  });
+
+  if (!updatedSubmission) {
+    throw new Error('Cập nhật trạng thái hồ sơ KYC FOUNDATION thất bại.');
+  }
+
+  await addAuditLog({
+    id: crypto.randomUUID(),
+    userId: null,
+    email: null,
+    eventType: `FOUNDATION_KYC_REVIEW_${reviewPayload.action.toUpperCase()}_SUCCESS`,
+    ipAddress: 'SYSTEM',
+    userAgent: `reviewer:${reviewerUserId}`,
+    detail: `submissionId=${existingSubmission.submissionId}`,
+    createdAt: reviewDateTime
+  });
+
+  return { submission: updatedSubmission, accountUpdate: null };
+}
 
 /**
  * Hàm lấy danh sách hồ sơ KYC chờ duyệt.
@@ -403,6 +459,11 @@ export type OrganizationKycReviewResult = {
  */
 export async function getPendingOrganizationKycSubmissions(): Promise<OrganizationKycSubmission[]> {
   return findPendingKycSubmissions();
+}
+
+/** Lấy lịch sử hồ sơ pháp nhân đại diện để Regulatory theo dõi đầy đủ trạng thái xử lý. */
+export async function getFoundationOrganizationKycSubmissions(): Promise<OrganizationKycSubmission[]> {
+  return findFoundationKycSubmissions();
 }
 
 /**
@@ -554,6 +615,10 @@ export async function reviewOrganizationKycSubmission(
 
   if (existingSubmission.status !== 'PENDING_REVIEW') {
     throw new Error('Hồ sơ này không còn ở trạng thái chờ duyệt.');
+  }
+
+  if (existingSubmission.organizationCategory === 'FOUNDATION') {
+    return reviewFoundationKycSubmission(reviewerUserId, existingSubmission, payload.reviewPayload);
   }
 
   const organizationUser = await findUserById(existingSubmission.organizationId);

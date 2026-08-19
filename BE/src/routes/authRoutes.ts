@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import {
   handleGetCurrentUserProfile,
+  handleGetFoundationOrganizationKycSubmissions,
   handleGetMyActiveSessions,
   handleGetMyOrganizationKycSubmissions,
   handleGetMyOrganizationProfile,
@@ -16,6 +17,7 @@ import { createRateLimitMiddleware } from '../middleware/rateLimitMiddleware';
 import { createRefreshCsrfMiddleware } from '../middleware/csrfMiddleware';
 import { attachRequestMetadata } from '../middleware/ipMetadataMiddleware';
 import { createAuthenticationMiddleware } from '../middleware/authenticationMiddleware';
+import { createFreshRoleAuthorizationMiddleware } from '../middleware/roleAuthorizationMiddleware';
 
 /**
  * Hàm khởi tạo route cho module auth.
@@ -27,11 +29,13 @@ export function createAuthRoutes(): Router {
   const refreshRateLimit = createRateLimitMiddleware(10, 60 * 1000, { bucketName: 'auth:refresh' });
   const loginRateLimit = createRateLimitMiddleware(5, 60 * 1000, { bucketName: 'auth:google-login' });
   const organizationKycSubmissionRateLimit = createRateLimitMiddleware(5, 60 * 1000, { bucketName: 'auth:organization-kyc-submission' });
-  const organizationKycGetMyRateLimit = createRateLimitMiddleware(30, 60 * 1000, { bucketName: 'auth:organization-kyc-get-my' });
+  const organizationKycGetMyRateLimit = createRateLimitMiddleware(120, 60 * 1000, { bucketName: 'auth:organization-kyc-get-my' });
   const organizationKycPendingRateLimit = createRateLimitMiddleware(20, 60 * 1000, { bucketName: 'auth:organization-kyc-pending' });
+  const foundationKycHistoryRateLimit = createRateLimitMiddleware(120, 60 * 1000, { bucketName: 'auth:foundation-kyc-history' });
   const beneficiaryBankAccountSubmitRateLimit = createRateLimitMiddleware(10, 60 * 1000, { bucketName: 'auth:beneficiary-bank-account-submit' });
   const organizationKycReviewRateLimit = createRateLimitMiddleware(20, 60 * 1000, { bucketName: 'auth:organization-kyc-review' });
   const authenticationMiddleware = createAuthenticationMiddleware();
+  const regulatoryKycReviewAuthorizationMiddleware = createFreshRoleAuthorizationMiddleware(['regulatory']);
 
   router.post('/google-login', attachRequestMetadata(), loginRateLimit, handleGoogleLogin);
   router.post(
@@ -57,8 +61,17 @@ export function createAuthRoutes(): Router {
     '/organization/kyc-submissions/pending',
     attachRequestMetadata(),
     authenticationMiddleware,
+    regulatoryKycReviewAuthorizationMiddleware,
     organizationKycPendingRateLimit,
     handleGetPendingOrganizationKycSubmissions
+  );
+  router.get(
+    '/organization/kyc-submissions/foundation',
+    attachRequestMetadata(),
+    authenticationMiddleware,
+    regulatoryKycReviewAuthorizationMiddleware,
+    foundationKycHistoryRateLimit,
+    handleGetFoundationOrganizationKycSubmissions
   );
   router.get(
     '/organization/kyc-submissions/me',
@@ -78,10 +91,10 @@ export function createAuthRoutes(): Router {
     '/organization/kyc-submissions/:submissionId/review',
     attachRequestMetadata(),
     authenticationMiddleware,
+    regulatoryKycReviewAuthorizationMiddleware,
     organizationKycReviewRateLimit,
     handleReviewOrganizationKycSubmission
   );
 
   return router;
 }
-

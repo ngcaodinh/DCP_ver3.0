@@ -5,6 +5,7 @@ import {
   createProjectForOrganization,
   getCreateProjectEligibilityForOrganization,
   getPendingApprovalProjectsForReviewer,
+  getProjectReviewHistoryForReviewer,
   getProjectsForOrganization,
   getPublicSupportProjectDetail,
   getPublicSupportProjects,
@@ -127,6 +128,22 @@ export async function handleGetPendingApprovalProjects(request: AuthenticatedReq
   }
 }
 
+/** Hàm xử lý request lịch sử review dự án. Mục đích: trả queue chờ duyệt cùng toàn bộ dự án ACTIVE và REJECTED cho Regulatory. */
+export async function handleGetProjectReviewHistory(request: AuthenticatedRequest, response: Response): Promise<void> {
+  if (!request.authenticatedUser) {
+    sendErrorResponse(response, 401, 'Bạn chưa đăng nhập hoặc phiên đăng nhập không hợp lệ.', 'UNAUTHENTICATED');
+    return;
+  }
+
+  try {
+    const projects = await getProjectReviewHistoryForReviewer(request.authenticatedUser.userId);
+    sendSuccessResponse(response, 200, 'Lấy lịch sử review dự án thành công.', projects);
+  } catch (error) {
+    logger.error('Lấy lịch sử review dự án thất bại.', { errorMessage: (error as Error).message });
+    sendErrorFromUnknown(response, error, 'Không thể lấy lịch sử review dự án.');
+  }
+}
+
 /** Hàm xử lý upload file minh chứng dự án. Mục đích: upload lên Pinata và trả danh sách CID IPFS. */
 export async function handleUploadProjectEvidences(request: AuthenticatedRequest, response: Response): Promise<void> {
   if (!request.authenticatedUser) {
@@ -219,4 +236,3 @@ export async function handleReviewProject(request: AuthenticatedRequest, respons
     sendErrorFromUnknown(response, error, 'Không thể review dự án.');
   }
 }
-

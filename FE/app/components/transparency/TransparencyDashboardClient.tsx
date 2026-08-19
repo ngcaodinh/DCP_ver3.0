@@ -17,6 +17,7 @@ import UnifiedTimeline from './UnifiedTimeline';
 import DonutChart from './DonutChart';
 import { downloadTimelineCsv } from './exportCsv';
 import { formatVnd } from './format';
+import FoundationKycVerifiedBadge from '@/app/components/foundationKyc/FoundationKycVerifiedBadge';
 
 /**
  * Thành phần thẻ số liệu tổng quan (nhãn + giá trị).
@@ -127,6 +128,8 @@ export default function TransparencyDashboardClient() {
           </div>
         </div>
       </header>
+
+      <FoundationKycVerifiedBadge />
 
       {/* Trạng thái chưa chọn dự án: hướng dẫn, không gọi API summary/timeline. */}
       {!hasSelectedProject ? (

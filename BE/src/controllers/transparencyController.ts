@@ -5,6 +5,8 @@ import {
   groupTimelineByCorrelation,
   type TimelineEvent
 } from '../services/unified-timeline.service';
+import { getFoundationKycPublicStatus } from '../services/foundationKycStatus.service';
+import { sendErrorFromUnknown, sendSuccessResponse } from '../utils/apiResponse';
 
 /**
  * Schema Zod cho query params của unified timeline endpoint.
@@ -28,8 +30,6 @@ const unifiedTimelineQuerySchema = z.object({
   cursor: z.string().optional(),
   redactPayosMetadata: z.coerce.boolean().optional().default(false)
 });
-
-type UnifiedTimelineQueryInput = z.infer<typeof unifiedTimelineQuerySchema>;
 
 /**
  * Hàm redact metadata nội bộ của PayOS từ TimelineEvent.
@@ -149,10 +149,22 @@ export async function handleGetUnifiedTimeline(
       count: safeTimeline.length,
       fallbackMode: result.fallbackMode ?? false
     });
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+  } catch {
     response.status(500).json({
       error: 'Internal server error'
     });
+  }
+}
+
+/** Xử lý GET status KYC FOUNDATION public và chỉ trả về ba trường đã được whitelist. */
+export async function handleGetFoundationKycStatus(
+  _request: Request,
+  response: Response
+): Promise<void> {
+  try {
+    const publicStatus = await getFoundationKycPublicStatus();
+    sendSuccessResponse(response, 200, 'Lấy trạng thái KYC FOUNDATION thành công.', publicStatus);
+  } catch (error) {
+    sendErrorFromUnknown(response, error, 'Không thể tải trạng thái KYC FOUNDATION.');
   }
 }

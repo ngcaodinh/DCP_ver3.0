@@ -12,11 +12,18 @@ import IpfsEvidencePreviewCard from "../../common/IpfsEvidencePreviewCard";
 import type { PageKey, UrgentRequestItem } from "./types";
 
 import SybilManagementPanel from "./SybilManagementPanel";
+import FoundationKycApprovalPanel from "./FoundationKycApprovalPanel";
 
 type NonDashboardPanelProps = {
+  accessToken?: string;
+
   selectedPageKey: PageKey;
 
   onOpenDisbursementRequest?: (urgentRequestItem: UrgentRequestItem) => void;
+};
+
+type VerifiedAccessTokenProps = {
+  accessToken?: string;
 };
 
 type KycApprovalRateItem = {
@@ -500,7 +507,7 @@ function resolveDocumentTypeLabel(documentType: string): string {
 
 /** Hàm hiển thị panel Duyệt Hồ sơ KYC bằng dữ liệu backend thật. */
 
-function KycPanel() {
+function KycPanel({ accessToken: verifiedAccessToken }: VerifiedAccessTokenProps) {
   const [isLoading, setIsLoading] = useState(false);
 
   const [errorMessage, setErrorMessage] = useState("");
@@ -533,13 +540,11 @@ function KycPanel() {
     setErrorMessage("");
 
     try {
-      const authSession = readAuthSession();
-
-      const accessToken = authSession.accessToken || "";
+      const accessToken = verifiedAccessToken || readAuthSession().accessToken || "";
 
       if (!accessToken) {
         throw new Error(
-          "Bạn cần đăng nhập tài khoản Regulatory/Admin trước khi duyệt KYC.",
+          "Bạn cần đăng nhập tài khoản Regulatory để duyệt KYC.",
         );
       }
 
@@ -554,7 +559,12 @@ function KycPanel() {
         submissions?: unknown[];
       };
 
-      const normalizedSubmissionList = (responsePayload.submissions || []).map(
+      const normalizedSubmissionList = (responsePayload.submissions || [])
+        .filter((submissionItem) => {
+          if (!submissionItem || typeof submissionItem !== "object") return true;
+          return (submissionItem as { organizationCategory?: unknown }).organizationCategory !== "FOUNDATION";
+        })
+        .map(
         (submissionItem: any) => ({
           ...submissionItem,
 
@@ -570,7 +580,7 @@ function KycPanel() {
             submissionItem.organizationDescription ||
             "Chưa cập nhật mô tả tổ chức.",
         }),
-      ) as KycSubmissionItem[];
+        ) as KycSubmissionItem[];
 
       setSubmissionList(normalizedSubmissionList);
 
@@ -599,7 +609,7 @@ function KycPanel() {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [verifiedAccessToken]);
 
   /** Hàm gửi hành động duyệt hồ sơ KYC lên backend. */
 
@@ -620,13 +630,11 @@ function KycPanel() {
       setSuccessMessage("");
 
       try {
-        const authSession = readAuthSession();
-
-        const accessToken = authSession.accessToken || "";
+        const accessToken = verifiedAccessToken || readAuthSession().accessToken || "";
 
         if (!accessToken) {
           throw new Error(
-            "Bạn cần đăng nhập tài khoản Regulatory/Admin trước khi duyệt KYC.",
+            "Bạn cần đăng nhập tài khoản Regulatory để duyệt KYC.",
           );
         }
 
@@ -691,6 +699,7 @@ function KycPanel() {
       loadPendingSubmissionList,
       rejectReason,
       selectedSubmission,
+      verifiedAccessToken,
     ],
   );
 
@@ -969,10 +978,47 @@ type ProjectReviewItem = {
 
   submittedAt: string | null;
 
+  status: "PENDING_APPROVAL" | "ACTIVE" | "REJECTED";
+
+  reviewedAt: string | null;
+
+  reviewedBy: string | null;
+
+  rejectionReason: string | null;
+
   evidenceCids: string[];
+
+  evidenceFiles: Array<{
+    cid: string;
+
+    fileName: string;
+
+    mimeType: string;
+  }>;
 };
 
-/** Hàm chuẩn hóa dữ liệu dự án chờ duyệt từ API để tránh lỗi khi backend trả thiếu trường. */
+/** Hàm kiểm tra trạng thái dự án có thuộc lịch sử review mà Regulatory được phép xem hay không. */
+function isProjectReviewStatus(
+  value: unknown,
+): value is ProjectReviewItem["status"] {
+  return value === "PENDING_APPROVAL" || value === "ACTIVE" || value === "REJECTED";
+}
+
+/** Hàm chuyển trạng thái review dự án sang nhãn tiếng Việt để hiển thị nhất quán. */
+function getProjectReviewStatusLabel(status: ProjectReviewItem["status"]): string {
+  if (status === "ACTIVE") return "Đã chấp nhận";
+  if (status === "REJECTED") return "Đã từ chối";
+  return "Chờ phê duyệt";
+}
+
+/** Hàm chọn màu badge theo trạng thái review để phân biệt rõ queue và lịch sử đã xử lý. */
+function getProjectReviewStatusClassName(status: ProjectReviewItem["status"]): string {
+  if (status === "ACTIVE") return "border-emerald-200 bg-emerald-100 text-emerald-700";
+  if (status === "REJECTED") return "border-red-200 bg-red-100 text-red-700";
+  return "border-amber-200 bg-amber-100 text-amber-700";
+}
+
+/** Hàm chuẩn hóa dữ liệu lịch sử review dự án từ API để tránh lỗi khi backend trả thiếu trường. */
 
 function normalizeProjectReviewItem(
   rawValue: unknown,
@@ -1016,20 +1062,49 @@ function normalizeProjectReviewItem(
         ? rawProject.submittedAt
         : null,
 
+    status: isProjectReviewStatus(rawProject.status)
+      ? rawProject.status
+      : "PENDING_APPROVAL",
+
+    reviewedAt:
+      typeof rawProject.reviewedAt === "string"
+        ? rawProject.reviewedAt
+        : null,
+
+    reviewedBy:
+      typeof rawProject.reviewedBy === "string"
+        ? rawProject.reviewedBy
+        : null,
+
+    rejectionReason:
+      typeof rawProject.rejectionReason === "string"
+        ? rawProject.rejectionReason
+        : null,
+
     evidenceCids: Array.isArray(rawProject.evidenceCids)
       ? rawProject.evidenceCids.filter(
           (cidItem): cidItem is string => typeof cidItem === "string",
         )
       : [],
+
+    evidenceFiles: Array.isArray(rawProject.evidenceFiles)
+      ? rawProject.evidenceFiles.filter(
+          (
+            evidenceFile,
+          ): evidenceFile is { cid: string; fileName: string; mimeType: string } =>
+            Boolean(evidenceFile) &&
+            typeof evidenceFile === "object" &&
+            typeof (evidenceFile as Record<string, unknown>).cid === "string" &&
+            typeof (evidenceFile as Record<string, unknown>).fileName === "string" &&
+            typeof (evidenceFile as Record<string, unknown>).mimeType === "string",
+        )
+      : [],
   };
 }
 
-/** Hàm hiển thị panel Duyệt dự án mới. Mục đích: tải danh sách dự án chờ duyệt và cho phép reviewer phê duyệt hoặc từ chối ngay tại màn hình. */
+/** Hàm hiển thị panel Duyệt dự án. Mục đích: tải queue và lịch sử để chỉ cho phép xử lý dự án đang chờ duyệt. */
 
 function ProjectReviewPanel() {
-  const backendBaseUrl =
-    process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:4000";
-
   const [isLoading, setIsLoading] = useState(false);
 
   const [isSubmittingReview, setIsSubmittingReview] = useState(false);
@@ -1056,9 +1131,12 @@ function ProjectReviewPanel() {
       (projectItem) => projectItem.projectId === selectedProjectId,
     ) || null;
 
-  /** Hàm gọi API lấy danh sách dự án mới chờ duyệt cho Regulatory. */
+  const isSelectedProjectPendingApproval =
+    selectedProject?.status === "PENDING_APPROVAL";
 
-  const loadPendingProjectList = useCallback(async () => {
+  /** Hàm gọi API lấy queue và toàn bộ lịch sử dự án đã được Regulatory review. */
+
+  const loadProjectReviewHistory = useCallback(async () => {
     const authSession = readAuthSession();
 
     if (!authSession.accessToken) {
@@ -1073,7 +1151,7 @@ function ProjectReviewPanel() {
 
     try {
       const response = await fetchApi<ProjectReviewItem[]>(
-        `${backendBaseUrl}/projects/pending-approval`,
+        buildApiUrl("/projects/review-history"),
         {
           method: "GET",
 
@@ -1111,18 +1189,18 @@ function ProjectReviewPanel() {
       const apiError = error as ApiErrorResponse;
 
       setErrorMessage(
-        apiError.message || "Không thể tải danh sách dự án chờ duyệt.",
+        apiError.message || "Không thể tải lịch sử review dự án.",
       );
     } finally {
       setIsLoading(false);
     }
-  }, [backendBaseUrl]);
+  }, []);
 
   /** Hàm gửi hành động review dự án lên backend. Mục đích: cập nhật trạng thái APPROVE/REJECT trực tiếp từ màn duyệt dự án mới. */
 
   const submitProjectReview = useCallback(
     async (action: "APPROVE" | "REJECT") => {
-      if (!selectedProject) {
+      if (!selectedProject || selectedProject.status !== "PENDING_APPROVAL") {
         return;
       }
 
@@ -1147,7 +1225,7 @@ function ProjectReviewPanel() {
       setSuccessMessage("");
 
       try {
-        await fetchApi<ProjectReviewItem>(`${backendBaseUrl}/projects/review`, {
+        await fetchApi<ProjectReviewItem>(buildApiUrl("/projects/review"), {
           method: "POST",
 
           headers: { Authorization: `Bearer ${authSession.accessToken}` },
@@ -1164,13 +1242,15 @@ function ProjectReviewPanel() {
 
         setRejectReason("");
 
+        setIsRejectFormVisible(false);
+
         setSuccessMessage(
           action === "APPROVE"
             ? "Phê duyệt dự án thành công."
             : "Từ chối dự án thành công.",
         );
 
-        await loadPendingProjectList();
+        await loadProjectReviewHistory();
       } catch (error) {
         const apiError = error as ApiErrorResponse;
 
@@ -1181,12 +1261,16 @@ function ProjectReviewPanel() {
         setIsSubmittingReview(false);
       }
     },
-    [backendBaseUrl, loadPendingProjectList, rejectReason, selectedProject],
+    [loadProjectReviewHistory, rejectReason, selectedProject],
   );
 
   /** Hàm mở modal xác nhận trước khi phê duyệt dự án để tránh thao tác nhầm. */
 
   const openApproveConfirmModal = () => {
+    if (!isSelectedProjectPendingApproval) {
+      return;
+    }
+
     setErrorMessage("");
 
     setSuccessMessage("");
@@ -1215,16 +1299,16 @@ function ProjectReviewPanel() {
   /** Hàm tải dữ liệu dự án khi mở đúng tab để tránh gọi API thừa. */
 
   useEffect(() => {
-    loadPendingProjectList();
-  }, [loadPendingProjectList]);
+    void loadProjectReviewHistory();
+  }, [loadProjectReviewHistory]);
 
   return (
     <div className="space-y-4">
       <div className="rounded-xl border border-emerald-900/15 bg-white px-5 py-4">
-        <h2 className="text-lg font-bold text-slate-900">Duyệt dự án mới</h2>
+        <h2 className="text-lg font-bold text-slate-900">Duyệt và tra cứu dự án</h2>
 
         <p className="mt-1 text-xs text-slate-500">
-          Danh sách dự án mới gửi lên để chờ Regulatory kiểm duyệt
+          Hiển thị đầy đủ dự án chờ duyệt, đã chấp nhận và đã từ chối
         </p>
       </div>
 
@@ -1244,13 +1328,13 @@ function ProjectReviewPanel() {
         <div className="max-h-[620px] overflow-y-auto border-r border-slate-100 pr-3">
           {isLoading ? (
             <p className="text-xs text-slate-500">
-              Đang tải danh sách dự án chờ duyệt...
+              Đang tải danh sách dự án...
             </p>
           ) : null}
 
           {!isLoading && projectReviewList.length === 0 ? (
             <p className="text-xs text-slate-500">
-              Hiện chưa có dự án mới chờ duyệt.
+              Chưa có dự án nào trong lịch sử review.
             </p>
           ) : null}
 
@@ -1268,6 +1352,10 @@ function ProjectReviewPanel() {
               <p className="mt-1 line-clamp-2 text-[11px] text-slate-600">
                 {projectItem.description}
               </p>
+
+              <span className={`mt-2 inline-flex rounded border px-1.5 py-0.5 text-[10px] font-semibold ${getProjectReviewStatusClassName(projectItem.status)}`}>
+                {getProjectReviewStatusLabel(projectItem.status)}
+              </span>
             </button>
           ))}
         </div>
@@ -1297,7 +1385,7 @@ function ProjectReviewPanel() {
 
                   <p>
                     <span className="font-semibold">Trạng thái:</span>{" "}
-                    {selectedProject.submittedAt ? "Chờ phê duyệt" : "Nháp"}
+                    {getProjectReviewStatusLabel(selectedProject.status)}
                   </p>
 
                   <p>
@@ -1322,7 +1410,28 @@ function ProjectReviewPanel() {
                         )
                       : "Chưa gửi duyệt"}
                   </p>
+
+                  {selectedProject.reviewedAt ? (
+                    <p>
+                      <span className="font-semibold">Thời điểm review:</span>{" "}
+                      {new Date(selectedProject.reviewedAt).toLocaleString("vi-VN")}
+                    </p>
+                  ) : null}
+
+                  {selectedProject.reviewedBy ? (
+                    <p>
+                      <span className="font-semibold">Người review:</span>{" "}
+                      {selectedProject.reviewedBy}
+                    </p>
+                  ) : null}
                 </div>
+
+                {selectedProject.rejectionReason ? (
+                  <p className="mt-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                    <span className="font-semibold">Lý do từ chối:</span>{" "}
+                    {selectedProject.rejectionReason}
+                  </p>
+                ) : null}
               </div>
 
               <div className="rounded-lg border border-slate-200 p-3">
@@ -1337,21 +1446,31 @@ function ProjectReviewPanel() {
                 ) : (
                   <div className="mt-2 grid gap-4 grid-cols-1 xl:grid-cols-2">
                     {selectedProject.evidenceCids.map(
-                      (cidItem, evidenceIndex) => (
-                        <IpfsEvidencePreviewCard
-                          key={`${selectedProject.projectId}-${evidenceIndex}`}
-                          cid={cidItem}
-                          fileName={`Minh chứng #${evidenceIndex + 1}`}
-                          documentTypeLabel="Tài liệu dự án"
-                          compact={true}
-                        />
-                      ),
+                      (cidItem, evidenceIndex) => {
+                        const evidenceFile = selectedProject.evidenceFiles.find(
+                          (fileItem) => fileItem.cid === cidItem,
+                        );
+
+                        return (
+                          <IpfsEvidencePreviewCard
+                            key={`${selectedProject.projectId}-${evidenceIndex}`}
+                            cid={cidItem}
+                            fileName={
+                              evidenceFile?.fileName ||
+                              `Minh chứng #${evidenceIndex + 1}`
+                            }
+                            mimeType={evidenceFile?.mimeType}
+                            documentTypeLabel="Tài liệu dự án"
+                            compact={true}
+                          />
+                        );
+                      },
                     )}
                   </div>
                 )}
               </div>
 
-              {isRejectFormVisible ? (
+              {isSelectedProjectPendingApproval && isRejectFormVisible ? (
                 <>
                   <div className="space-y-2 rounded-lg border border-amber-200 bg-amber-50 p-3">
                     <label className="block text-xs font-semibold text-amber-800">
@@ -1390,7 +1509,7 @@ function ProjectReviewPanel() {
                     </button>
                   </div>
                 </>
-              ) : (
+              ) : isSelectedProjectPendingApproval ? (
                 <div className="flex gap-2">
                   <button
                     type="button"
@@ -1410,11 +1529,11 @@ function ProjectReviewPanel() {
                     Chấp nhận
                   </button>
                 </div>
-              )}
+              ) : null}
             </div>
           ) : (
             <p className="text-xs text-slate-500">
-              Chọn dự án để xem chi tiết và duyệt.
+              Chọn dự án để xem chi tiết và xử lý khi còn chờ duyệt.
             </p>
           )}
         </div>
@@ -1503,7 +1622,7 @@ function getBankAccountReviewStatusText(status: string): string {
 
 /** Hàm hiển thị panel duyệt tài khoản ngân hàng chờ duyệt cho cơ quan giám sát. */
 
-function BankAccountApprovalPanel() {
+function BankAccountApprovalPanel({ accessToken: verifiedAccessToken }: VerifiedAccessTokenProps) {
   const backendBaseUrl =
     process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:4000";
 
@@ -1534,9 +1653,9 @@ function BankAccountApprovalPanel() {
   /** Hàm tải danh sách tài khoản ngân hàng đang chờ duyệt từ backend. */
 
   const loadPendingBankAccountApprovalList = useCallback(async () => {
-    const authSession = readAuthSession();
+    const accessToken = verifiedAccessToken || readAuthSession().accessToken || "";
 
-    if (!authSession.accessToken) {
+    if (!accessToken) {
       setErrorMessage(
         "Bạn cần đăng nhập tài khoản cơ quan giám sát để duyệt tài khoản ngân hàng.",
       );
@@ -1552,7 +1671,7 @@ function BankAccountApprovalPanel() {
       const response = await fetch(
         `${backendBaseUrl}/auth/organization/kyc-submissions/pending`,
         {
-          headers: { Authorization: `Bearer ${authSession.accessToken}` },
+          headers: { Authorization: `Bearer ${accessToken}` },
         },
       );
 
@@ -1581,6 +1700,7 @@ function BankAccountApprovalPanel() {
                 return "beneficiaryBankAccount" in submissionItem;
               },
             )
+            .filter((submissionItem) => submissionItem.organizationCategory !== "FOUNDATION")
 
             .map((submissionItem) => {
               const rawBankAccount = submissionItem.beneficiaryBankAccount;
@@ -1663,7 +1783,7 @@ function BankAccountApprovalPanel() {
     } finally {
       setIsLoading(false);
     }
-  }, [backendBaseUrl]);
+  }, [backendBaseUrl, verifiedAccessToken]);
 
   /** Hàm ánh xạ lỗi theo mã HTTP sang thông báo tiếng Việt thân thiện với người dùng. */
 
@@ -1705,9 +1825,9 @@ function BankAccountApprovalPanel() {
         return;
       }
 
-      const authSession = readAuthSession();
+      const accessToken = verifiedAccessToken || readAuthSession().accessToken || "";
 
-      if (!authSession.accessToken) {
+      if (!accessToken) {
         setErrorMessage(
           "Lỗi xác thực hoặc phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.",
         );
@@ -1730,7 +1850,7 @@ function BankAccountApprovalPanel() {
             headers: {
               "Content-Type": "application/json",
 
-              Authorization: `Bearer ${authSession.accessToken}`,
+              Authorization: `Bearer ${accessToken}`,
             },
 
             body: JSON.stringify({
@@ -1779,6 +1899,7 @@ function BankAccountApprovalPanel() {
       loadPendingBankAccountApprovalList,
       rejectReason,
       selectedBankAccountApproval,
+      verifiedAccessToken,
     ],
   );
 
@@ -2569,6 +2690,7 @@ function TransparencyPanel() {
 /** Hàm component NonDashboardPanel để hiển thị nội dung theo tab ngoài tổng quan. */
 
 export default function NonDashboardPanel({
+  accessToken,
   selectedPageKey,
   onOpenDisbursementRequest,
 }: NonDashboardPanelProps) {
@@ -2579,7 +2701,11 @@ export default function NonDashboardPanel({
   }
 
   if (selectedPageKey === "bankAccountApproval") {
-    return <BankAccountApprovalPanel />;
+    return <BankAccountApprovalPanel accessToken={accessToken} />;
+  }
+
+  if (selectedPageKey === "foundationKyc") {
+    return <FoundationKycApprovalPanel accessToken={accessToken} />;
   }
 
   if (selectedPageKey === "disbursement") {
@@ -2591,7 +2717,7 @@ export default function NonDashboardPanel({
   }
 
   if (selectedPageKey === "kyc") {
-    return <KycPanel />;
+    return <KycPanel accessToken={accessToken} />;
   }
 
   if (selectedPageKey === "report") {
@@ -2619,6 +2745,3 @@ export default function NonDashboardPanel({
     </div>
   );
 }
-
-
-

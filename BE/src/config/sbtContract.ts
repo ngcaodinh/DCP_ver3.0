@@ -1,5 +1,6 @@
 import { ethers } from 'ethers';
 import { getLogger } from './logger';
+import { getBlockchainRpcUrl } from './blockchainRpc';
 import { sanitizeProviderError } from '../utils/sanitizeProviderError';
 
 const logger = getLogger();
@@ -58,7 +59,7 @@ let _oracleSigner: ethers.Wallet | null = null;
 
 export function getReadOnlyImpactSbtProvider(): ethers.JsonRpcProvider {
   if (!_readOnlyProvider) {
-    const rpcUrl = process.env.BLOCKCHAIN_RPC_URL?.trim() ?? '';
+    const rpcUrl = getBlockchainRpcUrl();
     if (!rpcUrl) {
       throw new Error('Thiếu BLOCKCHAIN_RPC_URL khi khởi tạo ImpactSBT provider.');
     }

@@ -9,6 +9,7 @@ import {
 import {
   getMyOrganizationProfile,
   getOrganizationKycSubmissionsByUserId,
+  getFoundationOrganizationKycSubmissions,
   getPendingOrganizationKycSubmissions,
   reviewOrganizationKycSubmission,
   submitBeneficiaryBankAccount,
@@ -250,9 +251,9 @@ export async function handleGetPendingOrganizationKycSubmissions(request: Reques
     return;
   }
 
-  if (authenticatedRequest.authenticatedUser.role !== 'regulatory' && authenticatedRequest.authenticatedUser.role !== 'admin') {
+  if (authenticatedRequest.authenticatedUser.role !== 'regulatory') {
     response.status(403).json({
-      message: 'Bạn không có quyền xem danh sách hồ sơ KYC chờ duyệt. Chỉ cơ quan regulatory hoặc admin được phép.'
+      message: 'Bạn không có quyền xem danh sách hồ sơ KYC chờ duyệt. Chỉ cơ quan Regulatory được phép.'
     });
     return;
   }
@@ -260,6 +261,32 @@ export async function handleGetPendingOrganizationKycSubmissions(request: Reques
   const pendingSubmissionList = await getPendingOrganizationKycSubmissions();
   response.status(200).json({
     submissions: pendingSubmissionList
+  });
+}
+
+/** Lấy lịch sử hồ sơ pháp nhân đại diện cho Regulatory, bao gồm cả trạng thái đã xử lý. */
+export async function handleGetFoundationOrganizationKycSubmissions(request: Request, response: Response): Promise<void> {
+  const authenticatedRequest = request as Request & {
+    authenticatedUser?: { userId: string; role: string };
+  };
+
+  if (!authenticatedRequest.authenticatedUser) {
+    response.status(401).json({
+      message: 'Bạn chưa đăng nhập hoặc phiên đăng nhập không hợp lệ.'
+    });
+    return;
+  }
+
+  if (authenticatedRequest.authenticatedUser.role !== 'regulatory') {
+    response.status(403).json({
+      message: 'Bạn không có quyền xem lịch sử hồ sơ pháp nhân đại diện. Chỉ cơ quan Regulatory được phép.'
+    });
+    return;
+  }
+
+  const foundationSubmissionList = await getFoundationOrganizationKycSubmissions();
+  response.status(200).json({
+    submissions: foundationSubmissionList
   });
 }
 
@@ -279,9 +306,9 @@ export async function handleReviewOrganizationKycSubmission(request: Request, re
     return;
   }
 
-  if (authenticatedRequest.authenticatedUser.role !== 'regulatory' && authenticatedRequest.authenticatedUser.role !== 'admin') {
+  if (authenticatedRequest.authenticatedUser.role !== 'regulatory') {
     response.status(403).json({
-      message: 'Bạn không có quyền duyệt hồ sơ KYC. Chỉ cơ quan regulatory hoặc admin được phép.'
+      message: 'Bạn không có quyền duyệt hồ sơ KYC. Chỉ cơ quan Regulatory được phép.'
     });
     return;
   }
@@ -388,7 +415,7 @@ export async function handleGetMyOrganizationProfile(request: Request, response:
 
 /**
  * Hàm nộp thông tin tài khoản ngân hàng thụ hưởng của tổ chức đang đăng nhập.
- * Mục đích: tạo hồ sơ trạng thái chờ duyệt để regulatory/admin review.
+ * Mục đích: tạo hồ sơ trạng thái chờ duyệt để cơ quan Regulatory review.
  */
 export async function handleSubmitBeneficiaryBankAccount(request: Request, response: Response): Promise<void> {
   const authenticatedUser = getAuthenticatedUser(request);
@@ -473,4 +500,3 @@ export async function handleGetCurrentUserProfile(request: Request, response: Re
     }
   });
 }
-

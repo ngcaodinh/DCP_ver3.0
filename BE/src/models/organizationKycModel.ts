@@ -20,8 +20,11 @@ export type OrganizationKycSubmission = {
   organizationId: string;
   organizationName: string;
   legalRegistrationNumber: string;
+  /** Mã số thuế của pháp nhân; optional để tương thích hồ sơ NGO cũ. */
+  taxIdentificationNumber?: string | null;
   officialWebsite: string | null;
   organizationDescription: string;
+  organizationCategory?: 'NGO' | 'FOUNDATION';
   version: number;
   status:
   | 'DRAFT'
@@ -65,8 +68,10 @@ const organizationKycSubmissionSchema = new Schema<OrganizationKycSubmission>({
   organizationId: { type: String, required: true, index: true },
   organizationName: { type: String, required: true },
   legalRegistrationNumber: { type: String, required: true },
+  taxIdentificationNumber: { type: String, default: null },
   officialWebsite: { type: String, default: null },
   organizationDescription: { type: String, required: true },
+  organizationCategory: { type: String, enum: ['NGO', 'FOUNDATION'], default: 'NGO', index: true },
   version: { type: Number, required: true },
   status: { type: String, required: true },
   submittedBy: { type: String, required: true },
@@ -106,10 +111,12 @@ organizationKycSubmissionSchema.index(
   )
 );
 
-const OrganizationKycSubmissionModel = mongoose.model<OrganizationKycSubmission>(
-  'OrganizationKycSubmission',
-  organizationKycSubmissionSchema
-);
+// Index không unique để tra cứu nhanh hồ sơ FOUNDATION theo số đăng ký pháp nhân.
+// Tính duy nhất của luồng public được bảo đảm bằng bảng trạng thái trong service.
+organizationKycSubmissionSchema.index({ organizationCategory: 1, legalRegistrationNumber: 1 });
+
+const OrganizationKycSubmissionModel = mongoose.models?.OrganizationKycSubmission
+  || mongoose.model<OrganizationKycSubmission>('OrganizationKycSubmission', organizationKycSubmissionSchema);
 
 /**
  * Hàm lấy phiên bản hồ sơ mới nhất của tổ chức.
@@ -159,12 +166,52 @@ export async function findLatestSubmissionByOrganizationId(organizationId: strin
 }
 
 /**
+ * Tìm hồ sơ FOUNDATION mới nhất theo số đăng ký pháp nhân.
+ * Mục đích: áp dụng chính sách nộp một lần và chỉ cho retry sau lỗi hệ thống.
+ */
+export async function findLatestFoundationSubmissionByLegalRegistrationNumber(
+  legalRegistrationNumber: string
+): Promise<OrganizationKycSubmission | null> {
+  return OrganizationKycSubmissionModel.findOne({
+    organizationCategory: 'FOUNDATION',
+    legalRegistrationNumber
+  })
+    .sort({ version: -1 })
+    .lean<OrganizationKycSubmission>()
+    .exec();
+}
+
+/**
+ * Tìm hồ sơ FOUNDATION đã được duyệt mới nhất để công khai badge minh bạch.
+ * Mục đích: chỉ phát hành ba trường trạng thái an toàn cho người xem ẩn danh.
+ */
+export async function findLatestApprovedFoundationKycSubmission(): Promise<OrganizationKycSubmission | null> {
+  return OrganizationKycSubmissionModel.findOne({
+    organizationCategory: 'FOUNDATION',
+    status: 'APPROVED'
+  })
+    .sort({ reviewedAt: -1 })
+    .lean<OrganizationKycSubmission>()
+    .exec();
+}
+
+/**
  * Hàm lấy danh sách hồ sơ KYC chờ duyệt.
- * Mục đích: phục vụ màn hình review cho Regulatory/Admin.
+ * Mục đích: phục vụ màn hình review cho cơ quan Regulatory.
  */
 export async function findPendingKycSubmissions(): Promise<OrganizationKycSubmission[]> {
   return OrganizationKycSubmissionModel.find({ status: 'PENDING_REVIEW' })
     .sort({ submittedAt: 1 })
+    .lean<OrganizationKycSubmission[]>()
+    .exec();
+}
+
+/** Lấy lịch sử toàn bộ hồ sơ pháp nhân đã gửi review để Regulatory hiển thị trạng thái chờ duyệt và đã xử lý. */
+export async function findFoundationKycSubmissions(): Promise<OrganizationKycSubmission[]> {
+  return OrganizationKycSubmissionModel.find({
+    status: { $in: ['PENDING_REVIEW', 'APPROVED', 'REJECTED'] }
+  })
+    .sort({ submittedAt: -1 })
     .lean<OrganizationKycSubmission[]>()
     .exec();
 }
@@ -174,7 +221,10 @@ export async function findPendingKycSubmissions(): Promise<OrganizationKycSubmis
  * Mục đích: trả metric tổng quan hệ thống cho trang admin mà không cần dùng mock data.
  */
 export async function countPendingKycSubmissions(): Promise<number> {
-  return OrganizationKycSubmissionModel.countDocuments({ status: 'PENDING_REVIEW' }).exec();
+  return OrganizationKycSubmissionModel.countDocuments({
+    status: 'PENDING_REVIEW',
+    organizationCategory: { $ne: 'FOUNDATION' }
+  }).exec();
 }
 
 /**
@@ -232,7 +282,7 @@ export async function updateOrganizationKycSubmissionReview(
   }
 ): Promise<OrganizationKycSubmission | null> {
   const updatedSubmission = await OrganizationKycSubmissionModel.findOneAndUpdate(
-    { submissionId },
+    { submissionId, status: 'PENDING_REVIEW' },
     {
       status: reviewData.status,
       reviewedBy: reviewData.reviewedBy,

@@ -87,7 +87,7 @@ export function readAuthSession(): AuthenticationSessionPayload {
   };
 }
 
-// Ghi chú: Xóa thông tin phiên khi refresh thất bại hoặc đăng xuất.
+/** Xóa toàn bộ dữ liệu phiên khi refresh token bị từ chối hoặc người dùng chủ động đăng xuất. */
 export function clearAuthSession(): void {
   window.localStorage.removeItem(accessTokenStorageKey);
   window.localStorage.removeItem(refreshTokenStorageKey);
@@ -102,4 +102,3 @@ export function clearAuthSession(): void {
 
   window.dispatchEvent(new Event(authenticationSessionUpdatedEventName));
 }
-

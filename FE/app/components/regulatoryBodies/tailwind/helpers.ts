@@ -7,6 +7,7 @@ export function getPageTitle(pageKey: PageKey): string {
   if (pageKey === 'disbursement') return 'Ký duyệt Giải ngân';
   if (pageKey === 'kyc') return 'Duyệt Hồ sơ KYC';
   if (pageKey === 'bankAccountApproval') return 'Duyệt tài khoản ngân hàng';
+  if (pageKey === 'foundationKyc') return 'Duyệt pháp nhân đại diện';
   if (pageKey === 'report') return 'Báo cáo Tuân thủ';
   if (pageKey === 'sybilManagement') return 'Quản lý Sybil Attack';
   return 'Tra cứu Giao dịch';
@@ -83,4 +84,3 @@ export function formatVietnameseDateTime(dateString: string): string {
     minute: '2-digit'
   });
 }
-

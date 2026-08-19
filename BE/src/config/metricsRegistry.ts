@@ -77,6 +77,22 @@ export const publicFeedbackClientIdentityFallbackTotal = new Counter({
   registers: [metricsRegistry]
 });
 
+/** Counter đếm kết quả submit KYC FOUNDATION theo outcome nghiệp vụ. */
+export const foundationKycSubmissionsTotal = new Counter({
+  name: 'dcp_foundation_kyc_submissions_total',
+  help: 'Tổng số request KYC FOUNDATION theo kết quả xử lý.',
+  labelNames: ['result'],
+  registers: [metricsRegistry]
+});
+
+/** Counter đếm các lần captcha FOUNDATION thất bại theo nguyên nhân. */
+export const foundationKycCaptchaFailuresTotal = new Counter({
+  name: 'dcp_foundation_kyc_captcha_failures_total',
+  help: 'Tổng số lần xác minh reCAPTCHA KYC FOUNDATION thất bại theo nguyên nhân.',
+  labelNames: ['reason'],
+  registers: [metricsRegistry]
+});
+
 /** Histogram ghi nhận gas đã dùng của các transaction blockchain được instrument. */
 export const blockchainTransactionGasUsed = new Histogram({
   name: 'blockchain_transaction_gas_used',

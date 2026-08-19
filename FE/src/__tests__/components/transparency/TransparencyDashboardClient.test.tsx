@@ -17,6 +17,9 @@ vi.mock('@/app/hooks/useTransparencyTimeline', () => ({
 vi.mock('@/app/hooks/useTransparencySummary', () => ({
   useTransparencySummary: vi.fn(),
 }));
+vi.mock('@/app/hooks/useFoundationKycStatus', () => ({
+  useFoundationKycStatus: vi.fn(() => ({ data: undefined, isError: false })),
+}));
 
 // Mock helper xuất CSV để verify nút Xuất CSV gọi đúng, không thực sự tạo file.
 vi.mock('@/app/components/transparency/exportCsv', () => ({

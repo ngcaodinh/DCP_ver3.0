@@ -1,31 +1,36 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import {
   authenticationSessionUpdatedEventName,
-  clearAuthSession,
-  persistAuthSession,
   readAuthSession
 } from '../utils/authSession';
+import { refreshAuthSession } from '../utils/authSessionRefresh';
 
-type RefreshResponse = {
-  accessToken?: string;
-  refreshToken?: string;
-  csrfToken?: string;
-  refreshSessionId?: string;
-  expiresAt?: string;
-};
+const refreshBeforeAccessTokenExpiresMs = 60 * 1000;
+const transientRefreshRetryDelayMs = 60 * 1000;
 
-const minimumRefreshDelayMs = 15 * 1000;
+/** Đọc hạn access token từ payload JWT để lên lịch refresh mà không phụ thuộc export động của module phiên. */
+function getAccessTokenExpirationTime(accessToken: string): number | null {
+  if (typeof window === 'undefined') return null;
+  const payloadSegment = accessToken.split('.')[1];
+  if (!payloadSegment) return null;
+
+  try {
+    const normalizedPayloadSegment = payloadSegment.replace(/-/g, '+').replace(/_/g, '/');
+    const base64Padding = '='.repeat((4 - (normalizedPayloadSegment.length % 4)) % 4);
+    const parsedPayload = JSON.parse(window.atob(`${normalizedPayloadSegment}${base64Padding}`)) as { exp?: unknown };
+    return typeof parsedPayload.exp === 'number' && Number.isFinite(parsedPayload.exp)
+      ? parsedPayload.exp * 1000
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 // Ghi chú: Quản lý auto refresh token theo hạn phiên nhận từ backend.
 export default function AuthSessionManager() {
   const refreshTimerRef = useRef<number | null>(null);
-
-  const backendBaseUrl = useMemo(
-    () => process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:4000',
-    []
-  );
 
   // Ghi chú: Xóa timer refresh đang chạy để tránh đụng lịch.
   const clearRefreshTimer = useCallback(() => {
@@ -35,73 +40,35 @@ export default function AuthSessionManager() {
     }
   }, []);
 
-  // Ghi chú: Tính thời điểm refresh tiếp theo dựa trên expiresAt từ backend.
+  // Ghi chú: Tính thời điểm refresh theo hạn access token, không dùng hạn refresh token 30 ngày.
   const calculateNextRefreshDelay = useCallback((): number | null => {
-    const { refreshTokenExpiresAt } = readAuthSession();
-    if (!refreshTokenExpiresAt) {
+    const { accessToken } = readAuthSession();
+    const accessTokenExpirationTime = getAccessTokenExpirationTime(accessToken || '');
+    if (accessTokenExpirationTime === null) {
       return null;
     }
 
-    const expirationTime = new Date(refreshTokenExpiresAt).getTime();
-    if (Number.isNaN(expirationTime)) {
-      return null;
-    }
-
-    const refreshOffsetMs = 60 * 1000;
-    const delayMs = expirationTime - Date.now() - refreshOffsetMs;
-    return Math.max(delayMs, minimumRefreshDelayMs);
+    return Math.max(accessTokenExpirationTime - Date.now() - refreshBeforeAccessTokenExpiresMs, 0);
   }, []);
 
-  // Ghi chú: Gọi API refresh token và đồng bộ lại localStorage.
-  const executeTokenRefresh = useCallback(async () => {
-    const { refreshToken, refreshSessionId, csrfToken } = readAuthSession();
-    if (!refreshToken || !refreshSessionId || !csrfToken) {
-      clearAuthSession();
-      clearRefreshTimer();
-      return;
-    }
-
-    try {
-      const response = await fetch(`${backendBaseUrl}/auth/refresh`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-csrf-token': csrfToken
-        },
-        body: JSON.stringify({ refreshToken, refreshSessionId })
-      });
-      const responseData: RefreshResponse = await response.json();
-
-      // Ghi chú logic phức tạp: nếu refresh thất bại phải hủy phiên để tránh token stale.
-      if (!response.ok) {
-        throw new Error(responseData?.accessToken ? '' : 'Refresh token thất bại.');
-      }
-
-      persistAuthSession({
-        accessToken: responseData.accessToken,
-        refreshToken: responseData.refreshToken,
-        csrfToken: responseData.csrfToken,
-        refreshSessionId: responseData.refreshSessionId,
-        refreshTokenExpiresAt: responseData.expiresAt
-      });
-    } catch (error) {
-      clearAuthSession();
-    }
-  }, [backendBaseUrl, clearRefreshTimer]);
-
-  // Ghi chú: Lập lịch refresh token tiếp theo dựa trên expiresAt.
-  const scheduleRefresh = useCallback(() => {
+  // Ghi chú: Lỗi mạng hoặc 429 chỉ lên lịch thử lại, không tự đăng xuất người dùng.
+  const scheduleRefresh = useCallback((delayOverrideMs?: number) => {
     clearRefreshTimer();
-    const delayMs = calculateNextRefreshDelay();
+    const delayMs = delayOverrideMs ?? calculateNextRefreshDelay();
     if (delayMs === null) {
       return;
     }
 
     refreshTimerRef.current = window.setTimeout(async () => {
-      await executeTokenRefresh();
+      const refreshResult = await refreshAuthSession();
+      if (refreshResult.status === 'RATE_LIMITED' || refreshResult.status === 'UNAVAILABLE') {
+        scheduleRefresh(transientRefreshRetryDelayMs);
+        return;
+      }
+
       scheduleRefresh();
     }, delayMs);
-  }, [calculateNextRefreshDelay, clearRefreshTimer, executeTokenRefresh]);
+  }, [calculateNextRefreshDelay, clearRefreshTimer]);
 
   useEffect(() => {
     scheduleRefresh();
@@ -120,4 +87,3 @@ export default function AuthSessionManager() {
 
   return null;
 }
-

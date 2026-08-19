@@ -7,6 +7,7 @@ export const navigationItemList: NavigationItem[] = [
   { key: 'disbursement', label: 'Ký duyệt Giải ngân', badge: 3, iconPath: 'M13 2H3a1 1 0 00-1 1v10a1 1 0 001 1h10a1 1 0 001-1V3a1 1 0 00-1-1zM8 11l-4-4 1.4-1.4L8 8.2l4.6-4.6L14 5z' },
   { key: 'kyc', label: 'Duyệt Hồ sơ KYC', badge: 5, iconPath: 'M4 1h8a1 1 0 011 1v12a1 1 0 01-1 1H4a1 1 0 01-1-1V2a1 1 0 011-1zm1 3v1h6V4zm0 3v1h6V7zm0 3v1h4v-1z' },
   { key: 'bankAccountApproval', label: 'Duyệt tài khoản ngân hàng', badge: 0, iconPath: 'M2 6l6-4 6 4v2H2zm1 3h2v4H3zm4 0h2v4H7zm4 0h2v4h-2zM2 14h12v1H2z' },
+  { key: 'foundationKyc', label: 'Duyệt pháp nhân đại diện', badge: 0, iconPath: 'M8 1l6 3v3c0 3.5-2.3 6.7-6 8-3.7-1.3-6-4.5-6-8V4l6-3zm-2 7l1.5 1.5L11 6.5' },
   { key: 'report', label: 'Báo cáo Tuân thủ', iconPath: 'M2 2h12v12H2zm2 2v3h3V4zm5 0v2h2V4zm-5 5v3h8V9zm0-2h8V6H4z' },
   { key: 'sybilManagement', label: 'Quản lý Sybil Attack', badge: 2, iconPath: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9zm1.41-8.41L9.41 10.59 7 13l4 4 4-4-2.41-2.41z' }
 ];
@@ -219,6 +220,4 @@ export const sybilSummaryMetricsMockData = [
 export function getSybilUserList(): SybilUser[] {
   return sybilUserMockData;
 }
-
-
 

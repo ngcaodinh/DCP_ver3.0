@@ -5,6 +5,7 @@ import {
   findProjectByProjectId,
   findProjectsByOrganizationId,
   findProjectsByStatus,
+  findProjectsByStatusList,
   findPublicSupportProjectByProjectId,
   findPublicSupportProjects,
   findAllProjectsByProjectIdList,
@@ -65,6 +66,11 @@ export async function findProjectsByOrganizationIdFromRepository(organizationId:
 /** Hàm repository lấy danh sách dự án theo trạng thái. Mục đích: tách data-access cho màn hình duyệt dự án mới. */
 export async function findProjectsByStatusFromRepository(status: ProjectStatus): Promise<ProjectRecord[]> {
   return findProjectsByStatus(status);
+}
+
+/** Hàm repository lấy queue review kèm dự án đã xử lý để Regulatory có lịch sử đầy đủ. */
+export async function findProjectsByStatusListFromRepository(statusList: ProjectStatus[]): Promise<ProjectRecord[]> {
+  return findProjectsByStatusList(statusList);
 }
 
 /** Hàm repository lấy danh sách dự án public đang cần hỗ trợ. Mục đích: cung cấp dữ liệu thật cho homepage không cần đăng nhập. */

@@ -111,6 +111,18 @@ export async function findProjectsByStatus(status: ProjectStatus): Promise<Proje
   return ProjectMongoModel.find({ status }).sort({ submittedAt: -1, createdAt: -1 }).lean<ProjectRecord[]>().exec();
 }
 
+/** Hàm lấy danh sách dự án theo nhiều trạng thái review để Regulatory theo dõi cả queue đang chờ và lịch sử đã xử lý. */
+export async function findProjectsByStatusList(statusList: ProjectStatus[]): Promise<ProjectRecord[]> {
+  if (!statusList.length) {
+    return [];
+  }
+
+  return ProjectMongoModel.find({ status: { $in: statusList } })
+    .sort({ reviewedAt: -1, submittedAt: -1, createdAt: -1 })
+    .lean<ProjectRecord[]>()
+    .exec();
+}
+
 /** Hàm lấy danh sách dự án active công khai. Mục đích: trả dữ liệu thật cho section “Dự án đang cần hỗ trợ” tại trang chủ. */
 export async function findPublicSupportProjects(limitCount: number): Promise<ProjectRecord[]> {
   return ProjectMongoModel.find({

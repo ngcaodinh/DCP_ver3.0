@@ -14,6 +14,7 @@ import {
 } from './OrganizationsSections';
 import { ApiErrorResponse, fetchApi, buildApiUrl } from '@/app/utils/apiClient';
 import { clearAuthSession, readAuthSession } from '@/app/utils/authSession';
+import { refreshAuthSession } from '@/app/utils/authSessionRefresh';
 import Topbar from '../regulatoryBodies/tailwind/Topbar';
 import NotificationBell from '@/app/components/notifications/NotificationBell';
 import {
@@ -209,6 +210,8 @@ export default function OrganizationsPageView() {
   const [isOrganizationKycLoading, setIsOrganizationKycLoading] = useState(false);
   const [organizationKycErrorMessage, setOrganizationKycErrorMessage] = useState<string | null>(null);
   const [isAccessChecking, setIsAccessChecking] = useState(true);
+  const [hasOrganizationAccess, setHasOrganizationAccess] = useState(false);
+  const [accessErrorMessage, setAccessErrorMessage] = useState('');
   const [isLogoutProcessing, setIsLogoutProcessing] = useState(false);
   const [userDisplayName, setUserDisplayName] = useState('Người dùng');
   const [userEmail, setUserEmail] = useState('');
@@ -836,6 +839,8 @@ export default function OrganizationsPageView() {
 
   /** Hàm kiểm tra quyền truy cập Organizations tại frontend kết hợp xác thực server để tránh bypass. */
   const verifyOrganizationAccess = useCallback(async () => {
+    setHasOrganizationAccess(false);
+    setAccessErrorMessage('');
     const sessionPayload = readAuthSession();
     if (!sessionPayload.accessToken) {
       clearAuthSession();
@@ -858,12 +863,43 @@ export default function OrganizationsPageView() {
     }
 
     try {
-      const response = await fetch(`${backendBaseUrl}/auth/me`, {
+      let accessToken = sessionPayload.accessToken;
+      let response = await fetch(`${backendBaseUrl}/auth/me`, {
         method: 'GET',
         headers: {
-          Authorization: `Bearer ${sessionPayload.accessToken}`
+          Authorization: `Bearer ${accessToken}`
         }
       });
+
+      if (response.status === 401) {
+        const refreshResult = await refreshAuthSession();
+        if (refreshResult.status === 'REFRESHED') {
+          accessToken = refreshResult.accessToken;
+          response = await fetch(`${backendBaseUrl}/auth/me`, {
+            method: 'GET',
+            headers: { Authorization: `Bearer ${accessToken}` }
+          });
+        } else if (refreshResult.status === 'RATE_LIMITED') {
+          setAccessErrorMessage('Hệ thống đang giới hạn tần suất xác thực. Vui lòng thử lại sau ít phút.');
+          return;
+        } else if (refreshResult.status === 'UNAVAILABLE') {
+          setAccessErrorMessage('Chưa thể kết nối máy chủ để khôi phục phiên. Vui lòng thử lại.');
+          return;
+        } else {
+          router.replace('/login');
+          return;
+        }
+      }
+
+      if (response.status === 429) {
+        setAccessErrorMessage('Hệ thống đang giới hạn tần suất xác thực. Vui lòng thử lại sau ít phút.');
+        return;
+      }
+
+      if (response.status >= 500) {
+        setAccessErrorMessage('Máy chủ đang tạm thời không phản hồi. Vui lòng thử lại sau ít phút.');
+        return;
+      }
 
       if (!response.ok) {
         clearAuthSession();
@@ -879,9 +915,10 @@ export default function OrganizationsPageView() {
         router.replace('/');
         return;
       }
+
+      setHasOrganizationAccess(true);
     } catch (_error) {
-      clearAuthSession();
-      router.replace('/login');
+      setAccessErrorMessage('Không thể kết nối máy chủ để xác thực phiên. Vui lòng thử lại.');
       return;
     } finally {
       setIsAccessChecking(false);
@@ -935,7 +972,7 @@ export default function OrganizationsPageView() {
   }, [activePage]);
 
   useEffect(() => {
-    if (isAccessChecking) {
+    if (isAccessChecking || !hasOrganizationAccess) {
       return;
     }
 
@@ -946,29 +983,49 @@ export default function OrganizationsPageView() {
       loadDisbursementsFromApi(),
       loadRankingFromApi()
     ]);
-  }, [isAccessChecking, loadCreateProjectEligibility]);
+  }, [hasOrganizationAccess, isAccessChecking, loadCreateProjectEligibility]);
 
   useEffect(() => {
-    if (isAccessChecking) {
+    if (isAccessChecking || !hasOrganizationAccess) {
       return;
     }
 
     void loadDashboardDonationHistory(createdProjects);
-  }, [createdProjects, isAccessChecking, loadDashboardDonationHistory]);
+  }, [createdProjects, hasOrganizationAccess, isAccessChecking, loadDashboardDonationHistory]);
 
   useEffect(() => {
-    if (activePage !== 'projects') {
+    if (!hasOrganizationAccess || activePage !== 'projects') {
       return;
     }
 
     // Khi người dùng vào tab dự án, luôn re-check eligibility để đồng bộ trạng thái chặn/mở nút tạo dự án ngay lập tức.
     void loadCreateProjectEligibility();
-  }, [activePage, loadCreateProjectEligibility]);
+  }, [activePage, hasOrganizationAccess, loadCreateProjectEligibility]);
 
   if (isAccessChecking) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-[#F8FAFB] text-[#0D1117]">
         <p className="text-sm font-medium text-[#4B5563]">Đang kiểm tra quyền truy cập...</p>
+      </main>
+    );
+  }
+
+  if (!hasOrganizationAccess) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-[#F8FAFB] px-4 text-[#0D1117]">
+        <div className="w-full max-w-md rounded-xl border border-amber-200 bg-white p-6 text-center shadow-sm">
+          <p className="text-sm font-medium text-[#4B5563]">{accessErrorMessage || 'Không thể xác thực quyền truy cập.'}</p>
+          <button
+            type="button"
+            onClick={() => {
+              setIsAccessChecking(true);
+              void verifyOrganizationAccess();
+            }}
+            className="mt-4 rounded-lg bg-[#0E7C6B] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[#0A5C50]"
+          >
+            Thử lại
+          </button>
+        </div>
       </main>
     );
   }

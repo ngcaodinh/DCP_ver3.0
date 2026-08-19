@@ -28,6 +28,7 @@ const applicationRouteModules: Array<[string, string]> = [
   ['../../routes/verification.routes', 'createVerificationRoutes'],
   ['../../routes/feedback.routes', 'createFeedbackRoutes'],
   ['../../routes/public-feedback.routes', 'createPublicFeedbackRoutes'],
+  ['../../routes/foundation-kyc.routes', 'createFoundationKycRoutes'],
   ['../../routes/tileProxyRoutes', 'createTileProxyRoutes'],
   ['../../routes/audit-log.routes', 'createAuditLogRoutes']
 ];

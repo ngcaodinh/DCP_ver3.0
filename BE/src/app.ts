@@ -22,6 +22,7 @@ import { createTransparencyRoutes } from './routes/transparencyRoutes';
 import { createVerificationRoutes } from './routes/verification.routes';
 import { createFeedbackRoutes } from './routes/feedback.routes';
 import { createPublicFeedbackRoutes } from './routes/public-feedback.routes';
+import { createFoundationKycRoutes } from './routes/foundation-kyc.routes';
 import { createTileProxyRoutes } from './routes/tileProxyRoutes';
 import { createAuditLogRoutes } from './routes/audit-log.routes';
 import { createTrustScoreRoutes } from './routes/trustScoreRoutes';
@@ -37,9 +38,11 @@ import { getSentryConfigWarning } from './config/sentryConfig';
 import { reportTerminalError } from './utils/sentryReporter';
 import { validateFeedbackSubmissionTicketConfig } from './utils/feedbackSubmissionTicket';
 import { validatePublicFeedbackRuntimeConfig } from './config/publicFeedbackRuntimeConfig';
+import { validateFoundationKycRuntimeConfig } from './config/foundationKycRuntimeConfig';
 
 const application = express();
 const PUBLIC_FEEDBACK_SUBMISSION_BODY_LIMIT = '32kb';
+const FOUNDATION_KYC_BODY_LIMIT = process.env.FOUNDATION_KYC_BODY_LIMIT || '8mb';
 
 // Kiểm tra GUEST_JWT_SECRET ngay khi app khởi động để phát hiện cấu hình sai sớm.
 // Nếu thiếu hoặc quá ngắn, tiến trình dừng ngay thay vì chờ request đầu tiên.
@@ -67,6 +70,7 @@ validateCacheHmacConfig();
 validateMetricsAuthConfig();
 validateFeedbackSubmissionTicketConfig();
 validatePublicFeedbackRuntimeConfig();
+validateFoundationKycRuntimeConfig();
 
 // Sentry là tầng quan sát: thiếu DSN thì cảnh báo, không biến production thành sự cố diện rộng.
 const sentryConfigWarning = getSentryConfigWarning();
@@ -127,6 +131,9 @@ function configureMiddlewares(): void {
     express.urlencoded({ extended: false, limit: PUBLIC_FEEDBACK_SUBMISSION_BODY_LIMIT })
   );
 
+  // File FOUNDATION tối đa 5MB sau decode cần parser riêng vì base64 làm payload JSON lớn hơn file gốc.
+  application.use('/api/foundation-kyc/submit', express.json({ limit: FOUNDATION_KYC_BODY_LIMIT }));
+
   // Giữ giới hạn body nhất quán giữa local và production để tránh cạn bộ nhớ trên VPS ít RAM.
   application.use(express.json({ limit: requestBodyLimit }));
   application.use(express.urlencoded({ extended: true, limit: requestBodyLimit }));
@@ -174,6 +181,7 @@ function registerRoutes(): void {
   application.use('/api/transparency', createVerificationRoutes());
   application.use('/api/feedback', createFeedbackRoutes());
   application.use('/api/feedback', createPublicFeedbackRoutes());
+  application.use('/api/foundation-kyc', createFoundationKycRoutes());
   application.use('/api/tiles', createTileProxyRoutes()); // [A-NEW3 fix] Tile proxy để tránh lộ GPS ra third-party
   application.use('/api/trust-score', createTrustScoreRoutes());
   application.use(API_GUEST_PREFIX, createGuestRoutes());

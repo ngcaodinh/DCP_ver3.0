@@ -1,4 +1,4 @@
-const ipfsGatewayBaseUrl = 'https://gateway.pinata.cloud/ipfs';
+const ipfsGatewayBaseUrl = 'https://ipfs.io/ipfs';
 const trustedIpfsGatewayHosts = new Set(['gateway.pinata.cloud', 'ipfs.io', 'cloudflare-ipfs.com']);
 
 type ResolveIpfsPreviewKindInput = {
@@ -60,8 +60,9 @@ export function buildIpfsGatewayUrlList(cidValue: string): string[] {
   }
 
   return [
-    `https://gateway.pinata.cloud/ipfs/${encodeURIComponent(normalizedCidValue)}`,
-    `https://ipfs.io/ipfs/${encodeURIComponent(normalizedCidValue)}`
+    `https://ipfs.io/ipfs/${encodeURIComponent(normalizedCidValue)}`,
+    `https://cloudflare-ipfs.com/ipfs/${encodeURIComponent(normalizedCidValue)}`,
+    `https://gateway.pinata.cloud/ipfs/${encodeURIComponent(normalizedCidValue)}`
   ];
 }
 

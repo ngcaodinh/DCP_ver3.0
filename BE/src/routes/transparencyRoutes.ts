@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { handleGetUnifiedTimeline } from '../controllers/transparencyController';
+import { handleGetFoundationKycStatus, handleGetUnifiedTimeline } from '../controllers/transparencyController';
 import { createRateLimitMiddleware } from '../middleware/rateLimitMiddleware';
 
 /**
@@ -35,6 +35,12 @@ export function createTransparencyRoutes(): Router {
     timelineRateLimit,
     handleGetUnifiedTimeline
   );
+
+  const foundationKycStatusRateLimit = createRateLimitMiddleware(60, 60 * 1000, {
+    bucketName: 'transparency:foundation-kyc'
+  });
+
+  router.get('/foundation-kyc-status', foundationKycStatusRateLimit, handleGetFoundationKycStatus);
 
   return router;
 }

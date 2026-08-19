@@ -9,12 +9,13 @@ describe('IPFS gallery helpers', () => {
     expect(normalizeIpfsCid(VALID_CID)).toBe(VALID_CID);
   });
 
-  it('builds two ordered gateway URLs for a valid CID', () => {
+  it('builds public-first gateway URLs for a valid CID', () => {
     const urls = buildIpfsGatewayUrlList(VALID_CID);
 
-    expect(urls).toHaveLength(2);
-    expect(urls[0]).toContain('gateway.pinata.cloud');
-    expect(urls[1]).toContain('ipfs.io');
+    expect(urls).toHaveLength(3);
+    expect(urls[0]).toContain('ipfs.io');
+    expect(urls[1]).toContain('cloudflare-ipfs.com');
+    expect(urls[2]).toContain('gateway.pinata.cloud');
     expect(new URL(urls[0]).host).not.toBe(new URL(urls[1]).host);
   });
 

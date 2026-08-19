@@ -43,7 +43,7 @@ vi.mock('../../config/zeroDev', () => ({
     paymasterUrl: 'https://paymaster.zerodev.io',
     projectId: 'test-project-id',
     entryPointAddress: '0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789',
-    rpcUrl: 'https://rpc-amoy.polygon.technology'
+    rpcUrl: 'https://polygon-amoy.drpc.org'
   }))
 }));
 

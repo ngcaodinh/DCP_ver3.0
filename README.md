@@ -150,7 +150,7 @@ NEXT_PUBLIC_DONATION_RANKING_CONTRACT_ADDRESS=0x...
 #### Blockchain Environment
 
 ```env
-AMOY_RPC_URL=https://rpc-amoy.polygon.technology
+AMOY_RPC_URL=https://polygon-amoy.drpc.org
 DEPLOYER_PRIVATE_KEY=your_private_key
 POLYGONSCAN_API_KEY=your_polygonscan_api_key
 ```

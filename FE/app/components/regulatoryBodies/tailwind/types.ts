@@ -1,4 +1,4 @@
-﻿export type PageKey = 'dashboard' | 'projectReview' | 'disbursement' | 'kyc' | 'bankAccountApproval' | 'report' | 'transparency' | 'sybilManagement';
+﻿export type PageKey = 'dashboard' | 'projectReview' | 'disbursement' | 'kyc' | 'bankAccountApproval' | 'foundationKyc' | 'report' | 'transparency' | 'sybilManagement';
 
 export type NavigationItem = {
   key: PageKey;
@@ -114,5 +114,4 @@ export type SybilToggleResult = {
   updatedAt: string;
   updatedBy: string;
 };
-
 

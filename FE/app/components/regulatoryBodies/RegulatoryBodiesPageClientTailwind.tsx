@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useQueryClient } from '@tanstack/react-query';
 import { clearAuthSession, readAuthSession } from '../../utils/authSession';
+import { refreshAuthSession } from '../../utils/authSessionRefresh';
 import { buildApiUrl, fetchApi } from '@/app/utils/apiClient';
 import AuditTable from './tailwind/AuditTable';
 import { navigationItemList } from './tailwind/data';
@@ -72,6 +73,16 @@ function normalizeUserRole(userRoleValue: string | undefined | null): string {
 function isRegulatoryRole(userRoleValue: string | undefined | null): boolean {
   const normalizedUserRole = normalizeUserRole(userRoleValue);
   return normalizedUserRole === 'regulatory' || normalizedUserRole === 'regulatorybody' || normalizedUserRole === 'regulatorybodies';
+}
+
+/** Gọi hồ sơ hiện tại để xác thực quyền Regulatory bằng access token đang hoạt động. */
+function requestRegulatoryProfile(accessToken: string): Promise<Response> {
+  return fetch(buildApiUrl('/auth/me'), {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${accessToken}`
+    }
+  });
 }
 
 /** Hàm tạo toast mới để tái sử dụng cho nhiều hành động UI trên trang tổng quan. */
@@ -235,6 +246,9 @@ export default function RegulatoryBodiesPageClientTailwind() {
   const [selectedDrawerTabKey, setSelectedDrawerTabKey] = useState<DrawerTabKey>('overview');
   const [toastItemList, setToastItemList] = useState<ToastItem[]>([]);
   const [isAccessChecking, setIsAccessChecking] = useState(true);
+  const [hasRegulatoryAccess, setHasRegulatoryAccess] = useState(false);
+  const [verifiedAccessToken, setVerifiedAccessToken] = useState('');
+  const [accessErrorMessage, setAccessErrorMessage] = useState('');
   const [isDashboardLoading, setIsDashboardLoading] = useState(false);
   const [isDashboardError, setIsDashboardError] = useState(false);
   const [isLogoutProcessing, setIsLogoutProcessing] = useState(false);
@@ -331,6 +345,9 @@ export default function RegulatoryBodiesPageClientTailwind() {
 
   /** Hàm kiểm tra quyền truy cập regulatory kết hợp xác thực server để chống bypass role ở client. */
   const verifyRegulatoryAccess = useCallback(async () => {
+    setHasRegulatoryAccess(false);
+    setVerifiedAccessToken('');
+    setAccessErrorMessage('');
     const sessionPayload = readAuthSession();
     if (!sessionPayload.accessToken) {
       clearAuthSession();
@@ -350,12 +367,35 @@ export default function RegulatoryBodiesPageClientTailwind() {
     }
 
     try {
-      const response = await fetch(buildApiUrl('/auth/me'), {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${sessionPayload.accessToken}`
+      let accessToken = sessionPayload.accessToken;
+      let response = await requestRegulatoryProfile(accessToken);
+
+      if (response.status === 401) {
+        const refreshResult = await refreshAuthSession();
+        if (refreshResult.status === 'REFRESHED') {
+          accessToken = refreshResult.accessToken;
+          response = await requestRegulatoryProfile(accessToken);
+        } else if (refreshResult.status === 'RATE_LIMITED') {
+          setAccessErrorMessage('Hệ thống đang giới hạn tần suất xác thực. Vui lòng thử lại sau ít phút.');
+          return;
+        } else if (refreshResult.status === 'UNAVAILABLE') {
+          setAccessErrorMessage('Chưa thể kết nối máy chủ để khôi phục phiên. Vui lòng thử lại.');
+          return;
+        } else {
+          router.replace('/login');
+          return;
         }
-      });
+      }
+
+      if (response.status === 429) {
+        setAccessErrorMessage('Hệ thống đang giới hạn tần suất xác thực. Vui lòng thử lại sau ít phút.');
+        return;
+      }
+
+      if (response.status >= 500) {
+        setAccessErrorMessage('Máy chủ đang tạm thời không phản hồi. Vui lòng thử lại sau ít phút.');
+        return;
+      }
 
       if (!response.ok) {
         clearAuthSession();
@@ -377,9 +417,11 @@ export default function RegulatoryBodiesPageClientTailwind() {
         router.replace('/');
         return;
       }
+
+      setVerifiedAccessToken(accessToken);
+      setHasRegulatoryAccess(true);
     } catch {
-      clearAuthSession();
-      router.replace('/login');
+      setAccessErrorMessage('Không thể kết nối máy chủ để xác thực phiên. Vui lòng thử lại.');
       return;
     } finally {
       setIsAccessChecking(false);
@@ -547,12 +589,12 @@ export default function RegulatoryBodiesPageClientTailwind() {
 
   /** Hàm tải dữ liệu dashboard khi đã xác thực quyền và đang ở trang ký duyệt. */
   useEffect(() => {
-    if (isAccessChecking || !shouldRenderSigningDashboard) {
+    if (isAccessChecking || !hasRegulatoryAccess || !shouldRenderSigningDashboard) {
       return;
     }
 
     void loadDashboardData();
-  }, [isAccessChecking, loadDashboardData, shouldRenderSigningDashboard]);
+  }, [hasRegulatoryAccess, isAccessChecking, loadDashboardData, shouldRenderSigningDashboard]);
 
   if (isAccessChecking) {
     return (
@@ -560,6 +602,28 @@ export default function RegulatoryBodiesPageClientTailwind() {
         <div className="flex min-h-screen items-center justify-center">
           <div className="rounded-lg bg-white px-6 py-4 shadow-sm">
             <p className="text-sm font-medium text-slate-700">Đang kiểm tra quyền truy cập...</p>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  if (!hasRegulatoryAccess) {
+    return (
+      <main className="min-h-screen bg-slate-50 text-slate-900">
+        <div className="flex min-h-screen items-center justify-center px-4">
+          <div className="w-full max-w-md rounded-xl border border-amber-200 bg-white p-6 text-center shadow-sm">
+            <p className="text-sm font-medium text-slate-700">{accessErrorMessage || 'Không thể xác thực quyền truy cập.'}</p>
+            <button
+              type="button"
+              onClick={() => {
+                setIsAccessChecking(true);
+                void verifyRegulatoryAccess();
+              }}
+              className="mt-4 rounded-lg bg-emerald-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-800"
+            >
+              Thử lại
+            </button>
           </div>
         </div>
       </main>
@@ -663,7 +727,7 @@ export default function RegulatoryBodiesPageClientTailwind() {
 
               <AuditTable auditLogItemList={auditLogItemList} />
             </>
-          ) : <NonDashboardPanel selectedPageKey={selectedPageKey} onOpenDisbursementRequest={handleOpenDrawer} />}
+          ) : <NonDashboardPanel accessToken={verifiedAccessToken} selectedPageKey={selectedPageKey} onOpenDisbursementRequest={handleOpenDrawer} />}
         </div>
       </section>
 

@@ -14,7 +14,7 @@ export default function robots(): MetadataRoute.Robots {
       {
         userAgent: '*',
         allow: ['/', '/donations', '/organizations', '/impact-gallery'],
-        disallow: ['/admin', '/login', '/register', '/unauthorized', '/deposit', '/donors', '/regulatory-bodies', '/feedback']
+        disallow: ['/admin', '/login', '/register', '/unauthorized', '/deposit', '/donors', '/regulatory-bodies', '/feedback', '/foundation-kyc']
       }
     ],
     sitemap: `${siteBaseUrl}/sitemap.xml`,

@@ -4,6 +4,7 @@ import {
   handleGetCreateProjectEligibility,
   handleGetOrganizationProjects,
   handleGetPendingApprovalProjects,
+  handleGetProjectReviewHistory,
   handleGetPublicSupportProjectDetail,
   handleGetPublicSupportProjects,
   handleReviewProject,
@@ -22,7 +23,7 @@ export function createProjectRoutes(): Router {
   const authenticationMiddleware = createAuthenticationMiddleware();
   const getProjectsRateLimit = createRateLimitMiddleware(60, 60 * 1000, { bucketName: 'projects:get-list' });
   const createProjectRateLimit = createRateLimitMiddleware(10, 60 * 1000, { bucketName: 'projects:create' });
-  const createEligibilityRateLimit = createRateLimitMiddleware(30, 60 * 1000, { bucketName: 'projects:create-eligibility' });
+  const createEligibilityRateLimit = createRateLimitMiddleware(120, 60 * 1000, { bucketName: 'projects:create-eligibility' });
   const uploadEvidencesRateLimit = createRateLimitMiddleware(20, 60 * 1000, { bucketName: 'projects:upload-evidences' });
   const submitProjectRateLimit = createRateLimitMiddleware(20, 60 * 1000, { bucketName: 'projects:submit' });
   const updateProjectRateLimit = createRateLimitMiddleware(20, 60 * 1000, { bucketName: 'projects:update' });
@@ -78,6 +79,15 @@ export function createProjectRoutes(): Router {
     handleGetPendingApprovalProjects
   );
 
+  router.get(
+    '/review-history',
+    attachRequestMetadata(),
+    authenticationMiddleware,
+    reviewerAuthorizationMiddleware,
+    reviewProjectRateLimit,
+    handleGetProjectReviewHistory
+  );
+
   router.post(
     '/submit',
     attachRequestMetadata(),
@@ -107,4 +117,3 @@ export function createProjectRoutes(): Router {
 
   return router;
 }
-

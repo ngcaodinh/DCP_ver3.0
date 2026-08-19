@@ -31,12 +31,26 @@ npm run dev
   - Dấu hiệu: backend báo không tìm thấy contract.
   - Cách xử lý: `npm run deploy:local`, cập nhật `CONTRACT_ADDRESS`, khởi động lại backend.
 
-## 5) Lưu ý để vận hành ổn định
+## 5) Vận hành KYC Quỹ từ thiện (T0)
+
+1. Cấu hình `RECAPTCHA_SECRET_KEY` hoặc file secret qua `RECAPTCHA_SECRET_KEY_FILE` trên backend; production sẽ fail-fast nếu thiếu secret, salt IP hoặc dùng placeholder.
+2. Cấu hình `NEXT_PUBLIC_RECAPTCHA_SITE_KEY` trên frontend rồi build lại frontend khi thay đổi.
+3. Sau khi backup MongoDB, chạy migration idempotent:
+
+```bash
+cd BE
+npm run migrate:foundation-kyc-index
+```
+
+4. Endpoint public giới hạn 3 request/phút/IP và 5 request/ngày/IP; dữ liệu IP dùng HMAC hash trước khi ghi quota.
+5. Từ chối hồ sơ FOUNDATION là quyết định cuối cùng. Reviewer cần liên hệ quỹ ngoài hệ thống trước khi xác nhận từ chối.
+
+## 6) Lưu ý để vận hành ổn định
 - Luôn đảm bảo MongoDB chạy trước khi chạy `npm run dev`.
 - Mỗi lần deploy lại contract, phải cập nhật `CONTRACT_ADDRESS`.
 - Khi đổi RPC hoặc chainId, cập nhật đồng bộ cả backend và frontend.
 
-## 6) Deploy gate cho Manual Review Queue (A3)
+## 7) Deploy gate cho Manual Review Queue (A3)
 
 Thực hiện theo đúng thứ tự này khi deploy image BE có thay đổi A3:
 

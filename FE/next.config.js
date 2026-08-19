@@ -136,6 +136,16 @@ const nextConfig = {
         ]
       },
       {
+        // Cổng FOUNDATION là form một lần và không được CDN giữ lại trạng thái hoặc payload cũ.
+        source: '/foundation-kyc',
+        headers: [
+          {
+            key: 'Cache-Control',
+            value: 'no-store'
+          }
+        ]
+      },
+      {
         // Static pages — không bao gồm /donate vì donate có wallet state (không nên cache trên CDN)
         // Tunnel không được dính Cache-Control public vì đây là endpoint ingest động.
         source: '/((?!api|_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml|donate|feedback|sentry-tunnel).*)',
