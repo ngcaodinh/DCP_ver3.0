@@ -25,6 +25,8 @@ export type GeofenceQueryError = ApiErrorResponse;
  * Disabled khi projectId undefined.
  */
 export function useGeofence(projectId: string | undefined): UseQueryResult<GeofenceData, GeofenceQueryError> {
+  const accessToken = readAuthSession().accessToken?.trim() ?? '';
+
   return useQuery<GeofenceData, GeofenceQueryError>({
     queryKey: ['geofence', projectId],
     queryFn: async () => {
@@ -38,14 +40,13 @@ export function useGeofence(projectId: string | undefined): UseQueryResult<Geofe
         throw missingProjectIdError;
       }
 
-      const session = readAuthSession();
       const res = await fetchApi<GeofenceData>(
         buildApiUrl(`/api/oracle/geofence/${encodeURIComponent(projectId)}`),
-        { headers: { Authorization: `Bearer ${session?.accessToken ?? ''}` } }
+        { headers: { Authorization: `Bearer ${accessToken}` } }
       );
       return res.data;
     },
-    enabled: Boolean(projectId),
+    enabled: Boolean(projectId && accessToken),
     staleTime: 5 * 60 * 1000,
     retry: (failureCount, error) => {
       // Không retry lỗi xác thực/quyền hoặc 404 vì đây không phải lỗi mạng tạm thời.

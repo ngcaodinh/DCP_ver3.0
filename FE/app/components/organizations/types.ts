@@ -68,7 +68,7 @@ export type TransactionRow = {
   statusStyle: string;
 };
 
-export type ProjectSummaryStatus = 'DRAFT' | 'PENDING_APPROVAL' | 'ACTIVE' | 'COMPLETED' | 'CLOSED' | 'REJECTED';
+export type ProjectSummaryStatus = 'DRAFT' | 'PENDING_APPROVAL' | 'PENDING_ACTIVATION' | 'DISPUTED' | 'ACTIVE' | 'COMPLETED' | 'CLOSED' | 'REJECTED';
 
 export type ProjectSummary = {
   projectId: string;
@@ -84,6 +84,10 @@ export type ProjectSummary = {
   reviewedAt: string | null;
   reviewedBy: string | null;
   rejectionReason: string | null;
+  hasGeofence?: boolean;
+  milestonePlan?: Array<{ milestoneIndex: number; milestoneKey: string; percentage: number; description: string }>;
+  listedAt?: string | null;
+  activationEligibleAt?: string | null;
   createdAt: string;
 };
 export type DisbursementStatus = 'PENDING' | 'APPROVED' | 'EXECUTING' | 'REJECTED' | 'COMPLETED' | 'EXPIRED' | 'CANCELLED';

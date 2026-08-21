@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import OrganizationsPageView from '../components/organizations/OrganizationsPageView';
+import type { OrganizationPageKey } from '../components/organizations/types';
 
 export const metadata: Metadata = {
   title: 'Tổ chức từ thiện',
@@ -16,7 +17,14 @@ export const metadata: Metadata = {
   }
 };
 
-/** Hàm trang Organizations. Mục đích: hiển thị layout Organizations đầy đủ. */
-export default function OrganizationsPage() {
-  return <OrganizationsPageView />;
+/** Hàm trang Organizations. Mục đích: hiển thị layout Organizations và khởi tạo tab hợp lệ từ URL. */
+export default async function OrganizationsPage({
+  searchParams
+}: {
+  searchParams: Promise<{ tab?: string }>;
+}) {
+  const { tab } = await searchParams;
+  const initialPage: OrganizationPageKey = tab === 'projects' ? 'projects' : 'dashboard';
+
+  return <OrganizationsPageView initialPage={initialPage} />;
 }

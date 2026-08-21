@@ -17,6 +17,12 @@ import { useEffect, useMemo, useRef } from 'react';
 import L from 'leaflet';
 import { MapContainer, TileLayer, Polygon, Circle, CircleMarker, Popup, useMap } from 'react-leaflet';
 import { useGeofence } from '@/app/hooks/useGeofence';
+import {
+  getMapTileUrl,
+  MAP_MAX_ZOOM,
+  MAP_MIN_ZOOM,
+  MAP_TILE_ATTRIBUTION
+} from '@/app/utils/mapTileProvider';
 
 // =============================================================================
 // TYPES
@@ -353,13 +359,19 @@ export default function GeofenceMap({ projectId, snapshot, markers = EMPTY_GEOFE
       <MapContainer
         center={centroidLatLng}
         zoom={14}
+        minZoom={MAP_MIN_ZOOM}
+        maxZoom={MAP_MAX_ZOOM}
         scrollWheelZoom={false}
         className="h-full w-full"
         // Giữ dragging + touchZoom mặc định để pan/pinch trên mobile hoạt động
       >
         <TileLayer
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-          url={`${process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:5000'}/api/tiles/{z}/{x}/{y}.png`}
+          attribution={MAP_TILE_ATTRIBUTION}
+          url={getMapTileUrl()}
+          minZoom={MAP_MIN_ZOOM}
+          maxZoom={MAP_MAX_ZOOM}
+          maxNativeZoom={MAP_MAX_ZOOM}
+          noWrap
         />
 
         {/* Fit bounds về polygon + marker có tọa độ sau khi map mount */}

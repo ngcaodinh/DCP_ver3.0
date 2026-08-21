@@ -136,6 +136,10 @@ type SidebarItemProps = {
   onTriggerAction: (action: 'createProject') => void;
 };
 
+type OrganizationsPageViewProps = {
+  initialPage?: OrganizationPageKey;
+};
+
 /** Hàm kiểm tra có tài khoản thụ hưởng đã duyệt hay chưa. Mục đích: chặn UI tạo dự án khi chưa đủ điều kiện ngân hàng theo dữ liệu thật từ KYC. Chỉ check submission có dữ liệu bank account thực sự, tránh nhầm với KYC profile submission. */
 function hasApprovedBeneficiaryBankAccount(submissionList: OrganizationKycSubmissionSummary[]): boolean {
   return submissionList.some(submissionItem =>
@@ -182,10 +186,10 @@ function SidebarItem({ item, activePage, onSelectPage, onTriggerAction }: Sideba
 }
 
 /** Hàm render trang Organizations chi tiết. Mục đích: bám sát layout HTML gốc theo các section chính. */
-export default function OrganizationsPageView() {
+export default function OrganizationsPageView({ initialPage = 'dashboard' }: OrganizationsPageViewProps) {
   const router = useRouter();
   const backendBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:4000';
-  const [activePage, setActivePage] = useState<OrganizationPageKey>('dashboard');
+  const [activePage, setActivePage] = useState<OrganizationPageKey>(initialPage);
   const [activeDisbursementTab, setActiveDisbursementTab] = useState<'eligible' | 'pending' | 'history'>('eligible');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isCreateProjectOpen, setIsCreateProjectOpen] = useState(false);

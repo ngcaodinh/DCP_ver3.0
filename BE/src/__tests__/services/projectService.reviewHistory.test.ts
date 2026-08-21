@@ -69,26 +69,32 @@ describe('project service review history', () => {
     mockFindUserById.mockResolvedValue({ id: 'regulatory-1', role: 'regulatory' });
   });
 
-  it('returns pending, approved and rejected projects for a regulatory reviewer', async () => {
+  it('returns every governance lifecycle status for a regulatory reviewer', async () => {
     mockFindProjectsByStatusList.mockResolvedValue([
       createProjectFixture('PENDING_APPROVAL'),
+      createProjectFixture('PENDING_ACTIVATION'),
+      createProjectFixture('DISPUTED'),
       createProjectFixture('ACTIVE'),
       createProjectFixture('REJECTED')
     ]);
 
     await expect(getProjectReviewHistoryForReviewer('regulatory-1')).resolves.toEqual(expect.arrayContaining([
       expect.objectContaining({ status: 'PENDING_APPROVAL' }),
+      expect.objectContaining({ status: 'PENDING_ACTIVATION' }),
+      expect.objectContaining({ status: 'DISPUTED' }),
       expect.objectContaining({ status: 'ACTIVE' }),
       expect.objectContaining({ rejectionReason: 'Không đáp ứng tiêu chí hỗ trợ.', status: 'REJECTED' })
     ]));
-    expect(mockFindProjectsByStatusList).toHaveBeenCalledWith(['PENDING_APPROVAL', 'ACTIVE', 'REJECTED']);
+    expect(mockFindProjectsByStatusList).toHaveBeenCalledWith(['PENDING_APPROVAL', 'PENDING_ACTIVATION', 'DISPUTED', 'ACTIVE', 'REJECTED']);
   });
 
-  it('allows an administrator to read the same review history', async () => {
+  it('rejects an administrator because only regulatory may review projects', async () => {
     mockFindUserById.mockResolvedValue({ id: 'admin-1', role: 'admin' });
-    mockFindProjectsByStatusList.mockResolvedValue([createProjectFixture('ACTIVE')]);
 
-    await expect(getProjectReviewHistoryForReviewer('admin-1')).resolves.toHaveLength(1);
+    await expect(getProjectReviewHistoryForReviewer('admin-1')).rejects.toMatchObject({
+      errorCode: 'FORBIDDEN', statusCode: 403
+    });
+    expect(mockFindProjectsByStatusList).not.toHaveBeenCalled();
   });
 
   it('rejects callers without reviewer permissions before loading history', async () => {

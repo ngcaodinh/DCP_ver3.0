@@ -46,7 +46,7 @@ vi.mock('@/app/components/organizations/OrganizationsSections', () => ({
   CreateProjectModal: () => null,
   DashboardSection: () => <div>Trang tổng quan tổ chức</div>,
   DisbursementSection: () => <div>Giải ngân</div>,
-  ProjectsSection: () => <div>Dự án</div>,
+  ProjectsSection: () => <div data-testid="projects-section">Dự án</div>,
   SettingsSection: () => <div>Cài đặt</div>,
   TransparencySection: () => <div>Minh bạch</div>
 }));
@@ -106,5 +106,13 @@ describe('OrganizationsPageView access guard', () => {
     expect(await screen.findByText('Trang tổng quan tổ chức')).toBeInTheDocument();
     expect(mockClearAuthSession).not.toHaveBeenCalled();
     expect(mockRouterReplace).not.toHaveBeenCalled();
+  });
+
+  it('opens the My Projects tab when it receives projects as the initial page', async () => {
+    mockFetch.mockResolvedValue(createOrganizationProfileResponse());
+
+    render(<OrganizationsPageView initialPage="projects" />);
+
+    expect(await screen.findByTestId('projects-section')).toBeInTheDocument();
   });
 });

@@ -1,3 +1,4 @@
+import { type ClientSession } from 'mongoose';
 import {
   countActiveProjectsByOrganizationId,
   createProjectRecord,
@@ -6,13 +7,17 @@ import {
   findProjectsByOrganizationId,
   findProjectsByStatus,
   findProjectsByStatusList,
+  findPendingActivationProjectsForPublic,
+  findProjectsReadyForActivation,
+  claimProjectForActivation,
   findPublicSupportProjectByProjectId,
   findPublicSupportProjects,
   findAllProjectsByProjectIdList,
   ProjectEvidenceFileRecord,
   ProjectRecord,
   ProjectStatus,
-  updateProjectByProjectId
+  updateProjectByProjectId,
+  updateProjectByProjectIdIfStatus
 } from '../models/projectModel';
 
 export type CreateProjectDataAccessPayload = {
@@ -29,6 +34,15 @@ export type CreateProjectDataAccessPayload = {
   reviewedAt: Date | null;
   reviewedBy: string | null;
   rejectionReason: string | null;
+  milestonePlan?: ProjectRecord['milestonePlan'];
+  listedAt?: Date | null;
+  activationEligibleAt?: Date | null;
+  activationClaimedAt?: Date | null;
+  activationState?: ProjectRecord['activationState'];
+  activationAttemptCount?: number;
+  activationLastAttemptAt?: Date | null;
+  activationLastError?: string | null;
+  listingRound?: number;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -81,6 +95,26 @@ export async function findPublicSupportProjectsFromRepository(limitCount: number
 /** Hàm repository lấy chi tiết dự án public theo projectId. Mục đích: cấp dữ liệu thật cho modal chi tiết ở homepage. */
 export async function findPublicSupportProjectDetailFromRepository(projectId: string): Promise<ProjectRecord | null> {
   return findPublicSupportProjectByProjectId(projectId);
+}
+
+/** Lấy danh sách công khai đang niêm yết để người xem theo dõi giai đoạn chờ kích hoạt. */
+export async function findPendingActivationProjectsForPublicFromRepository(limitCount: number): Promise<ProjectRecord[]> {
+  return findPendingActivationProjectsForPublic(limitCount);
+}
+
+/** Lấy batch dự án đã qua cửa sổ khiếu nại để worker kích hoạt. */
+export async function findProjectsReadyForActivationFromRepository(now: Date, limitCount: number): Promise<ProjectRecord[]> {
+  return findProjectsReadyForActivation(now, limitCount);
+}
+
+/** Claim dự án nguyên tử để chỉ một instance sở hữu lần kích hoạt. */
+export async function claimProjectForActivationFromRepository(projectId: string, expectedStatus: ProjectStatus, staleClaimCutoff: Date): Promise<ProjectRecord | null> {
+  return claimProjectForActivation(projectId, expectedStatus, staleClaimCutoff);
+}
+
+/** Đổi trạng thái dự án có điều kiện để transaction khiếu nại không đè worker. */
+export async function updateProjectIfStatus(projectId: string, expectedStatus: ProjectStatus, payload: Partial<ProjectRecord>, session?: ClientSession): Promise<ProjectRecord | null> {
+  return updateProjectByProjectIdIfStatus(projectId, expectedStatus, payload, session);
 }
 
 /** Hàm repository cập nhật dự án theo projectId. Mục đích: cập nhật trạng thái submit/review. */

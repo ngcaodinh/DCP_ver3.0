@@ -1,13 +1,13 @@
 'use client';
 
 // =============================================================================
-// GeofenceEditorLazy — B5: Wrapper next/dynamic cho GeofenceEditor.
+// GeofenceEditorMapLazy — B5: Wrapper next/dynamic cho GeofenceEditorMap.
 // Leaflet yêu cầu DOM nên phải disable SSR. Mọi nơi dùng editor import từ đây,
 // không import GeofenceEditor trực tiếp.
 // =============================================================================
 
 import dynamic from 'next/dynamic';
-import type { GeofenceEditorProps } from './GeofenceEditor';
+import type { GeofenceEditorProps } from './GeofenceEditorMap';
 
 /** Skeleton hiển thị khi JS bundle đang tải */
 function EditorLoadingSkeleton() {
@@ -20,7 +20,7 @@ function EditorLoadingSkeleton() {
   );
 }
 
-const GeofenceEditorDynamic = dynamic(() => import('./GeofenceEditor'), {
+const GeofenceEditorDynamic = dynamic(() => import('./GeofenceEditorMap'), {
   ssr: false,
   loading: EditorLoadingSkeleton,
 });

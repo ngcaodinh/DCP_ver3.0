@@ -13,7 +13,11 @@ vi.mock('../../config/logger', () => ({
   }))
 }));
 
-import { __resetTileProxyCache, proxyOsmTile } from '../../controllers/tileProxyController';
+import {
+  __resetTileProxyCache,
+  proxyAdministrativeMapTile,
+  proxyMapTile
+} from '../../controllers/tileProxyController';
 
 /**
  * Tạo request Express tối giản chỉ chứa tile path parameters.
@@ -56,7 +60,7 @@ function createResponse(): {
 }
 
 /**
- * Tạo HTTP response PNG giả lập từ OSM.
+ * Tạo HTTP response PNG giả lập từ nhà cung cấp tile.
  * @param body Nội dung tile PNG giả lập.
  * @returns Response có content type và content length phù hợp.
  */
@@ -79,29 +83,33 @@ describe('tileProxyController', () => {
     vi.unstubAllGlobals();
   });
 
-  it('trả 400 và không gọi OSM khi tile parameter không phải số nguyên', async () => {
+  it('trả 400 và không gọi provider khi tile parameter không phải số nguyên', async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     const { response, statusMock, jsonMock } = createResponse();
 
-    await proxyOsmTile(createRequest({ z: '4abc', x: '1', y: '2' }), response);
+    await proxyMapTile(createRequest({ z: '4abc', x: '1', y: '2' }), response);
 
     expect(statusMock).toHaveBeenCalledWith(400);
     expect(jsonMock).toHaveBeenCalledWith({ error: 'Invalid tile coordinates' });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('cache server-side tile hợp lệ để request cùng tọa độ không gọi OSM lần hai', async () => {
+  it('cache server-side tile hợp lệ để request cùng tọa độ không gọi Carto lần hai', async () => {
     const fetchMock = vi.fn().mockResolvedValue(createPngResponse());
     vi.stubGlobal('fetch', fetchMock);
     const firstResponse = createResponse();
     const secondResponse = createResponse();
     const request = createRequest({ z: '4', x: '1', y: '2' });
 
-    await proxyOsmTile(request, firstResponse.response);
-    await proxyOsmTile(request, secondResponse.response);
+    await proxyMapTile(request, firstResponse.response);
+    await proxyMapTile(request, secondResponse.response);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringMatching(/^https:\/\/[abcd]\.basemaps\.cartocdn\.com\/rastertiles\/voyager\/4\/1\/2\.png$/),
+      expect.any(Object)
+    );
     expect(firstResponse.setMock).toHaveBeenCalledWith(expect.objectContaining({
       'Content-Type': 'image/png',
       'Cache-Control': 'public, max-age=604800, immutable'
@@ -119,13 +127,114 @@ describe('tileProxyController', () => {
     const secondResponse = createResponse();
     const request = createRequest({ z: '4', x: '1', y: '2' });
 
-    await proxyOsmTile(request, firstResponse.response);
-    await proxyOsmTile(request, secondResponse.response);
+    await proxyMapTile(request, firstResponse.response);
+    await proxyMapTile(request, secondResponse.response);
 
     expect(firstResponse.statusMock).toHaveBeenCalledWith(502);
     expect(firstResponse.jsonMock).toHaveBeenCalledWith({
       error: 'Tile provider returned unsupported content'
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('proxy lớp địa giới sau sáp nhập qua WMS chính thức với bounding box Web Mercator', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(createPngResponse());
+    vi.stubGlobal('fetch', fetchMock);
+    const { response, setMock } = createResponse();
+
+    await proxyAdministrativeMapTile(createRequest({ z: '0', x: '0', y: '0' }), response);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('LAYERS=vietnam_2026%2Cvietnam_label_2026'),
+      expect.any(Object)
+    );
+    expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('SRS=EPSG%3A3857'), expect.any(Object));
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('BBOX=-20037508.342789244%2C-20037508.342789244%2C20037508.342789244%2C20037508.342789244'),
+      expect.any(Object)
+    );
+    expect(setMock).toHaveBeenCalledWith(expect.objectContaining({ 'Content-Type': 'image/png' }));
+  });
+
+  it('cache tile địa giới hợp lệ để không gọi WMS lần hai', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(createPngResponse());
+    vi.stubGlobal('fetch', fetchMock);
+    const request = createRequest({ z: '6', x: '54', y: '35' });
+
+    await proxyAdministrativeMapTile(request, createResponse().response);
+    await proxyAdministrativeMapTile(request, createResponse().response);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    {
+      name: 'provider trả lỗi HTTP',
+      providerResponse: new Response('', { status: 503 }),
+      expectedStatusCode: 503,
+      expectedError: 'Administrative map tile not found'
+    },
+    {
+      name: 'provider không trả PNG',
+      providerResponse: new Response('<html>error</html>', { status: 200, headers: { 'content-type': 'text/html' } }),
+      expectedStatusCode: 502,
+      expectedError: 'Administrative map provider returned unsupported content'
+    },
+    {
+      name: 'provider công bố tile quá lớn',
+      providerResponse: new Response('tile-png', {
+        status: 200,
+        headers: { 'content-type': 'image/png', 'content-length': '524289' }
+      }),
+      expectedStatusCode: 502,
+      expectedError: 'Administrative map provider returned an oversized response'
+    }
+  ])('không cache khi $name', async ({ providerResponse, expectedStatusCode, expectedError }) => {
+    const fetchMock = vi.fn().mockResolvedValue(providerResponse);
+    vi.stubGlobal('fetch', fetchMock);
+    const request = createRequest({ z: '6', x: '54', y: '35' });
+    const firstResponse = createResponse();
+    const secondResponse = createResponse();
+
+    await proxyAdministrativeMapTile(request, firstResponse.response);
+    await proxyAdministrativeMapTile(request, secondResponse.response);
+
+    expect(firstResponse.statusMock).toHaveBeenCalledWith(expectedStatusCode);
+    expect(firstResponse.jsonMock).toHaveBeenCalledWith({ error: expectedError });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('trả lỗi 502 an toàn khi WMS không thể kết nối', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('Network unavailable')));
+    const { response, statusMock, jsonMock } = createResponse();
+
+    await proxyAdministrativeMapTile(createRequest({ z: '6', x: '54', y: '35' }), response);
+
+    expect(statusMock).toHaveBeenCalledWith(502);
+    expect(jsonMock).toHaveBeenCalledWith({ error: 'Failed to fetch administrative map tile' });
+  });
+
+  it('chặn tile địa giới vượt mức zoom chính thức hỗ trợ', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const { response, statusMock, jsonMock } = createResponse();
+
+    await proxyAdministrativeMapTile(createRequest({ z: '17', x: '0', y: '0' }), response);
+
+    expect(statusMock).toHaveBeenCalledWith(400);
+    expect(jsonMock).toHaveBeenCalledWith({ error: 'Invalid administrative map zoom level' });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('chặn tọa độ tile địa giới nằm ngoài phạm vi zoom hợp lệ', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const { response, statusMock, jsonMock } = createResponse();
+
+    await proxyAdministrativeMapTile(createRequest({ z: '16', x: '65536', y: '0' }), response);
+
+    expect(statusMock).toHaveBeenCalledWith(400);
+    expect(jsonMock).toHaveBeenCalledWith({ error: 'Tile coordinates out of bounds' });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

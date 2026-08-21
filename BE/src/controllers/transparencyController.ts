@@ -7,6 +7,74 @@ import {
 } from '../services/unified-timeline.service';
 import { getFoundationKycPublicStatus } from '../services/foundationKycStatus.service';
 import { sendErrorFromUnknown, sendSuccessResponse } from '../utils/apiResponse';
+import { countActiveAuditors, findUserById, findUsersByIds } from '../models/authModel';
+import { findPendingActivationProjectsForPublicFromRepository, findProjectById } from '../repositories/projectRepository';
+import { countProjectChallengesByProjectRoundFromRepository, findProjectChallengesFromRepository } from '../repositories/projectChallengeRepository';
+import { findAuditorFieldReportByProjectIdFromRepository } from '../repositories/auditorFieldReportRepository';
+
+/** Trả danh sách niêm yết công khai mà không cấp quyền nhận quyên góp. */
+export async function handleGetPendingActivationProjects(_request: Request, response: Response): Promise<void> {
+  try {
+    const [projects, activeAuditorCount] = await Promise.all([findPendingActivationProjectsForPublicFromRepository(50), countActiveAuditors()]);
+    const [organizations, challengeCounts] = await Promise.all([
+      findUsersByIds(projects.map(project => project.organizationId)),
+      countProjectChallengesByProjectRoundFromRepository(projects.map(project => project.projectId))
+    ]);
+    const organizationById = new Map(organizations.map(organization => [organization.id, organization]));
+    const challengeCountByProjectRound = new Map(challengeCounts.map(item => [`${item.projectId}:${item.round}`, item.count]));
+    const publicProjects = projects.map(project => {
+      const organization = organizationById.get(project.organizationId);
+      return {
+        projectId: project.projectId, name: project.name, description: project.description, goalAmount: project.goalAmount, deadline: project.deadline,
+        organizationName: organization?.organizationName || organization?.fullName || 'Tổ chức chưa xác định', status: project.status,
+        listedAt: project.listedAt || null, activationEligibleAt: project.activationEligibleAt || null, milestonePlan: project.milestonePlan || [],
+        evidenceCids: project.evidenceCids, challengeCount: challengeCountByProjectRound.get(`${project.projectId}:${Math.max(1, project.listingRound || 1)}`) || 0
+      };
+    });
+    sendSuccessResponse(response, 200, 'Lấy danh sách dự án đang niêm yết thành công.', {
+      activeAuditorCount,
+      projects: publicProjects
+    });
+  } catch (error) { sendErrorFromUnknown(response, error, 'Không thể lấy danh sách dự án đang niêm yết.'); }
+}
+
+/** Trả biên bản công khai với GPS và định danh auditor đã được loại bỏ. */
+/** Trả chi tiết niêm yết mà vẫn ẩn định danh thật của auditor trước công chúng. */
+export async function handleGetPendingActivationProjectDetail(request: Request, response: Response): Promise<void> {
+  const projectId = String(request.params.projectId || '').trim();
+  if (!projectId) { response.status(400).json({ success: false, message: 'projectId là bắt buộc.', errorCode: 'VALIDATION_ERROR', details: [] }); return; }
+  try {
+    const project = await findProjectById(projectId);
+    if (!project || !['PENDING_ACTIVATION', 'DISPUTED'].includes(project.status)) { response.status(404).json({ success: false, message: 'Không tìm thấy dự án niêm yết.', errorCode: 'NOT_FOUND', details: [] }); return; }
+    const [organization, challenges] = await Promise.all([
+      findUserById(project.organizationId),
+      findProjectChallengesFromRepository(project.projectId, Math.max(1, project.listingRound || 1))
+    ]);
+    sendSuccessResponse(response, 200, 'Lấy chi tiết dự án niêm yết thành công.', {
+      projectId: project.projectId, name: project.name, description: project.description, goalAmount: project.goalAmount, deadline: project.deadline,
+      organizationName: organization?.organizationName || organization?.fullName || 'Tổ chức chưa xác định', status: project.status,
+      listedAt: project.listedAt || null, activationEligibleAt: project.activationEligibleAt || null, milestonePlan: project.milestonePlan || [],
+      evidenceCids: project.evidenceCids, evidenceFiles: project.evidenceFiles,
+      challenges: challenges.map(challenge => ({ challengerLabel: `Kiểm toán viên #${challenge.challengerUserId.slice(-6)}`, reason: challenge.reason, submittedAt: challenge.submittedAt }))
+    });
+  } catch (error) { sendErrorFromUnknown(response, error, 'Không thể lấy chi tiết dự án niêm yết.'); }
+}
+
+export async function handleGetPublicFieldReport(request: Request, response: Response): Promise<void> {
+  const projectId = String(request.query.projectId || '').trim();
+  if (!projectId) { response.status(400).json({ success: false, message: 'projectId là bắt buộc.', errorCode: 'VALIDATION_ERROR', details: [] }); return; }
+  try {
+    const report = await findAuditorFieldReportByProjectIdFromRepository(projectId);
+    if (!report) { sendSuccessResponse(response, 200, 'Dự án chưa có biên bản hiện trường.', null); return; }
+    sendSuccessResponse(response, 200, 'Lấy biên bản hiện trường thành công.', {
+      auditorLabel: `Kiểm toán viên #${report.auditorUserId.slice(-6)}`,
+      note: report.note,
+      verifiedMilestoneIndexes: report.verifiedMilestoneIndexes,
+      submittedAt: report.submittedAt,
+      photos: report.photos.map(photo => ({ cid: photo.cid, fileName: photo.fileName, mimeType: photo.mimeType, hasGps: Boolean(photo.gps), capturedAt: photo.capturedAt }))
+    });
+  } catch (error) { sendErrorFromUnknown(response, error, 'Không thể lấy biên bản hiện trường.'); }
+}
 
 /**
  * Schema Zod cho query params của unified timeline endpoint.

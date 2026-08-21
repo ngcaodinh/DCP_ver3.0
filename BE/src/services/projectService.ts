@@ -2,10 +2,13 @@ import { ethers } from 'ethers';
 import crypto from 'crypto';
 import { getBlockchainRpcUrl } from '../config/blockchainRpc';
 import { getLogger } from '../config/logger';
-import { findUserById } from '../models/authModel';
+import { findGeofenceByProjectId, findProjectIdsWithGeofence } from '../models/projectGeofenceModel';
+import { countActiveAuditors, findUserById, findUsersByRole } from '../models/authModel';
+import { ADMIN_ROLE } from '../constants/governanceRoles';
 import { findSubmissionsByOrganizationId } from '../models/organizationKycModel';
 import { ProjectStatus } from '../models/projectModel';
-import type { ProjectEvidenceFileRecord } from '../models/projectModel';
+import type { ProjectEvidenceFileRecord, ProjectMilestonePlanItem } from '../models/projectModel';
+import { getChallengeWindowMs } from '../constants/projectListingPolicy';
 import {
   countActiveProjectsByOrganizationIdFromRepository,
   createProject,
@@ -22,6 +25,7 @@ import {
 import { findLatestDonationTimestampByProjectIdFromRepository } from '../repositories/donationRepository';
 import { ApplicationError } from '../utils/applicationError';
 import { createInMemoryCache } from '../utils/inMemoryCache';
+import { createUserNotification } from './notificationService';
 
 export type CreateProjectPayload = {
   name: string;
@@ -30,6 +34,7 @@ export type CreateProjectPayload = {
   deadline: string;
   evidenceCids: string[];
   evidenceFiles?: ProjectEvidenceFileRecord[];
+  milestonePlan?: ProjectMilestonePlanItem[];
 };
 
 export type CreateProjectResult = {
@@ -46,6 +51,14 @@ export type CreateProjectResult = {
   reviewedAt: Date | null;
   reviewedBy: string | null;
   rejectionReason: string | null;
+  hasGeofence: boolean;
+  milestonePlan?: ProjectMilestonePlanItem[];
+  listedAt: Date | null;
+  activationEligibleAt: Date | null;
+  activationState: 'NOT_STARTED' | 'SYNCED' | 'FAILED';
+  activationAttemptCount: number;
+  activationLastError: string | null;
+  warning?: 'NO_ACTIVE_AUDITOR' | null;
   createdAt: Date;
 };
 
@@ -67,6 +80,7 @@ export type UpdateProjectPayload = {
   deadline: string;
   evidenceCids: string[];
   evidenceFiles?: ProjectEvidenceFileRecord[];
+  milestonePlan: ProjectMilestonePlanItem[];
 };
 
 export type CreateProjectEligibilityResult = {
@@ -145,7 +159,7 @@ function createPublicSupportCacheKey(limitCount: number): string {
 
 /** Hàm làm sạch chuỗi đầu vào. Mục đích: giảm rủi ro chèn script vào dữ liệu text. */
 function sanitizeTextInput(inputText: string): string {
-  return inputText.replace(/<[^>]*>/g, '').replace(/[\u0000-\u001F]/g, '').trim();
+  return inputText.replace(/<[^>]*>/g, '').split('').filter(character => character.charCodeAt(0) >= 32).join('').trim();
 }
 
 /** Hàm làm sạch metadata file minh chứng IPFS. Mục đích: giữ đồng bộ cid-fileName-mimeType và chặn text bẩn trước khi lưu DB. */
@@ -170,7 +184,10 @@ function sanitizeProjectEvidenceFiles(
 }
 
 /** Hàm map project record về output. Mục đích: tái sử dụng format response giữa các API project. */
-function mapProjectRecordToResult(projectRecord: CreateProjectDataAccessPayload): CreateProjectResult {
+function mapProjectRecordToResult(
+  projectRecord: CreateProjectDataAccessPayload,
+  hasGeofence = false
+): CreateProjectResult {
   return {
     projectId: projectRecord.projectId,
     organizationId: projectRecord.organizationId,
@@ -185,6 +202,13 @@ function mapProjectRecordToResult(projectRecord: CreateProjectDataAccessPayload)
     reviewedAt: projectRecord.reviewedAt,
     reviewedBy: projectRecord.reviewedBy,
     rejectionReason: projectRecord.rejectionReason,
+    hasGeofence,
+    milestonePlan: projectRecord.milestonePlan || [],
+    listedAt: projectRecord.listedAt || null,
+    activationEligibleAt: projectRecord.activationEligibleAt || null,
+    activationState: projectRecord.activationState || 'NOT_STARTED',
+    activationAttemptCount: projectRecord.activationAttemptCount || 0,
+    activationLastError: projectRecord.activationLastError || null,
     createdAt: projectRecord.createdAt
   };
 }
@@ -341,7 +365,7 @@ function isProjectNotFoundContractError(error: unknown, donationRankingContract:
 }
 
 /** Hàm đồng bộ trạng thái project ACTIVE lên blockchain. Mục đích: mở trạng thái nhận donate on-chain ngay khi reviewer approve dự án. */
-async function activateProjectOnBlockchain(projectId: string): Promise<void> {
+export async function activateProjectOnBlockchain(projectId: string): Promise<void> {
   const normalizedProjectId = projectId.trim();
   if (!/^[0-9]+$/.test(normalizedProjectId)) {
     throw new ApplicationError('Mã dự án phải là số để cập nhật trạng thái on-chain.', 400, 'VALIDATION_ERROR');
@@ -473,7 +497,7 @@ async function uploadProjectEvidenceFileToPinata(file: UploadProjectEvidenceFile
 }
 
 /** Hàm upload file với retry giới hạn. Mục đích: tăng ổn định khi Pinata lỗi tạm thời hoặc timeout. */
-async function uploadProjectEvidenceFileToPinataWithRetry(file: UploadProjectEvidenceFilePayload): Promise<UploadedProjectEvidenceItem> {
+export async function uploadProjectEvidenceFileToPinataWithRetry(file: UploadProjectEvidenceFilePayload): Promise<UploadedProjectEvidenceItem> {
   let latestUploadError: unknown = null;
 
   for (let retryAttempt = 1; retryAttempt <= pinataMaximumRetryCount; retryAttempt += 1) {
@@ -591,7 +615,7 @@ async function ensureReviewerUser(reviewerUserId: string) {
     throw new ApplicationError('Không tìm thấy tài khoản reviewer.', 401, 'UNAUTHENTICATED');
   }
 
-  if (reviewerUser.role !== 'admin' && reviewerUser.role !== 'regulatory') {
+  if (reviewerUser.role !== 'regulatory') {
     throw new ApplicationError('Bạn không có quyền review dự án.', 403, 'FORBIDDEN');
   }
 
@@ -653,6 +677,15 @@ export async function createProjectForOrganization(organizationUserId: string, p
     reviewedAt: null,
     reviewedBy: null,
     rejectionReason: null,
+    milestonePlan: payload.milestonePlan || [],
+    listedAt: null,
+    activationEligibleAt: null,
+    activationClaimedAt: null,
+    activationState: 'NOT_STARTED',
+    activationAttemptCount: 0,
+    activationLastAttemptAt: null,
+    activationLastError: null,
+    listingRound: 0,
     createdAt: now,
     updatedAt: now
   };
@@ -661,6 +694,24 @@ export async function createProjectForOrganization(organizationUserId: string, p
   // Dự án DRAFT chưa thể nhận quyên góp; chỉ đồng bộ on-chain khi reviewer duyệt ACTIVE để lỗi RPC không làm thất bại việc lưu bản nháp.
   logger.info('Project created successfully.', { correlationId: organizationUser.correlationId });
   return mapProjectRecordToResult(createdProject);
+}
+
+/** Báo admin khi hệ thống đang niêm yết không có auditor, nhưng không chặn giao dịch nghiệp vụ chính. */
+async function notifyNoActiveAuditor(projectId: string): Promise<void> {
+  try {
+    const admins = (await findUsersByRole([ADMIN_ROLE])).filter(user => !user.isSybil);
+    await Promise.all(admins.map(admin => createUserNotification({
+      userId: admin.id,
+      notificationType: 'SYSTEM',
+      title: 'Cảnh báo: chưa có Kiểm toán viên',
+      content: `Dự án ${projectId} vừa được niêm yết trong khi không có Kiểm toán viên hoạt động.`,
+      metadata: { projectId, warning: 'NO_ACTIVE_AUDITOR' },
+      priority: 'HIGH',
+      enqueuedBy: 'system'
+    })));
+  } catch (error) {
+    logger.error('Không thể tạo thông báo NO_ACTIVE_AUDITOR.', { projectId, errorMessage: (error as Error).message });
+  }
 }
 
 /** Hàm lấy trạng thái đủ điều kiện tạo dự án. Mục đích: trả thông tin để frontend chủ động khóa nút tạo dự án theo nghiệp vụ ngân hàng thụ hưởng. */
@@ -703,7 +754,11 @@ export async function uploadProjectEvidencesForOrganization(
 export async function getProjectsForOrganization(organizationUserId: string): Promise<CreateProjectResult[]> {
   const organizationUser = await ensureOrganizationUser(organizationUserId);
   const projectRecords = await findProjectsByOrganizationIdFromRepository(organizationUser.id);
-  return projectRecords.map(mapProjectRecordToResult);
+  const geofenceProjectIdSet = await findProjectIdsWithGeofence(projectRecords.map(projectRecord => projectRecord.projectId));
+  return projectRecords.map(projectRecord => mapProjectRecordToResult(
+    projectRecord,
+    geofenceProjectIdSet.has(projectRecord.projectId)
+  ));
 }
 
 /** Hàm lấy danh sách dự án active public cho trang chủ. Mục đích: cung cấp dữ liệu thật từ MongoDB cho section “Dự án đang cần hỗ trợ”. */
@@ -799,7 +854,7 @@ export async function getPublicSupportProjectDetail(projectId: string): Promise<
 export async function getPendingApprovalProjectsForReviewer(reviewerUserId: string): Promise<CreateProjectResult[]> {
   await ensureReviewerUser(reviewerUserId);
   const projectRecords = await findProjectsByStatusFromRepository('PENDING_APPROVAL');
-  return projectRecords.map(mapProjectRecordToResult);
+  return projectRecords.map(projectRecord => mapProjectRecordToResult(projectRecord));
 }
 
 /** Hàm lấy queue và lịch sử review để Regulatory tra cứu đầy đủ dự án chờ duyệt, đã duyệt và đã từ chối. */
@@ -807,10 +862,12 @@ export async function getProjectReviewHistoryForReviewer(reviewerUserId: string)
   await ensureReviewerUser(reviewerUserId);
   const projectRecords = await findProjectsByStatusListFromRepository([
     'PENDING_APPROVAL',
+    'PENDING_ACTIVATION',
+    'DISPUTED',
     'ACTIVE',
     'REJECTED'
   ]);
-  return projectRecords.map(mapProjectRecordToResult);
+  return projectRecords.map(projectRecord => mapProjectRecordToResult(projectRecord));
 }
 
 /** Hàm cập nhật dự án của tổ chức. Mục đích: cho phép sửa nội dung dự án và thay thế minh chứng kèm cleanup CID cũ trên Pinata. */
@@ -850,6 +907,7 @@ export async function updateProjectForOrganization(organizationUserId: string, p
     deadline: new Date(payload.deadline),
     evidenceCids: sanitizedEvidenceCids,
     evidenceFiles: sanitizedEvidenceFiles,
+    milestonePlan: payload.milestonePlan || [],
     submittedAt: existingProject.status === 'PENDING_APPROVAL' ? null : existingProject.submittedAt,
     status: existingProject.status === 'PENDING_APPROVAL' ? 'DRAFT' : existingProject.status,
     reviewedAt: null,
@@ -865,6 +923,17 @@ export async function updateProjectForOrganization(organizationUserId: string, p
   return mapProjectRecordToResult(updatedProject);
 }
 
+/** Cập nhật riêng kế hoạch cột mốc để không unpin lại minh chứng IPFS khi NGO chỉ đổi kế hoạch. */
+export async function updateProjectMilestonePlanForOrganization(organizationUserId: string, projectId: string, milestonePlan: ProjectMilestonePlanItem[]): Promise<CreateProjectResult> {
+  const organizationUser = await ensureOrganizationUser(organizationUserId);
+  const project = await findProjectById(projectId);
+  if (!project || project.organizationId !== organizationUser.id) throw new ApplicationError('Không tìm thấy dự án thuộc tổ chức của bạn.', 404, 'NOT_FOUND');
+  if (!['DRAFT', 'PENDING_APPROVAL', 'REJECTED'].includes(project.status)) throw new ApplicationError('Dự án không còn cho phép sửa kế hoạch cột mốc.', 409, 'INVALID_STATUS_TRANSITION');
+  const updated = await updateProject(projectId, { milestonePlan, status: project.status === 'PENDING_APPROVAL' ? 'DRAFT' : project.status, submittedAt: project.status === 'PENDING_APPROVAL' ? null : project.submittedAt, updatedAt: new Date() });
+  if (!updated) throw new ApplicationError('Không thể cập nhật kế hoạch cột mốc.', 500, 'INTERNAL_ERROR');
+  return mapProjectRecordToResult(updated);
+}
+
 /** Hàm submit dự án để chờ duyệt. Mục đích: chuyển trạng thái DRAFT thành PENDING_APPROVAL. */
 export async function submitProjectForApproval(organizationUserId: string, projectId: string): Promise<CreateProjectResult> {
   const organizationUser = await ensureOrganizationUser(organizationUserId);
@@ -875,6 +944,15 @@ export async function submitProjectForApproval(organizationUserId: string, proje
 
   if (existingProject.status !== 'DRAFT' && existingProject.status !== 'REJECTED') {
     throw new ApplicationError('Chỉ dự án DRAFT hoặc REJECTED mới được submit lại.', 409, 'INVALID_STATUS_TRANSITION');
+  }
+
+  if ((existingProject.milestonePlan || []).length !== 3) {
+    throw new ApplicationError('Dự án chưa có kế hoạch cột mốc M1, M2, M3 trước khi gửi duyệt.', 409, 'MILESTONE_PLAN_REQUIRED');
+  }
+
+  const geofence = await findGeofenceByProjectId(projectId);
+  if (!geofence) {
+    throw new ApplicationError('Vui lòng thiết lập và lưu vùng địa lý trước khi gửi yêu cầu duyệt.', 409, 'GEOFENCE_REQUIRED');
   }
 
   const now = new Date();
@@ -890,8 +968,7 @@ export async function submitProjectForApproval(organizationUserId: string, proje
   if (!updatedProject) {
     throw new ApplicationError('Không thể cập nhật trạng thái dự án.', 500, 'INTERNAL_ERROR');
   }
-
-  return mapProjectRecordToResult(updatedProject);
+  return mapProjectRecordToResult(updatedProject, true);
 }
 
 /** Hàm review dự án. Mục đích: approve thành ACTIVE hoặc reject với lý do rõ ràng. */
@@ -919,34 +996,31 @@ export async function reviewProjectByReviewer(
   }
 
   const now = new Date();
-  const nextStatus = action === 'APPROVE' ? 'ACTIVE' : 'REJECTED';
+  const nextStatus = action === 'APPROVE' ? 'PENDING_ACTIVATION' : 'REJECTED';
+  const listedAt = action === 'APPROVE' ? now : null;
   const updatedProject = await updateProject(projectId, {
     status: nextStatus,
     reviewedAt: now,
     reviewedBy: reviewerUser.id,
     rejectionReason: action === 'REJECT' ? sanitizeTextInput(rejectionReason || '') : null,
+    listedAt,
+    activationEligibleAt: listedAt ? new Date(listedAt.getTime() + getChallengeWindowMs()) : null,
+    activationClaimedAt: null,
+    activationState: 'NOT_STARTED',
+    activationAttemptCount: 0,
+    activationLastAttemptAt: null,
+    activationLastError: null,
+    listingRound: action === 'APPROVE' ? (existingProject.listingRound || 0) + 1 : existingProject.listingRound || 0,
     updatedAt: now
   });
 
   if (!updatedProject) {
     throw new ApplicationError('Không thể cập nhật kết quả review dự án.', 500, 'INTERNAL_ERROR');
   }
-
-  if (action === 'APPROVE') {
-    try {
-      await activateProjectOnBlockchain(projectId);
-    } catch (error) {
-      // Ghi chú logic phức tạp: rollback trạng thái về PENDING_APPROVAL để tránh lệch dữ liệu khi approve on-chain thất bại.
-      await updateProject(projectId, {
-        status: 'PENDING_APPROVAL',
-        reviewedAt: null,
-        reviewedBy: null,
-        rejectionReason: null,
-        updatedAt: new Date()
-      });
-      throw error;
-    }
+  const warning = action === 'APPROVE' && await countActiveAuditors() === 0 ? 'NO_ACTIVE_AUDITOR' : null;
+  if (warning) {
+    logger.error('Dự án được niêm yết khi chưa có Kiểm toán viên hoạt động.', { projectId, reviewerUserId });
+    await notifyNoActiveAuditor(projectId);
   }
-
-  return mapProjectRecordToResult(updatedProject);
+  return { ...mapProjectRecordToResult(updatedProject), warning };
 }

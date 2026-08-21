@@ -7,8 +7,11 @@ import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../controllers/tileProxyController', () => ({
-  proxyOsmTile: (_request: express.Request, response: express.Response): void => {
+  proxyMapTile: (_request: express.Request, response: express.Response): void => {
     response.status(200).send('tile');
+  },
+  proxyAdministrativeMapTile: (_request: express.Request, response: express.Response): void => {
+    response.status(200).send('administrative-tile');
   }
 }));
 
@@ -43,5 +46,14 @@ describe('tileProxyRoutes - rate limit', () => {
     expect(blockedResponse.status).toBe(429);
     expect(blockedResponse.body.success).toBe(false);
     expect(blockedResponse.body.errorCode).toBe('RATE_LIMIT_EXCEEDED');
+  });
+
+  it('định tuyến tile địa giới trước route tile nền tổng quát', async () => {
+    const testApplication = createTestApplication();
+
+    const response = await request(testApplication).get('/api/tiles/administrative/6/54/35.png');
+
+    expect(response.status).toBe(200);
+    expect(response.text).toBe('administrative-tile');
   });
 });

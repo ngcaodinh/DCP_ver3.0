@@ -436,6 +436,39 @@ export async function findActiveCommissioners(): Promise<AuthUser[]> {
   }).lean<AuthUser[]>().exec();
 }
 
+/** Lấy batch người dùng theo ID để tránh truy vấn lặp khi dựng danh sách nghiệp vụ. */
+export async function findUsersByIds(userIds: string[]): Promise<AuthUser[]> {
+  if (!userIds.length) return [];
+  return AuthUserModel.find({ id: { $in: [...new Set(userIds)] } }).lean<AuthUser[]>().exec();
+}
+
+/** Lấy danh sách ghế Ủy ban Điều hành độc lập cho riêng luồng xét xử F2. */
+export async function findActiveExecutiveCommittee(): Promise<AuthUser[]> {
+  return AuthUserModel.find({
+    role: { $in: ['executive_chair', 'executive_member'] },
+    accountStatus: 'ACTIVE',
+    isSybil: false
+  }).lean<AuthUser[]>().exec();
+}
+
+/** Lấy Kiểm toán viên đang hoạt động, loại trừ tài khoản đã bị đánh dấu Sybil. */
+export async function findActiveAuditors(): Promise<AuthUser[]> {
+  return AuthUserModel.find({
+    role: 'auditor',
+    accountStatus: 'ACTIVE',
+    isSybil: false
+  }).lean<AuthUser[]>().exec();
+}
+
+/** Đếm Kiểm toán viên có thể thực hiện quyền khiếu nại tại thời điểm niêm yết. */
+export async function countActiveAuditors(): Promise<number> {
+  return AuthUserModel.countDocuments({
+    role: 'auditor',
+    accountStatus: 'ACTIVE',
+    isSybil: false
+  }).exec();
+}
+
 /**
  * Lay thong tin user phuc vu notification dispatch.
  * Tra ve email, FCM token, va phone number cua nguoi dung.

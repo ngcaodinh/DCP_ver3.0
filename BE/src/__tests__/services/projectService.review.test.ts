@@ -6,6 +6,9 @@ const {
   mockCreateProjectOnChain,
   mockFindProjectById,
   mockFindUserById,
+  mockFindUsersByRole,
+  mockCountActiveAuditors,
+  mockCreateUserNotification,
   mockGetNetwork,
   mockGetProjectSnapshot,
   mockHasRole,
@@ -18,6 +21,9 @@ const {
   mockCreateProjectOnChain: vi.fn(),
   mockFindProjectById: vi.fn(),
   mockFindUserById: vi.fn(),
+  mockFindUsersByRole: vi.fn(),
+  mockCountActiveAuditors: vi.fn(),
+  mockCreateUserNotification: vi.fn(),
   mockGetNetwork: vi.fn(),
   mockGetProjectSnapshot: vi.fn(),
   mockHasRole: vi.fn(),
@@ -41,12 +47,16 @@ vi.mock('../../config/logger', () => ({
 }));
 
 vi.mock('../../models/authModel', () => ({
-  findUserById: mockFindUserById
+  findUserById: mockFindUserById,
+  findUsersByRole: mockFindUsersByRole,
+  countActiveAuditors: mockCountActiveAuditors
 }));
 
 vi.mock('../../models/organizationKycModel', () => ({
   findSubmissionsByOrganizationId: vi.fn()
 }));
+
+vi.mock('../../services/notificationService', () => ({ createUserNotification: mockCreateUserNotification }));
 
 vi.mock('../../repositories/projectRepository', () => ({
   countActiveProjectsByOrganizationIdFromRepository: mockCountActiveProjects,
@@ -122,6 +132,9 @@ describe('project service review on-chain synchronization', () => {
     process.env.PROJECT_MANAGER_PRIVATE_KEY = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 
     mockFindUserById.mockResolvedValue({ id: 'reviewer-1', role: 'regulatory' });
+    mockFindUsersByRole.mockResolvedValue([{ id: 'admin-1', role: 'admin' }]);
+    mockCountActiveAuditors.mockResolvedValue(1);
+    mockCreateUserNotification.mockResolvedValue(null);
     mockFindProjectById.mockResolvedValue(createPendingProjectFixture());
     mockCountActiveProjects.mockResolvedValue(0);
     mockGetNetwork.mockResolvedValue({ chainId: 80002n });
@@ -147,52 +160,58 @@ describe('project service review on-chain synchronization', () => {
     });
   });
 
-  it('activates a project that already exists as Draft on-chain', async () => {
+  it('lists an approved project for the challenge window without touching blockchain', async () => {
     mockGetProjectSnapshot.mockResolvedValue({ exists: true, projectStatus: 0n });
 
     await expect(reviewProjectByReviewer('reviewer-1', '202608180000000001', 'APPROVE')).resolves.toMatchObject({
-      status: 'ACTIVE'
+      status: 'PENDING_ACTIVATION'
     });
 
     expect(mockCreateProjectOnChain).not.toHaveBeenCalled();
-    expect(mockSetProjectStatus).toHaveBeenCalledWith(202608180000000001n, 1);
+    expect(mockSetProjectStatus).not.toHaveBeenCalled();
+    expect(mockUpdateProject).toHaveBeenCalledWith('202608180000000001', expect.objectContaining({ status: 'PENDING_ACTIVATION', listedAt: expect.any(Date), activationEligibleAt: expect.any(Date) }));
   });
 
-  it('self-heals only a verified ProjectNotFound error for legacy projects', async () => {
+  it('does not perform legacy on-chain recovery during regulatory approval', async () => {
     mockGetProjectSnapshot.mockRejectedValue({ data: '0xproject-not-found' });
     mockParseError.mockReturnValue({ name: 'ProjectNotFound' });
 
     await reviewProjectByReviewer('reviewer-1', '202608180000000001', 'APPROVE');
 
-    expect(mockCreateProjectOnChain).toHaveBeenCalledWith(202608180000000001n);
-    expect(mockSetProjectStatus).toHaveBeenCalledWith(202608180000000001n, 1);
+    expect(mockCreateProjectOnChain).not.toHaveBeenCalled();
+    expect(mockSetProjectStatus).not.toHaveBeenCalled();
   });
 
-  it('rolls the database status back when blockchain state cannot be read', async () => {
+  it('does not depend on blockchain availability while listing a project', async () => {
     mockGetProjectSnapshot.mockRejectedValue(new Error('RPC unavailable'));
 
-    await expect(reviewProjectByReviewer('reviewer-1', '202608180000000001', 'APPROVE')).rejects.toMatchObject({
-      errorCode: 'BLOCKCHAIN_UNAVAILABLE',
-      statusCode: 502
-    });
+    await expect(reviewProjectByReviewer('reviewer-1', '202608180000000001', 'APPROVE')).resolves.toMatchObject({ status: 'PENDING_ACTIVATION' });
 
     expect(mockCreateProjectOnChain).not.toHaveBeenCalled();
-    expect(mockUpdateProject).toHaveBeenCalledTimes(2);
-    expect(mockUpdateProject).toHaveBeenLastCalledWith(
-      '202608180000000001',
-      expect.objectContaining({ status: 'PENDING_APPROVAL', reviewedAt: null, reviewedBy: null })
-    );
+    expect(mockUpdateProject).toHaveBeenCalledTimes(1);
   });
 
-  it('returns a typed availability error when the RPC provider cannot connect', async () => {
-    mockGetNetwork.mockRejectedValue(new Error('RPC unavailable'));
+  it('reports the no-auditor operational warning without blocking listing', async () => {
+    mockCountActiveAuditors.mockResolvedValue(0);
 
-    await expect(reviewProjectByReviewer('reviewer-1', '202608180000000001', 'APPROVE')).rejects.toMatchObject({
-      errorCode: 'BLOCKCHAIN_UNAVAILABLE',
-      statusCode: 502
+    await expect(reviewProjectByReviewer('reviewer-1', '202608180000000001', 'APPROVE')).resolves.toMatchObject({
+      status: 'PENDING_ACTIVATION',
+      warning: 'NO_ACTIVE_AUDITOR'
     });
 
     expect(mockGetProjectSnapshot).not.toHaveBeenCalled();
-    expect(mockUpdateProject).toHaveBeenCalledTimes(2);
+    expect(mockUpdateProject).toHaveBeenCalledTimes(1);
+    expect(mockCreateUserNotification).toHaveBeenCalledWith(expect.objectContaining({ userId: 'admin-1', notificationType: 'SYSTEM', metadata: { projectId: '202608180000000001', warning: 'NO_ACTIVE_AUDITOR' } }));
+  });
+
+  it('rejects an admin because only regulatory may review projects', async () => {
+    mockFindUserById.mockResolvedValue({ id: 'admin-1', role: 'admin' });
+
+    await expect(reviewProjectByReviewer('admin-1', '202608180000000001', 'APPROVE')).rejects.toMatchObject({
+      errorCode: 'FORBIDDEN',
+      statusCode: 403
+    });
+
+    expect(mockUpdateProject).not.toHaveBeenCalled();
   });
 });

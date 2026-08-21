@@ -4,7 +4,7 @@
  * Tập trung vào: load existing geofence, vẽ polygon, validation,
  * radius input, save success/error.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { afterEach, describe, it, expect, vi, beforeEach } from 'vitest';
 import { act, render, screen, waitFor, fireEvent } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -14,7 +14,9 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 // =============================================================================
 
 // vi.hoisted() để khai báo biến mock trước khi vi.mock() factory được hoisting
-const { mockUseMapEvents } = vi.hoisted(() => ({
+const { mockSetView, mockUseAuthCheck, mockUseMapEvents } = vi.hoisted(() => ({
+  mockSetView: vi.fn(),
+  mockUseAuthCheck: vi.fn(),
   mockUseMapEvents: vi.fn(),
 }));
 
@@ -27,22 +29,52 @@ vi.mock('@/app/utils/authSession', () => ({
   readAuthSession: vi.fn(() => ({ accessToken: 'mock-token' })),
 }));
 
+vi.mock('@/app/utils/useAuthCheck', () => ({
+  useAuthCheck: mockUseAuthCheck,
+}));
+
 // react-leaflet là DOM-only — mock toàn bộ để test trong jsdom
 vi.mock('react-leaflet', () => ({
-  MapContainer: ({ children }: { children: React.ReactNode }) => (
-    <div data-testid="map-container">{children}</div>
+  MapContainer: ({
+    children,
+    minZoom,
+    maxZoom,
+  }: {
+    children: React.ReactNode;
+    minZoom?: number;
+    maxZoom?: number;
+  }) => (
+    <div data-testid="map-container" data-min-zoom={minZoom} data-max-zoom={maxZoom}>{children}</div>
   ),
-  TileLayer: ({ url }: { url: string }) => <div data-testid="tile-layer" data-url={url} />,
+  TileLayer: ({
+    url,
+    maxNativeZoom,
+  }: {
+    url: string;
+    maxNativeZoom?: number;
+  }) => (
+    <div
+      data-testid={url.includes('/administrative/') ? 'administrative-tile-layer' : 'tile-layer'}
+      data-url={url}
+      data-max-native-zoom={maxNativeZoom}
+    />
+  ),
   Polygon: () => <div data-testid="polygon" />,
   Circle: () => <div data-testid="circle" />,
   CircleMarker: ({
     children,
     eventHandlers,
+    bubblingMouseEvents,
   }: {
     children?: React.ReactNode;
     eventHandlers?: { click?: () => void };
+    bubblingMouseEvents?: boolean;
   }) => (
-    <div data-testid="circle-marker" onClick={eventHandlers?.click}>
+    <div
+      data-testid="circle-marker"
+      data-bubbling-mouse-events={bubblingMouseEvents}
+      onClick={eventHandlers?.click}
+    >
       {children}
     </div>
   ),
@@ -51,7 +83,7 @@ vi.mock('react-leaflet', () => ({
     <div data-testid="popup">{children}</div>
   ),
   useMapEvents: mockUseMapEvents,
-  useMap: () => ({ fitBounds: vi.fn() }),
+  useMap: () => ({ fitBounds: vi.fn(), setView: mockSetView }),
 }));
 
 // leaflet — mock để tránh lỗi khi không có canvas
@@ -67,7 +99,7 @@ vi.mock('leaflet', () => ({
 
 import { buildApiUrl, fetchApi } from '@/app/utils/apiClient';
 import L from 'leaflet';
-import GeofenceEditor from '@/app/components/oracle/GeofenceEditor';
+import GeofenceEditor from '@/app/components/oracle/GeofenceEditorMap';
 
 // =============================================================================
 // HELPERS
@@ -154,8 +186,14 @@ async function renderSavedExistingGeofence(): Promise<void> {
 describe('GeofenceEditor', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.unstubAllGlobals();
+    mockUseAuthCheck.mockReturnValue({ isLoggedIn: true });
     // Default: useMapEvents không làm gì
     mockUseMapEvents.mockImplementation(() => null);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   // -------------------------------------------------------------------
@@ -167,6 +205,8 @@ describe('GeofenceEditor', () => {
     renderWithQuery(<GeofenceEditor projectId="project-abc" />);
     const skeleton = document.querySelector('.animate-pulse');
     expect(skeleton).toBeInTheDocument();
+    expect(screen.getByTestId('location-search-input')).toBeDisabled();
+    expect(screen.getByTestId('btn-location-search')).toBeDisabled();
   });
 
   it('khóa tương tác và không lưu draft cũ khi project đổi trong lúc tải', async () => {
@@ -227,10 +267,12 @@ describe('GeofenceEditor', () => {
     expect(screen.queryByTestId('save-success')).not.toBeInTheDocument();
   });
 
-  it('xóa thông báo lưu thành công khi người dùng xóa đỉnh marker', async () => {
+  it('click marker xóa đỉnh mà không lan sự kiện thành click thêm điểm trên map', async () => {
     await renderSavedExistingGeofence();
 
-    fireEvent.click(screen.getAllByTestId('circle-marker')[0]);
+    const marker = screen.getAllByTestId('circle-marker')[0];
+    expect(marker).toHaveAttribute('data-bubbling-mouse-events', 'false');
+    fireEvent.click(marker);
     expect(screen.getByTestId('point-count')).toHaveTextContent('2 điểm');
     expect(screen.queryByTestId('save-success')).not.toBeInTheDocument();
   });
@@ -628,7 +670,7 @@ describe('GeofenceEditor', () => {
     fireEvent.click(screen.getByTestId('btn-save'));
     await waitFor(() => expect(screen.getByTestId('save-success')).toBeInTheDocument());
 
-    expect(buildApiUrl).toHaveBeenLastCalledWith('/api/oracle/geofence/project%2Fa');
+    expect(buildApiUrl).toHaveBeenCalledWith('/api/oracle/geofence/project%2Fa');
     expect(fetchApi).toHaveBeenLastCalledWith(
       '/api/oracle/geofence/project%2Fa',
       expect.objectContaining({
@@ -703,15 +745,133 @@ describe('GeofenceEditor', () => {
     expect(screen.queryByTestId('radius-error')).not.toBeInTheDocument();
   });
 
-  it('chỉ sử dụng endpoint tile proxy nội bộ, không dùng tile provider bên thứ ba', async () => {
+  it('dùng tile proxy nội bộ thay vì gọi provider trực tiếp', async () => {
     vi.mocked(fetchApi).mockResolvedValue({ success: true, message: '', data: MOCK_GEOFENCE });
     renderWithQuery(<GeofenceEditor projectId="project-abc" />);
 
     await waitFor(() => expect(screen.getByTestId('tile-layer')).toBeInTheDocument());
     const tileUrl = screen.getByTestId('tile-layer').getAttribute('data-url');
-    expect(tileUrl).toContain('/api/tiles/{z}/{x}/{y}.png');
-    expect(tileUrl).not.toContain('tile.openstreetmap.org');
-    expect(tileUrl).not.toContain('unpkg.com');
+    expect(tileUrl).toBe('/api/tiles/{z}/{x}/{y}.png');
+    expect(tileUrl).not.toContain('cartocdn.com');
     expect(vi.mocked(L.Icon.Default.mergeOptions)).not.toHaveBeenCalled();
+  });
+
+  it('khóa zoom map trong phạm vi tile backend hỗ trợ', async () => {
+    vi.mocked(fetchApi).mockResolvedValue({ success: true, message: '', data: MOCK_GEOFENCE });
+    renderWithQuery(<GeofenceEditor projectId="project-abc" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('map-container')).toHaveAttribute('data-max-zoom', '19');
+      expect(screen.getByTestId('tile-layer')).toHaveAttribute('data-max-native-zoom', '19');
+    });
+  });
+
+  it('hiển thị một bản đồ geofence kèm lớp địa giới sau sáp nhập', async () => {
+    vi.mocked(fetchApi).mockResolvedValue({ success: true, message: '', data: MOCK_GEOFENCE });
+    renderWithQuery(<GeofenceEditor projectId="project-abc" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('geofence-editor-map')).not.toContainElement(screen.getByTestId('location-search-control'));
+      expect(screen.getByTestId('location-search-control')).toContainElement(screen.getByTestId('location-search-input'));
+      expect(screen.getByTestId('administrative-tile-layer'))
+        .toHaveAttribute('data-url', '/api/tiles/administrative/{z}/{x}/{y}.png');
+      expect(screen.getByTestId('administrative-tile-layer'))
+        .toHaveAttribute('data-max-native-zoom', '16');
+      expect(screen.queryByTestId('official-administrative-map')).not.toBeInTheDocument();
+    });
+  });
+
+  it('không gọi API geofence khi chưa đăng nhập', () => {
+    mockUseAuthCheck.mockReturnValue({ isLoggedIn: false });
+
+    renderWithQuery(<GeofenceEditor projectId="project-abc" />);
+
+    expect(screen.getByTestId('geofence-load-error')).toHaveTextContent('Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.');
+    expect(fetchApi).not.toHaveBeenCalled();
+  });
+
+  it('tìm Tân An, Cần Thơ và đưa bản đồ đến địa điểm người dùng chọn', async () => {
+    vi.mocked(fetchApi)
+      .mockResolvedValueOnce({ success: true, message: '', data: MOCK_GEOFENCE })
+      .mockResolvedValueOnce({ success: true, message: '', data: [
+      {
+        id: 123,
+        displayName: 'Tân An, Cần Thơ, Việt Nam',
+        point: { lat: 10.0725, lng: 105.6980 }
+      }
+    ] });
+
+    renderWithQuery(<GeofenceEditor projectId="project-abc" />);
+    await waitFor(() => expect(screen.getByTestId('location-search-input')).toBeEnabled());
+    fireEvent.change(screen.getByTestId('location-search-input'), { target: { value: 'Tân An Cần Thơ' } });
+    fireEvent.click(screen.getByTestId('btn-location-search'));
+
+    await waitFor(() => expect(screen.getByRole('button', { name: /Tân An, Cần Thơ/ })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: /Tân An, Cần Thơ/ }));
+
+    expect(mockSetView).toHaveBeenCalledWith([10.0725, 105.698], 15);
+    expect(fetchApi).toHaveBeenLastCalledWith('/api/location-search?q=T%C3%A2n+An+C%E1%BA%A7n+Th%C6%A1&limit=5');
+    expect(screen.queryByTestId('location-search-results')).not.toBeInTheDocument();
+  });
+
+  it('không gọi nhà cung cấp khi từ khóa tìm kiếm quá ngắn', async () => {
+    vi.mocked(fetchApi).mockResolvedValue({ success: true, message: '', data: MOCK_GEOFENCE });
+    renderWithQuery(<GeofenceEditor projectId="project-abc" />);
+    await waitFor(() => expect(screen.getByTestId('location-search-input')).toBeEnabled());
+    fireEvent.change(screen.getByTestId('location-search-input'), { target: { value: 'ab' } });
+    fireEvent.click(screen.getByTestId('btn-location-search'));
+
+    expect(fetchApi).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('alert')).toHaveTextContent('Nhập ít nhất 3 ký tự để tìm địa điểm.');
+  });
+
+  it('hiển thị lỗi thân thiện khi API tìm địa điểm thất bại', async () => {
+    vi.mocked(fetchApi)
+      .mockResolvedValueOnce({ success: true, message: '', data: MOCK_GEOFENCE })
+      .mockRejectedValueOnce(new Error('Location search unavailable'));
+
+    renderWithQuery(<GeofenceEditor projectId="project-abc" />);
+    await waitFor(() => expect(screen.getByTestId('location-search-input')).toBeEnabled());
+    fireEvent.change(screen.getByTestId('location-search-input'), { target: { value: 'Hà Nội' } });
+    fireEvent.click(screen.getByTestId('btn-location-search'));
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent('Không thể tìm địa điểm lúc này. Vui lòng thử lại.');
+    });
+  });
+
+  it('hiển thị trạng thái không tìm thấy khi provider trả dữ liệu không hợp lệ', async () => {
+    vi.mocked(fetchApi)
+      .mockResolvedValueOnce({ success: true, message: '', data: MOCK_GEOFENCE })
+      .mockResolvedValueOnce({ success: true, message: '', data: [{ place_id: 'invalid', lat: 'NaN', lon: null }] });
+
+    renderWithQuery(<GeofenceEditor projectId="project-abc" />);
+    await waitFor(() => expect(screen.getByTestId('location-search-input')).toBeEnabled());
+    fireEvent.change(screen.getByTestId('location-search-input'), { target: { value: 'Hà Nội' } });
+    fireEvent.click(screen.getByTestId('btn-location-search'));
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent('Không tìm thấy địa điểm phù hợp. Hãy thử từ khóa chi tiết hơn.');
+    });
+    expect(screen.queryByTestId('location-search-results')).not.toBeInTheDocument();
+  });
+
+  it('chặn tìm kiếm lặp lại trong một giây để bảo vệ provider', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    vi.mocked(fetchApi)
+      .mockResolvedValueOnce({ success: true, message: '', data: MOCK_GEOFENCE })
+      .mockResolvedValueOnce({ success: true, message: '', data: [] });
+
+    renderWithQuery(<GeofenceEditor projectId="project-abc" />);
+    await waitFor(() => expect(screen.getByTestId('location-search-input')).toBeEnabled());
+    fireEvent.change(screen.getByTestId('location-search-input'), { target: { value: 'Hà Nội' } });
+    fireEvent.click(screen.getByTestId('btn-location-search'));
+    await waitFor(() => expect(fetchApi).toHaveBeenCalledTimes(2));
+
+    fireEvent.change(screen.getByTestId('location-search-input'), { target: { value: 'Đà Nẵng' } });
+    fireEvent.click(screen.getByTestId('btn-location-search'));
+
+    expect(fetchApi).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole('alert')).toHaveTextContent('Vui lòng chờ một giây trước khi tìm lại.');
   });
 });

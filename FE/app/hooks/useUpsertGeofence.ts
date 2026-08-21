@@ -28,11 +28,19 @@ export function useUpsertGeofence(): UseMutationResult<GeofenceData, ApiErrorRes
   return useMutation<GeofenceData, ApiErrorResponse, UpsertGeofencePayload>({
     mutationFn: async ({ projectId, polygon, radiusMeters }) => {
       const session = readAuthSession();
+      if (!session.accessToken?.trim()) {
+        throw {
+          success: false,
+          message: 'Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.',
+          errorCode: 'UNAUTHENTICATED',
+          statusCode: 401
+        } satisfies ApiErrorResponse;
+      }
       const res = await fetchApi<GeofenceData>(
         buildApiUrl(`/api/oracle/geofence/${encodeURIComponent(projectId)}`),
         {
           method: 'POST',
-          headers: { Authorization: `Bearer ${session?.accessToken ?? ''}` },
+          headers: { Authorization: `Bearer ${session.accessToken}` },
           body: JSON.stringify({ polygon, radiusMeters }),
         }
       );

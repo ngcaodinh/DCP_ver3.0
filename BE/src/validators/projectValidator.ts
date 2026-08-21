@@ -1,5 +1,7 @@
 ﻿import { z } from 'zod';
 
+import { milestonePlanSchema } from './projectGovernanceValidator';
+
 const ipfsCidPattern = /^(Qm[1-9A-HJ-NP-Za-km-z]{44}|bafy[1-9A-HJ-NP-Za-km-z]{20,})$/;
 
 const projectEvidenceFileSchema = z.object({
@@ -17,7 +19,8 @@ export const createProjectSchema = z.object({
     .array(z.string().trim().regex(ipfsCidPattern, 'CID bằng chứng không đúng định dạng IPFS.'))
     .min(3, 'Dự án phải có tối thiểu 3 ảnh bằng chứng trên IPFS.')
     .max(10, 'Dự án chỉ được tối đa 10 ảnh bằng chứng trên IPFS.'),
-  evidenceFiles: z.array(projectEvidenceFileSchema).max(10).optional()
+  evidenceFiles: z.array(projectEvidenceFileSchema).max(10).optional(),
+  milestonePlan: milestonePlanSchema
 });
 
 export const uploadProjectEvidencesSchema = z.object({
@@ -43,7 +46,8 @@ export const updateProjectSchema = z.object({
     .array(z.string().trim().regex(ipfsCidPattern, 'CID bằng chứng không đúng định dạng IPFS.'))
     .min(1, 'Dự án phải có ít nhất 1 CID bằng chứng IPFS.')
     .max(10, 'Dự án chỉ được tối đa 10 CID bằng chứng IPFS.'),
-  evidenceFiles: z.array(projectEvidenceFileSchema).max(10).optional()
+  evidenceFiles: z.array(projectEvidenceFileSchema).max(10).optional(),
+  milestonePlan: milestonePlanSchema
 });
 
 export const submitProjectSchema = z.object({

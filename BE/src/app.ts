@@ -24,8 +24,10 @@ import { createFeedbackRoutes } from './routes/feedback.routes';
 import { createPublicFeedbackRoutes } from './routes/public-feedback.routes';
 import { createFoundationKycRoutes } from './routes/foundation-kyc.routes';
 import { createTileProxyRoutes } from './routes/tileProxyRoutes';
+import { createLocationSearchRoutes } from './routes/locationSearchRoutes';
 import { createAuditLogRoutes } from './routes/audit-log.routes';
 import { createTrustScoreRoutes } from './routes/trustScoreRoutes';
+import { createProjectGovernanceRoutes } from './routes/projectGovernanceRoutes';
 import { validateGuestJwtConfig } from './config/guestJsonWebToken';
 import { applySeoAndCacheHeaders } from './middleware/seoCacheMiddleware';
 import { API_GUEST_PREFIX } from './config/apiPrefixes';
@@ -39,10 +41,12 @@ import { reportTerminalError } from './utils/sentryReporter';
 import { validateFeedbackSubmissionTicketConfig } from './utils/feedbackSubmissionTicket';
 import { validatePublicFeedbackRuntimeConfig } from './config/publicFeedbackRuntimeConfig';
 import { validateFoundationKycRuntimeConfig } from './config/foundationKycRuntimeConfig';
+import { createAuthenticationMiddleware } from './middleware/authenticationMiddleware';
 
 const application = express();
 const PUBLIC_FEEDBACK_SUBMISSION_BODY_LIMIT = '32kb';
 const FOUNDATION_KYC_BODY_LIMIT = process.env.FOUNDATION_KYC_BODY_LIMIT || '8mb';
+const FIELD_REPORT_BODY_LIMIT = process.env.FIELD_REPORT_BODY_LIMIT || '12mb';
 
 // Kiểm tra GUEST_JWT_SECRET ngay khi app khởi động để phát hiện cấu hình sai sớm.
 // Nếu thiếu hoặc quá ngắn, tiến trình dừng ngay thay vì chờ request đầu tiên.
@@ -133,6 +137,9 @@ function configureMiddlewares(): void {
 
   // File FOUNDATION tối đa 5MB sau decode cần parser riêng vì base64 làm payload JSON lớn hơn file gốc.
   application.use('/api/foundation-kyc/submit', express.json({ limit: FOUNDATION_KYC_BODY_LIMIT }));
+  const governanceBodyAuthentication = createAuthenticationMiddleware();
+  application.use('/api/project-governance/auditor/field-report', governanceBodyAuthentication, express.json({ limit: FIELD_REPORT_BODY_LIMIT }));
+  application.use('/api/project-governance/challenges', governanceBodyAuthentication, express.json({ limit: process.env.CHALLENGE_BODY_LIMIT || '12mb' }));
 
   // Giữ giới hạn body nhất quán giữa local và production để tránh cạn bộ nhớ trên VPS ít RAM.
   application.use(express.json({ limit: requestBodyLimit }));
@@ -178,11 +185,13 @@ function registerRoutes(): void {
   application.use('/api/notifications', createNotificationRoutes());
   application.use('/api/webhooks/payos', createPayosWebhookRoutes());
   application.use('/api/transparency', createTransparencyRoutes());
+  application.use('/api/project-governance', createProjectGovernanceRoutes());
   application.use('/api/transparency', createVerificationRoutes());
   application.use('/api/feedback', createFeedbackRoutes());
   application.use('/api/feedback', createPublicFeedbackRoutes());
   application.use('/api/foundation-kyc', createFoundationKycRoutes());
   application.use('/api/tiles', createTileProxyRoutes()); // [A-NEW3 fix] Tile proxy để tránh lộ GPS ra third-party
+  application.use('/api/location-search', createLocationSearchRoutes());
   application.use('/api/trust-score', createTrustScoreRoutes());
   application.use(API_GUEST_PREFIX, createGuestRoutes());
 }

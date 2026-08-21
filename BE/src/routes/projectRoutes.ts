@@ -29,7 +29,7 @@ export function createProjectRoutes(): Router {
   const updateProjectRateLimit = createRateLimitMiddleware(20, 60 * 1000, { bucketName: 'projects:update' });
   const reviewProjectRateLimit = createRateLimitMiddleware(30, 60 * 1000, { bucketName: 'projects:review' });
   const organizationAuthorizationMiddleware = createRoleAuthorizationMiddleware(['organizations']);
-  const reviewerAuthorizationMiddleware = createRoleAuthorizationMiddleware(['admin', 'regulatory']);
+  const reviewerAuthorizationMiddleware = createRoleAuthorizationMiddleware(['regulatory']);
 
 
   router.get('/public-support/:projectId', attachRequestMetadata(), getProjectsRateLimit, handleGetPublicSupportProjectDetail);

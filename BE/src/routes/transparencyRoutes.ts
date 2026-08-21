@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { handleGetFoundationKycStatus, handleGetUnifiedTimeline } from '../controllers/transparencyController';
+import { handleGetFoundationKycStatus, handleGetPendingActivationProjectDetail, handleGetPendingActivationProjects, handleGetPublicFieldReport, handleGetUnifiedTimeline } from '../controllers/transparencyController';
 import { createRateLimitMiddleware } from '../middleware/rateLimitMiddleware';
 
 /**
@@ -41,6 +41,9 @@ export function createTransparencyRoutes(): Router {
   });
 
   router.get('/foundation-kyc-status', foundationKycStatusRateLimit, handleGetFoundationKycStatus);
+  router.get('/pending-activation-projects', createRateLimitMiddleware(60, 60 * 1000, { bucketName: 'transparency:pending-activation' }), handleGetPendingActivationProjects);
+  router.get('/pending-activation-projects/:projectId', createRateLimitMiddleware(60, 60 * 1000, { bucketName: 'transparency:pending-activation' }), handleGetPendingActivationProjectDetail);
+  router.get('/field-reports', createRateLimitMiddleware(60, 60 * 1000, { bucketName: 'transparency:field-reports' }), handleGetPublicFieldReport);
 
   return router;
 }

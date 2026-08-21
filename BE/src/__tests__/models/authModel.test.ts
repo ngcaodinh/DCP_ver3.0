@@ -6,11 +6,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ─── Mongoose mock ────────────────────────────────────────────────────────────
 // Định nghĩa mock functions trước khi import module (vi.hoisted được hoist lên đầu file)
-const { mockFind, mockLean, mockExec } = vi.hoisted(() => {
+const { mockFind, mockLean, mockExec, mockCountDocuments, mockCountExec } = vi.hoisted(() => {
   const mockExec = vi.fn();
   const mockLean = vi.fn(() => ({ exec: mockExec }));
   const mockFind = vi.fn(() => ({ lean: mockLean }));
-  return { mockFind, mockLean, mockExec };
+  const mockCountDocuments = vi.fn();
+  const mockCountExec = vi.fn();
+  mockCountDocuments.mockReturnValue({ exec: mockCountExec });
+  return { mockFind, mockLean, mockExec, mockCountDocuments, mockCountExec };
 });
 
 vi.mock('mongoose', () => {
@@ -30,7 +33,7 @@ vi.mock('mongoose', () => {
         find: mockFind,
         findOne: vi.fn(),
         create: vi.fn(),
-        countDocuments: vi.fn(),
+        countDocuments: mockCountDocuments,
         findOneAndUpdate: vi.fn()
       }))
     },
@@ -39,7 +42,7 @@ vi.mock('mongoose', () => {
 });
 
 // Import sau khi mock đã được thiết lập
-import { findActiveCommissioners } from '../../models/authModel';
+import { countActiveAuditors, findActiveAuditors, findActiveCommissioners, findActiveExecutiveCommittee } from '../../models/authModel';
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
@@ -98,5 +101,30 @@ describe('findActiveCommissioners', () => {
     await findActiveCommissioners();
 
     expect(mockLean).toHaveBeenCalledOnce();
+  });
+});
+
+describe('F2 governance role directories', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockExec.mockResolvedValue([]);
+    mockLean.mockReturnValue({ exec: mockExec });
+    mockFind.mockReturnValue({ lean: mockLean });
+    mockCountExec.mockResolvedValue(0);
+  });
+
+  it('keeps the executive committee separate from legacy commissioners', async () => {
+    await findActiveExecutiveCommittee();
+    expect(mockFind).toHaveBeenCalledWith(expect.objectContaining({
+      role: { $in: ['executive_chair', 'executive_member'] }, accountStatus: 'ACTIVE', isSybil: false
+    }));
+  });
+
+  it('finds and counts only active non-Sybil auditors', async () => {
+    mockCountExec.mockResolvedValue(3);
+    await expect(findActiveAuditors()).resolves.toEqual([]);
+    await expect(countActiveAuditors()).resolves.toBe(3);
+    expect(mockFind).toHaveBeenCalledWith({ role: 'auditor', accountStatus: 'ACTIVE', isSybil: false });
+    expect(mockCountDocuments).toHaveBeenCalledWith({ role: 'auditor', accountStatus: 'ACTIVE', isSybil: false });
   });
 });

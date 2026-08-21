@@ -4,10 +4,10 @@
 // GeofenceEditor — B5: Component vẽ/chỉnh sửa geofence polygon cho Organization.
 // Vẽ polygon bằng click event trực tiếp (không dùng leaflet-draw để tránh deps
 // và vấn đề tương thích với react-leaflet v4).
-// Component này KHÔNG dùng trực tiếp — import qua GeofenceEditorLazy (SSR issue).
+// Component này KHÔNG dùng trực tiếp — import qua GeofenceEditorMapLazy (SSR issue).
 // =============================================================================
 
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef, type FormEvent } from 'react';
 import L from 'leaflet';
 import {
   MapContainer,
@@ -22,6 +22,17 @@ import {
 } from 'react-leaflet';
 import { useGeofence } from '@/app/hooks/useGeofence';
 import { useUpsertGeofence } from '@/app/hooks/useUpsertGeofence';
+import { fetchApi } from '@/app/utils/apiClient';
+import {
+  ADMINISTRATIVE_BOUNDARY_ATTRIBUTION,
+  ADMINISTRATIVE_BOUNDARY_MAX_ZOOM,
+  getAdministrativeBoundaryTileUrl,
+  getMapTileUrl,
+  MAP_MAX_ZOOM,
+  MAP_MIN_ZOOM,
+  MAP_TILE_ATTRIBUTION
+} from '@/app/utils/mapTileProvider';
+import { useAuthCheck } from '@/app/utils/useAuthCheck';
 import {
   calculateGeofenceAreaKm2,
   calculateGeofenceCentroid,
@@ -38,6 +49,12 @@ import {
 
 type GpsPoint = GeofencePoint;
 
+type LocationSearchResult = {
+  id: number;
+  displayName: string;
+  point: GpsPoint;
+};
+
 export type GeofenceEditorProps = {
   projectId: string;
   /** Callback khi lưu geofence thành công — dùng để navigate out hoặc show toast */
@@ -48,6 +65,10 @@ export type GeofenceEditorProps = {
 const RADIUS_MIN = 100;
 const RADIUS_MAX = 2000;
 const RADIUS_DEFAULT = 500;
+const LOCATION_SEARCH_MIN_QUERY_LENGTH = 3;
+const LOCATION_SEARCH_RESULT_LIMIT = 5;
+const LOCATION_SEARCH_ZOOM = 15;
+const LOCATION_SEARCH_MIN_INTERVAL_MS = 1_000;
 
 // =============================================================================
 // MAP SUB-COMPONENTS
@@ -85,6 +106,51 @@ function BoundsFitter({ polygon }: { polygon: GpsPoint[] }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);  // Chỉ fit một lần khi mount (initial load) — không re-fit khi user chỉnh
   return null;
+}
+
+/** Di chuyển bản đồ đến địa điểm người dùng đã chọn từ kết quả tìm kiếm. */
+function MapViewUpdater({ center }: { center: [number, number] | null }) {
+  const map = useMap();
+
+  useEffect(() => {
+    if (center) {
+      map.setView(center, LOCATION_SEARCH_ZOOM);
+    }
+  }, [center, map]);
+
+  return null;
+}
+
+/** Chuẩn hóa dữ liệu tìm kiếm vị trí không tin cậy từ nhà cung cấp geocoding. */
+function parseLocationSearchResults(payload: unknown): LocationSearchResult[] {
+  if (!Array.isArray(payload)) {
+    return [];
+  }
+
+  return payload.flatMap((item): LocationSearchResult[] => {
+    if (!item || typeof item !== 'object') {
+      return [];
+    }
+
+    const rawItem = item as Record<string, unknown>;
+    const id = Number(rawItem.id);
+    const displayName = typeof rawItem.displayName === 'string' ? rawItem.displayName.trim() : '';
+    const rawPoint = rawItem.point;
+
+    if (!rawPoint || typeof rawPoint !== 'object') {
+      return [];
+    }
+
+    const point = rawPoint as Record<string, unknown>;
+    const lat = Number(point.lat);
+    const lng = Number(point.lng);
+
+    if (!Number.isSafeInteger(id) || !Number.isFinite(lat) || !Number.isFinite(lng) || !displayName) {
+      return [];
+    }
+
+    return [{ id, displayName, point: { lat, lng } }];
+  });
 }
 
 // =============================================================================
@@ -176,12 +242,13 @@ export default function GeofenceEditor({
   onSaveSuccess,
   className,
 }: GeofenceEditorProps) {
+  const { isLoggedIn } = useAuthCheck();
   const {
     data: existingGeofence,
     error: geofenceError,
     isLoading: loadingGeofence,
     refetch: refetchGeofence
-  } = useGeofence(projectId);
+  } = useGeofence(isLoggedIn ? projectId : undefined);
   const { mutate: upsertGeofence, isPending: isSaving } = useUpsertGeofence();
 
   const [points, setPoints] = useState<GpsPoint[]>([]);
@@ -190,9 +257,15 @@ export default function GeofenceEditor({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [initializedProjectId, setInitializedProjectId] = useState<string | null>(null);
+  const [locationSearchQuery, setLocationSearchQuery] = useState('');
+  const [locationSearchResults, setLocationSearchResults] = useState<LocationSearchResult[]>([]);
+  const [locationSearchError, setLocationSearchError] = useState<string | null>(null);
+  const [isLocationSearching, setIsLocationSearching] = useState(false);
+  const [searchedMapCenter, setSearchedMapCenter] = useState<[number, number] | null>(null);
+  const lastLocationSearchAtRef = useRef(0);
   const geofenceErrorStatusCode = geofenceError?.statusCode;
   // Không cho thao tác với draft của project trước khi dữ liệu project hiện tại đã nạp xong.
-  const isGeofenceInitializing = loadingGeofence || initializedProjectId !== projectId;
+  const isGeofenceInitializing = isLoggedIn && (loadingGeofence || initializedProjectId !== projectId);
   const isEditorInteractionDisabled = isSaving || isGeofenceInitializing;
 
   useEffect(() => {
@@ -338,8 +411,62 @@ export default function GeofenceEditor({
     void refetchGeofence();
   }, [refetchGeofence]);
 
+  /** Tìm địa điểm theo thao tác chủ động của người dùng để định vị vị trí bắt đầu vẽ geofence. */
+  const handleLocationSearch = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    const query = locationSearchQuery.trim();
+
+    if (query.length < LOCATION_SEARCH_MIN_QUERY_LENGTH) {
+      setLocationSearchResults([]);
+      setLocationSearchError(`Nhập ít nhất ${LOCATION_SEARCH_MIN_QUERY_LENGTH} ký tự để tìm địa điểm.`);
+      return;
+    }
+
+    const now = Date.now();
+    if (now - lastLocationSearchAtRef.current < LOCATION_SEARCH_MIN_INTERVAL_MS) {
+      setLocationSearchError('Vui lòng chờ một giây trước khi tìm lại.');
+      return;
+    }
+    lastLocationSearchAtRef.current = now;
+
+    setIsLocationSearching(true);
+    setLocationSearchError(null);
+
+    try {
+      const searchParameters = new URLSearchParams({
+        q: query,
+        limit: String(LOCATION_SEARCH_RESULT_LIMIT)
+      });
+      const searchUrl = `/api/location-search?${searchParameters.toString()}`;
+
+      const response = await fetchApi<unknown>(searchUrl);
+      const searchResults = parseLocationSearchResults(response.data);
+      setLocationSearchResults(searchResults);
+      if (searchResults.length === 0) {
+        setLocationSearchError('Không tìm thấy địa điểm phù hợp. Hãy thử từ khóa chi tiết hơn.');
+      }
+    } catch {
+      setLocationSearchResults([]);
+      setLocationSearchError('Không thể tìm địa điểm lúc này. Vui lòng thử lại.');
+    } finally {
+      setIsLocationSearching(false);
+    }
+  };
+
+  /** Chọn một kết quả để đưa tâm bản đồ đến vị trí đó trước khi người dùng vẽ polygon. */
+  const handleSelectLocationSearchResult = (result: LocationSearchResult): void => {
+    setSearchedMapCenter([result.point.lat, result.point.lng]);
+    setLocationSearchQuery(result.displayName);
+    setLocationSearchResults([]);
+    setLocationSearchError(null);
+  };
+
   if (geofenceError && geofenceErrorStatusCode !== 404) {
     return <GeofenceLoadErrorState statusCode={geofenceErrorStatusCode} onRetry={handleRetryGeofence} />;
+  }
+
+  if (!isLoggedIn) {
+    return <GeofenceLoadErrorState statusCode={401} onRetry={handleRetryGeofence} />;
   }
 
   // Tâm bản đồ mặc định: trung tâm Việt Nam
@@ -352,6 +479,58 @@ export default function GeofenceEditor({
 
   return (
     <div className={className}>
+      <form
+        data-testid="location-search-control"
+        onSubmit={handleLocationSearch}
+        className="mb-4 rounded-xl border border-slate-200 bg-white p-3 shadow-sm"
+      >
+        <label htmlFor="location-search" className="mb-1 block text-sm font-semibold text-slate-800">Tìm địa điểm</label>
+        <div className="flex gap-2">
+          <input
+            id="location-search"
+            data-testid="location-search-input"
+            value={locationSearchQuery}
+            onChange={(event) => setLocationSearchQuery(event.target.value)}
+            placeholder="Ví dụ: Tân An, Cần Thơ"
+            disabled={isLocationSearching || isGeofenceInitializing}
+            className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none ring-blue-500 focus:ring-2 disabled:cursor-not-allowed disabled:bg-slate-100"
+          />
+          <button
+            data-testid="btn-location-search"
+            type="submit"
+            disabled={isLocationSearching || isGeofenceInitializing}
+            className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {isLocationSearching ? 'Đang tìm...' : 'Tìm'}
+          </button>
+        </div>
+        {locationSearchError ? <p role="alert" className="mt-2 text-xs text-red-600">{locationSearchError}</p> : null}
+        {locationSearchResults.length > 0 ? (
+          <ul data-testid="location-search-results" className="mt-2 max-h-44 overflow-y-auto rounded-lg border border-slate-200 bg-white">
+            {locationSearchResults.map((result) => (
+              <li key={result.id}>
+                <button
+                  type="button"
+                  onClick={() => handleSelectLocationSearchResult(result)}
+                  className="w-full border-b border-slate-100 px-3 py-2 text-left text-sm text-slate-700 last:border-b-0 hover:bg-blue-50"
+                >
+                  {result.displayName}
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        <p className="mt-2 text-xs text-slate-500">Chọn kết quả để đưa bản đồ đến vị trí đó.</p>
+        <a
+          href="https://sapnhap.bando.com.vn/"
+          target="_blank"
+          rel="noreferrer"
+          className="mt-1 inline-block text-xs font-medium text-blue-700 underline hover:text-blue-900"
+        >
+          Mở bản đồ địa giới chính thức của 34 tỉnh/thành sau sáp nhập
+        </a>
+      </form>
+
       {/* Map */}
       <div
         data-testid="geofence-editor-map"
@@ -368,18 +547,36 @@ export default function GeofenceEditor({
           <MapContainer
             center={mapCenter}
             zoom={existingGeofence ? 14 : 6}
+            minZoom={MAP_MIN_ZOOM}
+            maxZoom={MAP_MAX_ZOOM}
             scrollWheelZoom
             className="h-full w-full"
           >
         <TileLayer
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-          url={`${process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:5000'}/api/tiles/{z}/{x}/{y}.png`}
+          attribution={MAP_TILE_ATTRIBUTION}
+          url={getMapTileUrl()}
+          minZoom={MAP_MIN_ZOOM}
+          maxZoom={MAP_MAX_ZOOM}
+          maxNativeZoom={MAP_MAX_ZOOM}
+          noWrap
         />
+            <TileLayer
+              attribution={ADMINISTRATIVE_BOUNDARY_ATTRIBUTION}
+              url={getAdministrativeBoundaryTileUrl()}
+              minZoom={MAP_MIN_ZOOM}
+              maxZoom={MAP_MAX_ZOOM}
+              maxNativeZoom={ADMINISTRATIVE_BOUNDARY_MAX_ZOOM}
+              opacity={0.9}
+              zIndex={200}
+              noWrap
+            />
 
             <MapClickHandler
               isDrawing={isDrawing && !isEditorInteractionDisabled}
               onAddPoint={handleAddPoint}
             />
+
+            <MapViewUpdater center={searchedMapCenter} />
 
             {/* Fit bounds về polygon hiện tại khi load lần đầu */}
             {existingGeofence && <BoundsFitter polygon={existingGeofence.polygon} />}
@@ -418,6 +615,7 @@ export default function GeofenceEditor({
                 key={idx}
                 center={[p.lat, p.lng]}
                 radius={7}
+                bubblingMouseEvents={false}
                 pathOptions={{
                   color: '#1d4ed8',
                   fillColor: '#60a5fa',

@@ -1,5 +1,5 @@
 import type { Metadata } from 'next';
-import { GeofenceEditorLazy } from '@/app/components/oracle/GeofenceEditorLazy';
+import { GeofenceEditorLazy } from '@/app/components/oracle/GeofenceEditorMapLazy';
 
 export const metadata: Metadata = {
   title: 'Chỉnh sửa vùng địa lý dự án | DCP',
@@ -23,7 +23,7 @@ export default async function GeofencePage({
       <div className="mx-auto max-w-3xl">
         {/* Breadcrumb */}
         <nav className="mb-2 text-xs text-slate-400">
-          <a href="/organizations" className="hover:text-slate-600">
+          <a href="/organizations?tab=projects" className="hover:text-slate-600">
             Tổ chức
           </a>
           <span className="mx-1.5">›</span>
@@ -31,6 +31,14 @@ export default async function GeofencePage({
         </nav>
 
         <div className="mb-6">
+          <a
+            data-testid="back-to-my-projects"
+            href="/organizations?tab=projects"
+            className="mb-3 inline-flex items-center gap-1.5 text-sm font-medium text-blue-700 hover:text-blue-900"
+          >
+            <span aria-hidden="true">←</span>
+            Quay lại dự án của tôi
+          </a>
           <h1 className="text-2xl font-bold text-slate-900">Vùng địa lý dự án</h1>
           <p className="mt-1 text-sm text-slate-500">
             Vẽ ranh giới polygon và cài bán kính xác minh ảnh minh chứng (Haversine).

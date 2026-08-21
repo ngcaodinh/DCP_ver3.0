@@ -1,6 +1,13 @@
  import mongoose, { Schema } from 'mongoose';
 
-export type ProjectStatus = 'DRAFT' | 'PENDING_APPROVAL' | 'ACTIVE' | 'COMPLETED' | 'CLOSED' | 'REJECTED';
+export type ProjectStatus = 'DRAFT' | 'PENDING_APPROVAL' | 'PENDING_ACTIVATION' | 'DISPUTED' | 'ACTIVE' | 'COMPLETED' | 'CLOSED' | 'REJECTED';
+
+export type ProjectMilestonePlanItem = {
+  milestoneIndex: 1 | 2 | 3;
+  milestoneKey: 'M1_ADVANCE' | 'M2_CONSTRUCTION' | 'M3_HANDOVER';
+  percentage: number;
+  description: string;
+};
 
 export type ProjectEvidenceFileRecord = {
   cid: string;
@@ -22,6 +29,15 @@ export type ProjectRecord = {
   reviewedAt: Date | null;
   reviewedBy: string | null;
   rejectionReason: string | null;
+  milestonePlan?: ProjectMilestonePlanItem[];
+  listedAt?: Date | null;
+  activationEligibleAt?: Date | null;
+  activationClaimedAt?: Date | null;
+  activationState?: 'NOT_STARTED' | 'SYNCED' | 'FAILED';
+  activationAttemptCount?: number;
+  activationLastAttemptAt?: Date | null;
+  activationLastError?: string | null;
+  listingRound?: number;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -51,13 +67,32 @@ const projectSchema = new Schema<ProjectRecord>({
   reviewedAt: { type: Date, default: null },
   reviewedBy: { type: String, default: null },
   rejectionReason: { type: String, default: null },
+  milestonePlan: {
+    type: [{
+      milestoneIndex: { type: Number, required: true, enum: [1, 2, 3] },
+      milestoneKey: { type: String, required: true, enum: ['M1_ADVANCE', 'M2_CONSTRUCTION', 'M3_HANDOVER'] },
+      percentage: { type: Number, required: true },
+      description: { type: String, required: true }
+    }],
+    default: []
+  },
+  listedAt: { type: Date, default: null },
+  activationEligibleAt: { type: Date, default: null },
+  activationClaimedAt: { type: Date, default: null },
+  activationState: { type: String, enum: ['NOT_STARTED', 'SYNCED', 'FAILED'], default: 'NOT_STARTED' },
+  activationAttemptCount: { type: Number, default: 0 },
+  activationLastAttemptAt: { type: Date, default: null },
+  activationLastError: { type: String, default: null },
+  listingRound: { type: Number, default: 0 },
   createdAt: { type: Date, required: true },
   updatedAt: { type: Date, required: true }
 });
 
 projectSchema.index({ organizationId: 1, name: 1 }, { unique: true });
+projectSchema.index({ status: 1, activationEligibleAt: 1 });
 
-const ProjectMongoModel = mongoose.model<ProjectRecord>('Project', projectSchema);
+export const ProjectMongoModel = mongoose.models?.Project
+  || mongoose.model<ProjectRecord>('Project', projectSchema);
 
 /** Hàm tạo filter thời gian cho project public. Mục đích: tránh ẩn toàn bộ dự án chỉ vì deadline vừa quá hạn trong thời gian ngắn. */
 function createPublicProjectDeadlineFilter(): { $gte: Date } {
@@ -144,6 +179,40 @@ export async function findPublicSupportProjectByProjectId(projectId: string): Pr
   })
     .lean<ProjectRecord>()
     .exec();
+}
+
+/** Lấy dự án đang niêm yết công khai, tách khỏi danh sách dự án có thể nhận quyên góp. */
+export async function findPendingActivationProjectsForPublic(limitCount: number): Promise<ProjectRecord[]> {
+  return ProjectMongoModel.find({ status: { $in: ['PENDING_ACTIVATION', 'DISPUTED'] } })
+    .sort({ activationEligibleAt: 1 })
+    .limit(limitCount)
+    .lean<ProjectRecord[]>()
+    .exec();
+}
+
+/** Lấy các dự án đủ hạn kích hoạt theo index worker. */
+export async function findProjectsReadyForActivation(now: Date, limitCount: number): Promise<ProjectRecord[]> {
+  return ProjectMongoModel.find({ status: 'PENDING_ACTIVATION', activationEligibleAt: { $lte: now } })
+    .sort({ activationEligibleAt: 1 })
+    .limit(limitCount)
+    .lean<ProjectRecord[]>()
+    .exec();
+}
+
+/** Giành lease kích hoạt bằng CAS để nhiều instance worker không kích hoạt một dự án hai lần. */
+export async function claimProjectForActivation(projectId: string, expectedStatus: ProjectStatus, staleClaimCutoff: Date): Promise<ProjectRecord | null> {
+  const claimed = await ProjectMongoModel.findOneAndUpdate(
+    { projectId, status: expectedStatus, $or: [{ activationClaimedAt: null }, { activationClaimedAt: { $lt: staleClaimCutoff } }] },
+    { $set: { activationClaimedAt: new Date() } },
+    { returnDocument: 'after' }
+  ).exec();
+  return claimed ? claimed.toObject() as ProjectRecord : null;
+}
+
+/** Chuyển dự án sang DISPUTED chỉ khi nó còn trong cửa sổ niêm yết. */
+export async function updateProjectByProjectIdIfStatus(projectId: string, expectedStatus: ProjectStatus, payload: Partial<ProjectRecord>, session?: mongoose.ClientSession): Promise<ProjectRecord | null> {
+  const updated = await ProjectMongoModel.findOneAndUpdate({ projectId, status: expectedStatus }, payload, { returnDocument: 'after', session }).exec();
+  return updated ? updated.toObject() as ProjectRecord : null;
 }
 
 /** Hàm lấy danh sách dự án active theo nhiều projectId. Mục đích: lọc đúng tập dự án hợp lệ trước khi tính bảng xếp hạng. */

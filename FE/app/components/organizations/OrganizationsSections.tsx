@@ -83,6 +83,7 @@ type ProjectCardView = {
   footerMeta: string[];
   statusKey: 'active' | 'pending' | 'done';
   canSubmitForApproval: boolean;
+  hasGeofence: boolean;
   canUpdateProject: boolean;
 };
 
@@ -91,6 +92,7 @@ type CreateProjectFormData = {
   description: string;
   goalAmount: string;
   deadline: string;
+  milestonePlan: Array<{ percentage: string; description: string }>;
 };
 
 type CreateProjectFormErrors = Partial<Record<keyof CreateProjectFormData | 'evidenceFiles', string>>;
@@ -146,7 +148,12 @@ const createProjectDefaultFormState: CreateProjectFormData = {
   name: '',
   description: '',
   goalAmount: '',
-  deadline: ''
+  deadline: '',
+  milestonePlan: [
+    { percentage: '', description: '' },
+    { percentage: '', description: '' },
+    { percentage: '', description: '' }
+  ]
 };
 
 const createDisbursementDefaultFormState: CreateDisbursementFormData = {
@@ -156,6 +163,7 @@ const createDisbursementDefaultFormState: CreateDisbursementFormData = {
   usagePurpose: ''
 };
 const minimumPayosTransferAmountVnd = 10000;
+const TOTAL_MILESTONE_ERROR_MESSAGE = 'Tổng phân bổ cần đạt 100%.';
 
 const createdProjectEmojis = ['🚀', '📌', '🎯', '✨', '🌱'];
 const createdProjectStyles = [
@@ -206,6 +214,14 @@ function buildStatusPresentation(status: ProjectSummary['status']): {
     return { statusLabel: '● BỊ TỪ CHỐI', statusStyle: 'bg-[#FEE2E2] text-[#991B1B]', statusKey: 'pending' };
   }
 
+  if (status === 'PENDING_ACTIVATION') {
+    return { statusLabel: '● ĐANG NIÊM YẾT', statusStyle: 'bg-[#EDE9FE] text-[#6D28D9]', statusKey: 'pending' };
+  }
+
+  if (status === 'DISPUTED') {
+    return { statusLabel: '● ĐANG TRANH CHẤP', statusStyle: 'bg-[#FEE2E2] text-[#991B1B]', statusKey: 'pending' };
+  }
+
   if (status === 'DRAFT') {
     return { statusLabel: '● BẢN NHÁP', statusStyle: 'bg-[#E0F2FE] text-[#0C4A6E]', statusKey: 'pending' };
   }
@@ -230,6 +246,12 @@ function mapCreatedProjectToCardView(
   // Logic này tính số ngày còn lại để hiển thị nhanh tình trạng deadline trong footer của card.
   const remainingDays = Math.max(0, Math.ceil((deadlineDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24)));
   const remainingLabel = remainingDays > 0 ? `📅 ${remainingDays} ngày` : '📅 Hết hạn';
+  const activationRemainingHours = project.activationEligibleAt ? Math.max(0, Math.ceil((new Date(project.activationEligibleAt).getTime() - Date.now()) / (1000 * 60 * 60))) : null;
+  const activationListingLabel = project.status === 'PENDING_ACTIVATION'
+    ? activationRemainingHours && activationRemainingHours > 0
+      ? `⏳ Niêm yết: còn ${activationRemainingHours} giờ`
+      : '⏳ Đang chờ kích hoạt tự động'
+    : null;
 
   return {
     key: project.projectId,
@@ -245,9 +267,10 @@ function mapCreatedProjectToCardView(
     progressPercent,
     raisedAmount: `${formatCurrencyFromNumber(raisedAmountValue)} ₫`,
     goalAmount: `${formatCurrencyFromNumber(project.goalAmount)} ₫`,
-    footerMeta: ['👥 0', remainingLabel, '🏅 Chờ xếp hạng'],
+    footerMeta: ['👥 0', remainingLabel, ...(activationListingLabel ? [activationListingLabel] : []), '🏅 Chờ xếp hạng'],
     statusKey: statusPresentation.statusKey,
     canSubmitForApproval: project.status === 'DRAFT',
+    hasGeofence: project.hasGeofence ?? false,
     canUpdateProject: project.status === 'PENDING_APPROVAL'
   };
 }
@@ -260,6 +283,14 @@ function formatProjectStatusVietnamese(status: ProjectSummary['status']): string
 
   if (status === 'PENDING_APPROVAL') {
     return 'Chờ phê duyệt';
+  }
+
+  if (status === 'PENDING_ACTIVATION') {
+    return 'Đang niêm yết công khai';
+  }
+
+  if (status === 'DISPUTED') {
+    return 'Đang tranh chấp';
   }
 
   if (status === 'ACTIVE') {
@@ -416,6 +447,44 @@ function resolveOrganizationProfileErrorMessage(error: unknown): string {
   return typedError.message || 'Không thể tải thông tin tổ chức. Vui lòng thử lại.';
 }
 
+/** Phân tích trạng thái kế hoạch cột mốc để chỉ hiển thị phản hồi cần thiết theo dữ liệu người dùng đã nhập. */
+function buildMilestonePlanFeedback(formData: CreateProjectFormData): {
+  totalPercentage: number;
+  hasInput: boolean;
+  validationMessage: string | null;
+} {
+  const milestonePlan = formData.milestonePlan;
+  const hasInput = milestonePlan.some(item => item.percentage.trim().length > 0 || item.description.trim().length > 0);
+  const percentages = milestonePlan.map(item => Number(item.percentage));
+  const totalPercentage = percentages.reduce((total, percentage) => total + (Number.isFinite(percentage) ? percentage : 0), 0);
+
+  if (milestonePlan.length !== 3) {
+    return { totalPercentage, hasInput, validationMessage: 'Kế hoạch cần có đúng 3 mốc.' };
+  }
+
+  if (!hasInput || milestonePlan.some(item => item.percentage.trim().length === 0)) {
+    return { totalPercentage, hasInput, validationMessage: 'Nhập tỷ lệ cho đủ 3 mốc.' };
+  }
+
+  if (percentages[0] > 25) {
+    return { totalPercentage, hasInput, validationMessage: 'Mốc M1 không được vượt quá 25%.' };
+  }
+
+  if (percentages.some(percentage => !Number.isInteger(percentage) || percentage <= 0)) {
+    return { totalPercentage, hasInput, validationMessage: 'Tỷ lệ mỗi mốc phải là số nguyên dương.' };
+  }
+
+  if (milestonePlan.some(item => item.description.trim().length === 0)) {
+    return { totalPercentage, hasInput, validationMessage: 'Thêm mô tả cho đủ 3 mốc.' };
+  }
+
+  if (milestonePlan.some(item => item.description.trim().length < 10 || item.description.trim().length > 500)) {
+    return { totalPercentage, hasInput, validationMessage: 'Mỗi mô tả cần từ 10–500 ký tự.' };
+  }
+
+  return { totalPercentage, hasInput, validationMessage: null };
+}
+
 /** Hàm validate form tạo dự án phía client. Mục đích: phản hồi lỗi sớm trước khi gửi request lên server. */
 function validateCreateProjectFormData(formData: CreateProjectFormData, selectedEvidenceFiles: File[]): CreateProjectFormErrors {
   const formErrors: CreateProjectFormErrors = {};
@@ -443,11 +512,24 @@ function validateCreateProjectFormData(formData: CreateProjectFormData, selected
   }
 
   if (selectedEvidenceFiles.length === 0) {
-    formErrors.evidenceFiles = 'Vui lòng tải lên ít nhất 1 file minh chứng.';
+    formErrors.evidenceFiles = 'Vui lòng tải lên ít nhất 3 file minh chứng.';
+  }
+
+  if (selectedEvidenceFiles.length > 0 && selectedEvidenceFiles.length < 3) {
+    formErrors.evidenceFiles = 'Vui lòng tải lên ít nhất 3 file minh chứng.';
   }
 
   if (selectedEvidenceFiles.length > 10) {
     formErrors.evidenceFiles = 'Bạn chỉ được tải lên tối đa 10 file minh chứng.';
+  }
+
+  const milestonePlanFeedback = buildMilestonePlanFeedback(formData);
+  if (milestonePlanFeedback.validationMessage) {
+    formErrors.milestonePlan = milestonePlanFeedback.validationMessage;
+  }
+
+  if (milestonePlanFeedback.totalPercentage !== 100 && !formErrors.milestonePlan) {
+    formErrors.milestonePlan = TOTAL_MILESTONE_ERROR_MESSAGE;
   }
 
   return formErrors;
@@ -476,6 +558,10 @@ function mapApiDetailsToFormErrors(details: ApiErrorDetail[]): CreateProjectForm
 
     if (detail.field === 'evidenceCids') {
       formErrors.evidenceFiles = detail.message;
+    }
+
+    if (detail.field.startsWith('milestonePlan')) {
+      formErrors.milestonePlan = detail.message;
     }
   });
 
@@ -1205,14 +1291,20 @@ export function ProjectsSection({
                   Chi tiết
                 </button>
                 {project.canSubmitForApproval ? (
-                  <button
-                    type="button"
-                    onClick={() => handleSubmitProjectForApproval(project)}
-                    disabled={!project.projectId || submittingProjectId === project.projectId}
-                    className="flex-1 rounded bg-[#0E7C6B] py-1.5 text-xs text-white disabled:opacity-60"
-                  >
-                    {submittingProjectId === project.projectId ? 'Đang submit...' : 'Gửi yêu cầu duyệt'}
-                  </button>
+                  <div className="flex-1">
+                    <button
+                      type="button"
+                      onClick={() => handleSubmitProjectForApproval(project)}
+                      disabled={!project.projectId || !project.hasGeofence || submittingProjectId === project.projectId}
+                      title={!project.hasGeofence ? 'Thiết lập và lưu vùng địa lý trước khi gửi yêu cầu duyệt.' : undefined}
+                      className="w-full rounded bg-[#0E7C6B] py-1.5 text-xs text-white disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {submittingProjectId === project.projectId ? 'Đang submit...' : 'Gửi yêu cầu duyệt'}
+                    </button>
+                    {!project.hasGeofence ? (
+                      <p className="mt-1 text-center text-[10px] text-[#9A3412]">Thiết lập vùng địa lý để mở gửi duyệt.</p>
+                    ) : null}
+                  </div>
                 ) : project.canUpdateProject ? (
                   <button
                     type="button"
@@ -2780,13 +2872,43 @@ export function CreateProjectModal({ onClose, onProjectCreated }: CreateProjectM
   const [formErrors, setFormErrors] = useState<CreateProjectFormErrors>({});
   const [submitErrorMessage, setSubmitErrorMessage] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const milestonePlanFeedback = buildMilestonePlanFeedback(formData);
+
+  /** Khóa cuộn nền khi modal mở và khôi phục đúng trạng thái trước đó khi modal đóng. */
+  useEffect(() => {
+    const previousBodyOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
+    return () => {
+      document.body.style.overflow = previousBodyOverflow;
+    };
+  }, []);
 
   /** Hàm cập nhật input theo field. Mục đích: gom logic controlled input và xóa lỗi field ngay khi người dùng chỉnh sửa. */
-  const handleChangeFormField = (field: keyof CreateProjectFormData, value: string) => {
+  const handleChangeFormField = (field: Exclude<keyof CreateProjectFormData, 'milestonePlan'>, value: string) => {
     const nextFormData: CreateProjectFormData = { ...formData, [field]: value };
     setFormData(nextFormData);
     const nextFormErrors = validateCreateProjectFormData(nextFormData, selectedEvidenceFiles);
     setFormErrors(currentErrors => ({ ...currentErrors, [field]: nextFormErrors[field] }));
+  };
+
+  /** Cập nhật một ô kế hoạch cột mốc và kiểm tra lại tổng phần trăm ngay trên form. */
+  const handleChangeMilestone = (index: number, field: 'percentage' | 'description', value: string): void => {
+    const milestonePlan = formData.milestonePlan.map((item, itemIndex) => itemIndex === index ? { ...item, [field]: value } : item);
+    const nextFormData = { ...formData, milestonePlan };
+    setFormData(nextFormData);
+    const nextFormErrors = validateCreateProjectFormData(nextFormData, selectedEvidenceFiles);
+    setFormErrors(currentErrors => {
+      const updatedErrors = { ...currentErrors };
+
+      if (nextFormErrors.milestonePlan) {
+        updatedErrors.milestonePlan = nextFormErrors.milestonePlan;
+      } else {
+        delete updatedErrors.milestonePlan;
+      }
+
+      return updatedErrors;
+    });
   };
 
   /** Hàm xử lý chọn file minh chứng. Mục đích: thêm file mới vào danh sách và validate giới hạn số lượng. */
@@ -2857,6 +2979,12 @@ export function CreateProjectModal({ onClose, onProjectCreated }: CreateProjectM
           description: formData.description.trim(),
           goalAmount: Number(formData.goalAmount),
           deadline: new Date(formData.deadline).toISOString(),
+          milestonePlan: formData.milestonePlan.map((item, index) => ({
+            milestoneIndex: index + 1,
+            milestoneKey: ['M1_ADVANCE', 'M2_CONSTRUCTION', 'M3_HANDOVER'][index],
+            percentage: Number(item.percentage),
+            description: item.description.trim()
+          })),
           evidenceCids: uploadResult.evidenceCids,
           evidenceFiles: uploadResult.evidenceFiles
         })
@@ -2895,18 +3023,23 @@ export function CreateProjectModal({ onClose, onProjectCreated }: CreateProjectM
   };
 
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/50 p-4">
-      <div className="w-full max-w-[640px] overflow-hidden rounded-[18px] bg-white shadow-2xl">
-        <div className="flex items-start justify-between border-b border-[#F3F4F6] p-5">
-          <div>
+    <div className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-black/50 p-3 sm:p-4">
+      <div
+        className="my-2 flex max-h-[calc(100vh-1rem)] w-full max-w-[640px] flex-col overflow-hidden rounded-[18px] bg-white shadow-2xl sm:my-4 sm:max-h-[calc(100vh-2rem)]"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="create-project-modal-title"
+      >
+        <div className="flex shrink-0 items-start justify-between gap-3 border-b border-[#F3F4F6] p-4 sm:p-5">
+          <div className="min-w-0">
             <p className="mb-1 text-2xl">🚀</p>
-            <p className="text-lg font-bold">Tạo dự án mới</p>
+            <p id="create-project-modal-title" className="text-lg font-bold">Tạo dự án mới</p>
             <p className="text-xs text-[#6B7280]">Điền thông tin theo 2 bước để khởi tạo dự án minh bạch.</p>
           </div>
-          <button type="button" onClick={onClose} className="h-8 w-8 rounded-full bg-[#F3F4F6]">✕</button>
+          <button type="button" onClick={onClose} className="h-8 w-8 shrink-0 rounded-full bg-[#F3F4F6]" aria-label="Đóng modal tạo dự án">✕</button>
         </div>
 
-        <form className="space-y-4 p-5 text-sm" onSubmit={handleSubmitCreateProject}>
+        <form className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain p-4 text-sm sm:p-5" onSubmit={handleSubmitCreateProject}>
           <div className="grid gap-3 md:grid-cols-2">
             <div className="md:col-span-2">
               <input className="w-full rounded border border-[#D1D5DB] px-3 py-2" placeholder="Tên dự án *" value={formData.name} onChange={event => handleChangeFormField('name', event.target.value)} />
@@ -2916,13 +3049,30 @@ export function CreateProjectModal({ onClose, onProjectCreated }: CreateProjectM
               <textarea className="min-h-[86px] w-full rounded border border-[#D1D5DB] px-3 py-2" placeholder="Mô tả ngắn" value={formData.description} onChange={event => handleChangeFormField('description', event.target.value)} />
               {formErrors.description ? <p className="mt-1 text-xs text-[#DC2626]">{formErrors.description}</p> : null}
             </div>
-            <div>
+            <div className="min-w-0">
               <input className="w-full rounded border border-[#D1D5DB] px-3 py-2" placeholder="Mục tiêu gây quỹ (VNĐ)" value={formData.goalAmount} onChange={event => handleChangeFormField('goalAmount', event.target.value)} />
               {formErrors.goalAmount ? <p className="mt-1 text-xs text-[#DC2626]">{formErrors.goalAmount}</p> : null}
             </div>
-            <div>
-              <input type="datetime-local" className="w-full rounded border border-[#D1D5DB] px-3 py-2" value={formData.deadline} onChange={event => handleChangeFormField('deadline', event.target.value)} />
+            <div className="min-w-0">
+              <label htmlFor="create-project-deadline" className="mb-1 block text-xs font-semibold text-[#374151]">Chọn thời điểm kết thúc</label>
+              <input id="create-project-deadline" type="datetime-local" className="w-full min-w-0 rounded border border-[#D1D5DB] px-3 py-2" value={formData.deadline} onChange={event => handleChangeFormField('deadline', event.target.value)} />
               {formErrors.deadline ? <p className="mt-1 text-xs text-[#DC2626]">{formErrors.deadline}</p> : null}
+            </div>
+            <div className="md:col-span-2 rounded border border-[#CCFBF1] bg-[#F0FDFA] p-3">
+              <p className="font-semibold text-[#0F766E]">Kế hoạch cột mốc giải ngân</p>
+              {(['M1 · Tạm ứng khởi động (≤25%)', 'M2 · Thi công', 'M3 · Nghiệm thu bàn giao'] as const).map((label, index) => (
+                <div key={label} className="mt-2 grid min-w-0 gap-2 md:grid-cols-[180px_100px_minmax(0,1fr)]">
+                  <label className="self-center text-xs font-medium">{label}</label>
+                  <input inputMode="numeric" placeholder="%" value={formData.milestonePlan[index].percentage} onChange={event => handleChangeMilestone(index, 'percentage', event.target.value)} className="min-w-0 rounded border border-[#99F6E4] px-2 py-1" />
+                  <input placeholder="Mô tả hạng mục (10–500 ký tự)" value={formData.milestonePlan[index].description} onChange={event => handleChangeMilestone(index, 'description', event.target.value)} className="min-w-0 rounded border border-[#99F6E4] px-2 py-1" />
+                </div>
+              ))}
+              {milestonePlanFeedback.hasInput && milestonePlanFeedback.totalPercentage !== 100 ? (
+                <p className="mt-2 text-xs font-semibold text-[#DC2626]" role="status">
+                  Tổng phân bổ: {milestonePlanFeedback.totalPercentage}% · {milestonePlanFeedback.totalPercentage < 100 ? `Còn thiếu ${100 - milestonePlanFeedback.totalPercentage}%` : `Đang vượt ${milestonePlanFeedback.totalPercentage - 100}%`}
+                </p>
+              ) : null}
+              {formErrors.milestonePlan && formErrors.milestonePlan !== TOTAL_MILESTONE_ERROR_MESSAGE ? <p className="mt-1 text-xs text-[#DC2626]">{formErrors.milestonePlan}</p> : null}
             </div>
             <div className="md:col-span-2">
               <input type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.docx" onChange={handleSelectEvidenceFiles} className="w-full rounded border border-[#D1D5DB] px-3 py-2" />
@@ -2932,9 +3082,9 @@ export function CreateProjectModal({ onClose, onProjectCreated }: CreateProjectM
               {selectedEvidenceFiles.length > 0 ? (
                 <div className="mt-2 space-y-1">
                   {selectedEvidenceFiles.map((fileItem, fileIndex) => (
-                    <div key={`${fileItem.name}-${fileIndex}`} className="flex items-center justify-between rounded border border-[#E5E7EB] bg-[#F9FAFB] px-2 py-1 text-xs">
-                      <span className="truncate">{fileItem.name}</span>
-                      <button type="button" onClick={() => handleRemoveEvidenceFile(fileIndex)} className="text-[#DC2626]">Xóa</button>
+                    <div key={`${fileItem.name}-${fileIndex}`} className="flex min-w-0 items-center justify-between gap-2 rounded border border-[#E5E7EB] bg-[#F9FAFB] px-2 py-1 text-xs">
+                      <span className="min-w-0 truncate">{fileItem.name}</span>
+                      <button type="button" onClick={() => handleRemoveEvidenceFile(fileIndex)} className="shrink-0 text-[#DC2626]">Xóa</button>
                     </div>
                   ))}
                 </div>
@@ -2944,7 +3094,7 @@ export function CreateProjectModal({ onClose, onProjectCreated }: CreateProjectM
 
           {submitErrorMessage ? <p className="rounded border border-[#FECACA] bg-[#FEF2F2] px-3 py-2 text-xs text-[#B91C1C]">{submitErrorMessage}</p> : null}
 
-          <div className="flex gap-2 border-t border-[#F3F4F6] pt-4">
+          <div className="flex flex-col gap-2 border-t border-[#F3F4F6] pt-4 sm:flex-row">
             <button type="button" onClick={onClose} disabled={isSubmitting} className="flex-1 rounded bg-[#F3F4F6] py-2 text-sm">Hủy</button>
             <button type="submit" disabled={isSubmitting} className="flex-1 rounded bg-[#0E7C6B] py-2 text-sm font-semibold text-white disabled:opacity-60">{isSubmitting ? 'Đang tạo...' : 'Tạo dự án'}</button>
           </div>

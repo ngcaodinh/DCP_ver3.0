@@ -85,6 +85,18 @@ describe('createFreshRoleAuthorizationMiddleware', () => {
     expect(response.json).toHaveBeenCalledWith(expect.objectContaining({ errorCode: 'UNAUTHENTICATED' }));
   });
 
+  it('rejects a Sybil-flagged account from a fresh privileged action', async () => {
+    vi.mocked(findUserById).mockResolvedValue({
+      id: 'admin-001', role: 'admin', accountStatus: 'ACTIVE', authVersion: 2, isSybil: true
+    } as never);
+    const response = createResponse();
+
+    await createFreshRoleAuthorizationMiddleware(['admin'])(createRequest(), response, vi.fn());
+
+    expect(response.status).toHaveBeenCalledWith(403);
+    expect(response.json).toHaveBeenCalledWith(expect.objectContaining({ errorCode: 'FORBIDDEN' }));
+  });
+
   it('returns 503 when current authorization state cannot be read', async () => {
     vi.mocked(findUserById).mockRejectedValue(new Error('database unavailable'));
     const response = createResponse();

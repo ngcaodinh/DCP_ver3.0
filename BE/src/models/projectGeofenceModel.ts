@@ -70,6 +70,21 @@ export async function findGeofenceByProjectId(
   return ProjectGeofenceMongoModel.findOne({ projectId }).lean().exec();
 }
 
+/** Lấy tập projectId đã có geofence để hiển thị đúng điều kiện submit trong danh sách dự án. */
+export async function findProjectIdsWithGeofence(projectIds: string[]): Promise<Set<string>> {
+  if (projectIds.length === 0) {
+    return new Set();
+  }
+
+  const geofenceRecords = await ProjectGeofenceMongoModel
+    .find({ projectId: { $in: projectIds } })
+    .select({ projectId: 1, _id: 0 })
+    .lean<Pick<ProjectGeofenceRecord, 'projectId'>[]>()
+    .exec();
+
+  return new Set(geofenceRecords.map(geofenceRecord => geofenceRecord.projectId));
+}
+
 /** Tạo mới hoặc cập nhật geofence cho dự án (upsert). */
 export async function upsertProjectGeofence(
   projectId: string,

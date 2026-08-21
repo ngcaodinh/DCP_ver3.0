@@ -32,6 +32,7 @@ import { startEventLoggerWorker, stopEventLoggerWorker } from './workers/event-l
 import { startEventRetentionWorker, stopEventRetentionWorker } from './workers/event-retention.worker';
 import { initializeEventSocketBridge, shutdownEventSocketBridge } from './services/eventSocketBridge.service';
 import { startTrustScoreScheduler, stopTrustScoreScheduler } from './workers/trustScoreScheduler';
+import { startProjectActivationWorker, stopProjectActivationWorker } from './workers/projectActivationWorker';
 
 const logger = getLogger();
 
@@ -82,6 +83,7 @@ function startBackgroundWorkers(): void {
   startEventRetentionWorker();
   // Trust Score Scheduler (G1): tính lại trust score cho toàn bộ donor mỗi 24 giờ
   startTrustScoreScheduler();
+  startProjectActivationWorker();
 }
 
 /**
@@ -120,6 +122,7 @@ async function startServer(): Promise<void> {
       await shutdownEventSocketBridge();
       // Trust Score Scheduler (G1): clear timeout để job không fire sau khi shutdown
       stopTrustScoreScheduler();
+      stopProjectActivationWorker();
       stopManualReviewEscalationWorker();
       stopOverrideExpiryWorker();
       await stopOracleWorker();

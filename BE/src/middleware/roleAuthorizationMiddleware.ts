@@ -61,6 +61,11 @@ export function createFreshRoleAuthorizationMiddleware(allowedRoles: string[]) {
         return;
       }
 
+      if (currentUser.isSybil) {
+        sendErrorResponse(response, 403, 'Tài khoản đang bị gắn cờ Sybil không thể thực hiện hành động nhạy cảm.', 'FORBIDDEN');
+        return;
+      }
+
       // Dùng role hiện tại trong DB cho các handler phía sau, không dùng role cũ trong JWT.
       request.authenticatedUser = {
         ...authenticatedUser,

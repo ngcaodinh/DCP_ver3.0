@@ -32,10 +32,24 @@ const mapSpies = vi.hoisted(() => ({
 // react-leaflet là DOM-only — mock toàn bộ để test trong jsdom.
 // CircleMarker expose fillColor qua data-fill để assert màu verdict (VALID xanh, INVALID đỏ).
 vi.mock('react-leaflet', () => ({
-  MapContainer: ({ children }: { children: React.ReactNode }) => (
-    <div data-testid="map-container">{children}</div>
+  MapContainer: ({
+    children,
+    minZoom,
+    maxZoom,
+  }: {
+    children: React.ReactNode;
+    minZoom?: number;
+    maxZoom?: number;
+  }) => (
+    <div data-testid="map-container" data-min-zoom={minZoom} data-max-zoom={maxZoom}>{children}</div>
   ),
-  TileLayer: ({ url }: { url: string }) => <div data-testid="tile-layer" data-url={url} />,
+  TileLayer: ({
+    url,
+    maxNativeZoom,
+  }: {
+    url: string;
+    maxNativeZoom?: number;
+  }) => <div data-testid="tile-layer" data-url={url} data-max-native-zoom={maxNativeZoom} />,
   Polygon: () => <div data-testid="polygon" />,
   Circle: ({ radius }: { radius: number }) => <div data-testid="circle" data-radius={radius} />,
   CircleMarker: ({
@@ -166,13 +180,14 @@ describe('GeofenceMap — fetch mode', () => {
     expect(screen.queryByTestId('map-container')).not.toBeInTheDocument();
   });
 
-  it('tile URL đi qua proxy /api/tiles, không dùng OSM trực tiếp', async () => {
+  it('giới hạn zoom theo tile proxy để nền bản đồ không biến mất', async () => {
     vi.mocked(fetchApi).mockResolvedValue({ success: true, message: '', data: MOCK_GEOFENCE });
     renderWithQuery(<GeofenceMap {...defaultProps} />);
     await waitFor(() => {
+      expect(screen.getByTestId('map-container')).toHaveAttribute('data-max-zoom', '19');
       const tile = screen.getByTestId('tile-layer');
-      expect(tile.getAttribute('data-url')).toContain('/api/tiles/');
-      expect(tile.getAttribute('data-url')).not.toContain('tile.openstreetmap.org');
+      expect(tile.getAttribute('data-url')).toBe('/api/tiles/{z}/{x}/{y}.png');
+      expect(tile).toHaveAttribute('data-max-native-zoom', '19');
     });
   });
 });
