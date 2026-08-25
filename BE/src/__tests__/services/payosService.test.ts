@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createPayosPaymentLink, getPayosTransferStatusByReferenceId } from '../../services/payosService';
+import {
+  createPayosPaymentLink,
+  getPayosPaymentLinkStatus,
+  getPayosTransferStatusByReferenceId
+} from '../../services/payosService';
 
 /** Tạo response PayOS tối thiểu cho các case reconciliation nhiều payout. */
 function createPayosResponse(data: unknown): Response {
@@ -120,5 +124,41 @@ describe('payosService provider reconciliation', () => {
     expect(errorMessage).not.toContain('Nguyen Van A');
     expect(errorMessage).not.toContain('1234567890');
     expect(errorMessage).toContain('[REDACTED]');
+  });
+
+  it('lấy trạng thái payment link trực tiếp từ PayOS theo orderCode', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(createPayosResponse({
+      amount: 3_000_000,
+      id: 'payos-link-001',
+      orderCode: 1787650889515545,
+      status: 'PAID'
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(getPayosPaymentLinkStatus('1787650889515545')).resolves.toEqual({
+      amountVnd: 3_000_000,
+      orderCode: '1787650889515545',
+      paymentLinkId: 'payos-link-001',
+      status: 'PAID'
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api-merchant.payos.vn/v2/payment-requests/1787650889515545',
+      expect.objectContaining({ method: 'GET' })
+    );
+  });
+
+  it('chặn orderCode vượt giới hạn trước khi gửi request đến PayOS', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(createPayosPaymentLink({
+      orderCode: String(Number.MAX_SAFE_INTEGER + 1),
+      amountVnd: 100_000,
+      description: 'Test payment',
+      returnUrl: 'https://example.test/return',
+      cancelUrl: 'https://example.test/cancel'
+    })).rejects.toThrow('orderCode PayOS vượt giới hạn cho phép.');
+
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

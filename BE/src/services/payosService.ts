@@ -15,7 +15,32 @@ type CreatePaymentLinkResult = {
   orderCode: string;
 };
 
+export type PayosPaymentLinkStatus = {
+  amountVnd: number;
+  orderCode: string;
+  paymentLinkId: string | null;
+  status: string;
+};
+
 const logger = getLogger();
+const maximumPayosOrderCode = Number.MAX_SAFE_INTEGER;
+
+/**
+ * Hàm chuẩn hóa và kiểm tra orderCode trước khi gọi PayOS.
+ * Mục đích: chặn mã vượt giới hạn số nguyên an toàn, tránh PayOS trả lại lỗi 400 khó hiểu.
+ */
+function getValidatedPayosOrderCode(orderCode: string): number {
+  if (!/^\d+$/.test(orderCode)) {
+    throw new Error('orderCode PayOS phải là số nguyên dương.');
+  }
+
+  const numericOrderCode = Number(orderCode);
+  if (!Number.isSafeInteger(numericOrderCode) || numericOrderCode <= 0 || numericOrderCode > maximumPayosOrderCode) {
+    throw new Error('orderCode PayOS vượt giới hạn cho phép.');
+  }
+
+  return numericOrderCode;
+}
 
 /** Tạo lỗi PayOS chỉ giữ status và body đã sanitize, không đưa raw provider response vào log chain. */
 function createSafePayosProviderError(operation: string, statusCode: number, responseText: string): Error {
@@ -299,7 +324,7 @@ export async function createPayosPaymentLink(input: CreatePaymentLinkInput): Pro
     amount: input.amountVnd,
     cancelUrl: input.cancelUrl,
     description: input.description,
-    orderCode: Number(input.orderCode),
+    orderCode: getValidatedPayosOrderCode(input.orderCode),
     returnUrl: input.returnUrl
   };
 
@@ -360,6 +385,68 @@ export async function createPayosPaymentLink(input: CreatePaymentLinkInput): Pro
   return {
     paymentUrl,
     orderCode: normalizedOrderCode
+  };
+}
+
+/**
+ * Hàm lấy trạng thái link thanh toán trực tiếp từ PayOS theo orderCode.
+ * Mục đích: đối soát an toàn khi webhook bị trễ hoặc không thể gọi tới môi trường cục bộ.
+ */
+export async function getPayosPaymentLinkStatus(orderCode: string): Promise<PayosPaymentLinkStatus> {
+  const clientId = process.env.PAYOS_CLIENT_ID;
+  const apiKey = process.env.PAYOS_API_KEY;
+
+  if (!clientId || !apiKey) {
+    throw new Error('Thiếu cấu hình PayOS. Kiểm tra PAYOS_CLIENT_ID và PAYOS_API_KEY.');
+  }
+
+  const validatedOrderCode = getValidatedPayosOrderCode(orderCode);
+  const response = await fetch(`https://api-merchant.payos.vn/v2/payment-requests/${validatedOrderCode}`, {
+    method: 'GET',
+    headers: {
+      'x-client-id': clientId,
+      'x-api-key': apiKey
+    }
+  });
+
+  if (!response.ok) {
+    const responseText = await response.text();
+    throw createSafePayosProviderError('PayOS lấy trạng thái payment link thất bại', response.status, responseText);
+  }
+
+  const responsePayload = (await response.json()) as {
+    code?: string;
+    data?: {
+      amount?: number;
+      id?: string;
+      orderCode?: string | number;
+      status?: string;
+    };
+  };
+  const providerOrderCode = responsePayload.data?.orderCode;
+  const providerAmountVnd = responsePayload.data?.amount;
+  const providerStatus = responsePayload.data?.status;
+
+  if (
+    responsePayload.code !== '00'
+    || providerOrderCode === undefined
+    || typeof providerAmountVnd !== 'number'
+    || !Number.isSafeInteger(providerAmountVnd)
+    || providerAmountVnd <= 0
+    || typeof providerStatus !== 'string'
+    || providerStatus.trim().length === 0
+  ) {
+    const safeResponsePayload = sanitizeProviderError(responsePayload);
+    throw new Error(
+      `PayOS trả dữ liệu trạng thái payment link không hợp lệ.${safeResponsePayload ? ` ${safeResponsePayload}` : ''}`
+    );
+  }
+
+  return {
+    amountVnd: providerAmountVnd,
+    orderCode: String(providerOrderCode),
+    paymentLinkId: responsePayload.data?.id ? String(responsePayload.data.id) : null,
+    status: providerStatus.trim().toUpperCase()
   };
 }
 

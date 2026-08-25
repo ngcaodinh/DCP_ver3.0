@@ -67,3 +67,15 @@ export async function findAuditorFieldReportsByProjectIds(projectIds: string[]):
   if (!projectIds.length) return [];
   return AuditorFieldReportMongoModel.find({ projectId: { $in: [...new Set(projectIds)] } }).lean<AuditorFieldReportRecord[]>().exec();
 }
+
+/**
+ * Liệt kê biên bản của chính auditor cho màn hình lịch sử.
+ * Collection chưa có index theo auditorUserId nên luôn bắt buộc truyền trần bản ghi.
+ */
+export async function findAuditorFieldReportsByAuditorUserId(auditorUserId: string, limitCount: number): Promise<AuditorFieldReportRecord[]> {
+  return AuditorFieldReportMongoModel.find({ auditorUserId })
+    .sort({ submittedAt: -1 })
+    .limit(limitCount)
+    .lean<AuditorFieldReportRecord[]>()
+    .exec();
+}

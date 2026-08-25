@@ -2,6 +2,7 @@
 /* tslint:disable */
 /* eslint-disable */
 export * as impactSbtSol from './ImpactSBT.sol/index.js';
+export { AuditorStaking__factory } from './AuditorStaking__factory.js';
 export { DcpCharityToken__factory } from './DcpCharityToken__factory.js';
 export { DcpDonationRanking__factory } from './DcpDonationRanking__factory.js';
 export { DisbursementVault__factory } from './DisbursementVault__factory.js';

@@ -28,6 +28,7 @@ import { createLocationSearchRoutes } from './routes/locationSearchRoutes';
 import { createAuditLogRoutes } from './routes/audit-log.routes';
 import { createTrustScoreRoutes } from './routes/trustScoreRoutes';
 import { createProjectGovernanceRoutes } from './routes/projectGovernanceRoutes';
+import { createAuditorOnboardingRoutes } from './routes/auditorOnboardingRoutes';
 import { validateGuestJwtConfig } from './config/guestJsonWebToken';
 import { applySeoAndCacheHeaders } from './middleware/seoCacheMiddleware';
 import { API_GUEST_PREFIX } from './config/apiPrefixes';
@@ -172,6 +173,7 @@ function registerRoutes(): void {
   application.use(createHealthRoutes()); // → /health, /ready, /live
   application.use(createMetricsRoutes());
   application.use('/api/deposit', createDepositRoutes());
+  application.use('/api/auditor-onboarding', createAuditorOnboardingRoutes());
   application.use('/projects', createProjectRoutes());
   application.use('/donations', createDonationRoutes());
   application.use('/rankings', createRankingRoutes());

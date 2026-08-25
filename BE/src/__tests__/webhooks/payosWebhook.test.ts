@@ -14,6 +14,7 @@ const mockWebhookEventsEmitFn = vi.hoisted(() => vi.fn());
 const mockEventLoggerLogEventFn = vi.hoisted(() => vi.fn());
 const mockAuditLogCreateFn = vi.hoisted(() => vi.fn<() => Promise<unknown>>());
 const mockFindDisbursementFn = vi.hoisted(() => vi.fn<() => Promise<unknown>>());
+const mockProcessAuditorPayoutFn = vi.hoisted(() => vi.fn<() => Promise<boolean>>());
 
 const mockRedisClient = {
   setNX: mockRedisSetNX,
@@ -36,6 +37,10 @@ vi.mock('../../config/logger', () => ({
 
 vi.mock('../../services/disbursementService', () => ({
   processDisbursementTransferWebhook: mockProcessDisbursementFn
+}));
+
+vi.mock('../../services/auditorPayoutService', () => ({
+  processAuditorPayoutPayosResult: mockProcessAuditorPayoutFn
 }));
 
 vi.mock('../../services/payosService', () => ({
@@ -71,6 +76,7 @@ import { processPayosWebhook } from '../../services/payosWebhookService';
 describe('PayOS Webhook Handler - processPayosWebhook', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockProcessAuditorPayoutFn.mockResolvedValue(false);
   });
 
   afterEach(() => {

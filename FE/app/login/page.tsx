@@ -86,6 +86,14 @@ function resolvePostLoginRedirectPath(userRoleValue: string | undefined | null):
     return '/organizations';
   }
 
+  if (normalizedUserRole === 'auditor') {
+    return '/auditor';
+  }
+
+  if (normalizedUserRole === 'executivechair' || normalizedUserRole === 'executivemember') {
+    return '/executive';
+  }
+
   if (normalizedUserRole === 'admin' || normalizedUserRole === 'systemadmin') {
     return '/admin';
   }

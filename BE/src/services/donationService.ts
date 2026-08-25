@@ -13,6 +13,7 @@ import { findUserById, updateUser } from '../models/authModel';
 import { getZeroDevConfig } from '../config/zeroDev';
 import { createKernelClientFromEncryptedOwnerKey } from './zeroDevService';
 import { ApplicationError } from '../utils/applicationError';
+import { hasAuditorWalletLock } from '../models/auditorStakeGuardModel';
 import { applyDonationToMetrics } from './rankingIncrementalService';
 import { invalidateRankingCache } from './rankingCacheService';
 import { findProjectByProjectId } from '../models/projectModel';
@@ -175,6 +176,10 @@ export async function executeOneClickDonation(authenticatedUserId: string, proje
   }
   if (!authenticatedUser.smartAccountOwnerEncryptedPrivateKey) {
     throw new ApplicationError('Tài khoản chưa sẵn sàng cho luồng one-click donation.', 400, 'VALIDATION_ERROR');
+  }
+
+  if (await hasAuditorWalletLock(authenticatedUser.id)) {
+    throw new ApplicationError('Ví đang có giao dịch chi trả chờ đốt DCT; bạn chưa thể sử dụng DCT lúc này.', 409, 'CONFLICT');
   }
 
   const donationContractAddress = String(process.env.DONATION_RANKING_CONTRACT_ADDRESS || '').trim() as `0x${string}`;

@@ -19,6 +19,7 @@
     "migrate:beneficiary-feedback-index": "node scripts/migrateBeneficiaryFeedbackIndexes.js",
     "migrate:foundation-kyc-index": "node scripts/migrateFoundationKycIndexes.js",
     "migrate:manual-review-queue-request-mode": "node scripts/migrateManualReviewQueueRequestMode.js",
+    "migrate:auditor-staking-indexes": "node scripts/migrateAuditorStakingIndexes.js",
     "migrate:admin-audit-log-schema": "node dist/scripts/migrateAdminAuditLogSchema.js",
     "grant:project-manager-role": "node scripts/grantProjectManagerRole.js",
     "assign:governance-role": "node scripts/assignGovernanceRole.js"

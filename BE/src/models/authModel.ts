@@ -11,7 +11,8 @@ export type AuthUser = {
   socialProvider: string;
   socialAccountId: string;
   isEmailVerified: boolean;
-  accountStatus: 'ACTIVE' | 'INACTIVE_PENDING_KYC';
+  accountStatus: 'ACTIVE' | 'INACTIVE_PENDING_KYC' | 'PENDING_STAKE_VERIFICATION' | 'SUSPENDED';
+  suspendedReasonCode?: string | null;
   organizationName: string | null;
   legalRegistrationNumber: string | null;
   isSybil: boolean;
@@ -69,6 +70,7 @@ const authUserSchema = new Schema<AuthUser>({
   socialAccountId: { type: String, required: true },
   isEmailVerified: { type: Boolean, required: true },
   accountStatus: { type: String, required: true },
+  suspendedReasonCode: { type: String, default: null },
   organizationName: { type: String, default: null },
   legalRegistrationNumber: { type: String, default: null },
   isSybil: { type: Boolean, required: true, default: false },
@@ -174,6 +176,11 @@ export async function findUserWalletAddressById(userId: string): Promise<string 
 export async function createUser(user: AuthUser): Promise<AuthUser> {
   const createdUser = await AuthUserModel.create(user);
   return createdUser.toObject() as AuthUser;
+}
+
+/** Xoá user vừa tạo khi bước onboarding liên quan thất bại trước khi hoàn tất, tránh để lại tài khoản mồ côi. */
+export async function deleteUserById(userId: string): Promise<void> {
+  await AuthUserModel.deleteOne({ id: userId }).exec();
 }
 
 /**

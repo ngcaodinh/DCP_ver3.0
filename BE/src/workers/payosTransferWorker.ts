@@ -26,6 +26,9 @@ import {
 import { openManualReviewQueueForDisbursement } from '../services/manualReviewService';
 import { getPayosBankCode } from '../config/payosBankCodes';
 import { sanitizeProviderError } from '../utils/sanitizeProviderError';
+import { maskAccountHolderName, maskBankAccount } from '../utils/bankAccountMasking';
+
+export { maskAccountHolderName, maskBankAccount } from '../utils/bankAccountMasking';
 
 /**
  * Tổng số attempt gồm lần đầu và 3 lần retry có backoff.
@@ -97,25 +100,11 @@ export function sanitizePayosResponseForLog(
  * Hàm mask số tài khoản cho log.
  * Hiển thị 4 số cuối, phần còn lại thay bằng *.
  */
-export function maskBankAccount(accountNumber: string): string {
-  if (!accountNumber || accountNumber.length <= 4) {
-    return '****';
-  }
-  const visibleDigits = accountNumber.slice(-4);
-  const maskedDigits = '*'.repeat(accountNumber.length - 4);
-  return `${maskedDigits}${visibleDigits}`;
-}
 
 /**
  * Hàm mask tên chủ tài khoản cho log.
  * Chỉ hiển thị 2 ký tự đầu.
  */
-export function maskAccountHolderName(name: string): string {
-  if (!name || name.length <= 2) {
-    return '**';
-  }
-  return `${name.slice(0, 2)}${'*'.repeat(Math.max(0, name.length - 2))}`;
-}
 
 /**
  * Hàm kiểm tra xem disbursement có đã quá timeout chưa.

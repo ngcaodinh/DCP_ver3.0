@@ -1,7 +1,12 @@
 import { Request, Response } from 'express';
 import { ethers } from 'ethers';
-import { createDepositRequest, getDepositTransactionStatus, processDepositWebhook } from '../services/depositService';
-import { listRecentDepositTransactionsByUserId } from '../models/depositModel';
+import {
+  createDepositRequest,
+  getDepositTransactionStatus,
+  processDepositWebhook,
+  reconcilePendingDepositPayment
+} from '../services/depositService';
+import { findDepositTransactionByOrderCode, listRecentDepositTransactionsByUserId } from '../models/depositModel';
 import { findUserById } from '../models/authModel';
 import { getLogger } from '../config/logger';
 
@@ -22,6 +27,9 @@ export async function handleCreateDeposit(request: Request, response: Response):
   }
 
   const amountVnd = Number(request.body?.amountVnd);
+  const paymentFlow = request.body?.paymentFlow === 'AUDITOR_ONBOARDING'
+    ? 'AUDITOR_ONBOARDING'
+    : undefined;
 
   try {
     const user = await findUserById(authenticatedRequest.authenticatedUser.userId);
@@ -34,7 +42,8 @@ export async function handleCreateDeposit(request: Request, response: Response):
       userId: user.id,
       walletAddress: user.walletAddress,
       amountVnd,
-      correlationId: user.correlationId
+      correlationId: user.correlationId,
+      paymentFlow
     });
 
     response.status(201).json(createResult);
@@ -137,9 +146,13 @@ export async function handleGetDepositStatus(request: Request, response: Respons
   }
 
   const orderCode = request.params.orderCode;
+  const shouldReconcileWithPayos = request.query.reconcile === 'true';
 
   try {
-    const transaction = await getDepositTransactionStatus(orderCode);
+    // Khi browser vừa redirect từ PayOS, đối soát trước timeout nội bộ để không bỏ sót callback đến muộn.
+    let transaction = shouldReconcileWithPayos
+      ? await findDepositTransactionByOrderCode(orderCode)
+      : await getDepositTransactionStatus(orderCode);
     if (!transaction) {
       response.status(404).json({ message: 'Không tìm thấy giao dịch theo orderCode.' });
       return;
@@ -148,6 +161,14 @@ export async function handleGetDepositStatus(request: Request, response: Respons
     if (transaction.userId !== authenticatedRequest.authenticatedUser.userId) {
       response.status(403).json({ message: 'Bạn không có quyền truy cập giao dịch này.' });
       return;
+    }
+
+    if (shouldReconcileWithPayos) {
+      // Chỉ đối soát sau khi kiểm tra quyền sở hữu, tránh dùng endpoint này để dò trạng thái đơn của người khác.
+      transaction = await reconcilePendingDepositPayment(transaction);
+      if (transaction.status === 'PENDING_PAYMENT') {
+        transaction = await getDepositTransactionStatus(orderCode) || transaction;
+      }
     }
 
     // Ghi chú logic phức tạp: FE cần mốc hết hạn thanh toán để hiển thị bộ đếm ngược 15 phút.
@@ -162,6 +183,10 @@ export async function handleGetDepositStatus(request: Request, response: Respons
       paymentUrl: transaction.paymentUrl,
       onChainTransactionHash: transaction.onChainTransactionHash,
       failureReason: transaction.failureReason,
+      // Chỉ đánh dấu khi PayOS đã được xác nhận nhưng toàn bộ retry mint on-chain đều thất bại.
+      isPaymentConfirmedButMintFailed: transaction.status === 'FAILED'
+        && transaction.paymentConfirmedAt !== null
+        && transaction.mintCompletedAt === null,
       createdAt: transaction.createdAt,
       updatedAt: transaction.updatedAt,
       paymentExpiredAt
@@ -174,21 +199,21 @@ export async function handleGetDepositStatus(request: Request, response: Respons
 
 /**
  * Hàm đọc số dư token on-chain theo địa chỉ ví người dùng.
- * Mục đích: đồng bộ số dư hiển thị với số dư thực tế dùng khi one-click donation.
+ * Mục đích: giữ nguyên độ chính xác uint256 trước khi từng endpoint quyết định định dạng response phù hợp.
  */
-async function getOnChainTokenBalance(walletAddress: string): Promise<number> {
+async function getOnChainTokenBalance(walletAddress: string): Promise<bigint> {
   const blockchainRpcUrl = String(process.env.BLOCKCHAIN_RPC_URL || '').trim();
   const charityTokenContractAddress = String(process.env.CHARITY_TOKEN_CONTRACT_ADDRESS || '').trim();
 
   if (!blockchainRpcUrl || !charityTokenContractAddress || !walletAddress) {
-    return 0;
+    return 0n;
   }
 
   const readOnlyProvider = new ethers.JsonRpcProvider(blockchainRpcUrl);
   const charityTokenContract = new ethers.Contract(charityTokenContractAddress, charityTokenAbi, readOnlyProvider);
   const tokenBalanceAsBigInt = await charityTokenContract.balanceOf(walletAddress) as bigint;
 
-  return Number(tokenBalanceAsBigInt);
+  return tokenBalanceAsBigInt;
 }
 
 /**
@@ -210,6 +235,8 @@ export async function handleGetDepositSidebar(request: Request, response: Respon
     }
 
     const tokenBalanceOnChain = await getOnChainTokenBalance(user.walletAddress);
+    // Sidebar kế thừa contract number hiện tại; endpoint /balance riêng trả decimal string để luồng đặt cọc không mất chính xác uint256.
+    const tokenBalanceForSidebar = Number(tokenBalanceOnChain);
     const recentTransactions = await listRecentDepositTransactionsByUserId(user.id, 5);
 
     response.status(200).json({
@@ -218,8 +245,8 @@ export async function handleGetDepositSidebar(request: Request, response: Respon
         role: user.role,
         walletAddress: user.walletAddress
       },
-      tokenBalance: tokenBalanceOnChain,
-      tokenBalanceOnChain,
+      tokenBalance: tokenBalanceForSidebar,
+      tokenBalanceOnChain: tokenBalanceForSidebar,
       recentDeposits: recentTransactions.map((transaction) => ({
         orderCode: transaction.orderCode,
         amountVnd: transaction.amountVnd,
@@ -257,10 +284,9 @@ export async function handleGetTokenBalance(request: Request, response: Response
 
     const tokenBalanceOnChain = await getOnChainTokenBalance(user.walletAddress);
 
-    response.status(200).json({ tokenBalance: tokenBalanceOnChain });
+    response.status(200).json({ tokenBalance: tokenBalanceOnChain.toString() });
   } catch (error) {
     logger.error('Lấy số dư token thất bại.', { errorMessage: (error as Error).message });
     response.status(500).json({ message: 'Không thể lấy số dư token.' });
   }
 }
-

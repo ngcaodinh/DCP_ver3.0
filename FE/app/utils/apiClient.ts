@@ -119,3 +119,15 @@ export async function fetchApi<T>(
 
   return responseBody as ApiSuccessResponse<T>;
 }
+
+/** Đọc message lỗi từ payload mà fetchApi ném ra để hiển thị đúng phản hồi của backend. */
+export function getApiErrorMessage(error: unknown, fallbackMessage: string): string {
+  if (typeof error === "object" && error !== null && "message" in error) {
+    const message = (error as ApiErrorResponse).message;
+    if (typeof message === "string" && message.trim().length > 0) {
+      return message;
+    }
+  }
+
+  return fallbackMessage;
+}

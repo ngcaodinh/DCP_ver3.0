@@ -3,7 +3,26 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { persistAuthSession, readAuthSession } from "../utils/authSession";
+import { clearAuthSession, persistAuthSession, readAuthSession } from "../utils/authSession";
+import {
+  executeAuditorStake,
+  getAuditorOnboardingStatus,
+  registerAuditorIntent,
+  resumeAuditorIntent,
+  type RegisterAuditorIntentResult,
+} from "../utils/auditorOnboarding";
+import {
+  AUDITOR_INTENT_STORAGE_KEY,
+  AUDITOR_PAYOUT_SUPPORTED_BANKS,
+  AUDITOR_ROLE_LABEL,
+  AUDITOR_STEP_THREE_SUBTITLE,
+  AUDITOR_SUCCESS_SUBTITLE,
+  AUDITOR_SUCCESS_TITLE,
+  formatDctAmount,
+  getAuditorApiErrorMessage,
+  normalizeAuditorAccountHolderName,
+} from "../constants/auditorRegistration";
+import { REGISTER_ROLE_CONFIG } from "../constants/registerRoles";
 import AuthLegalModal from "../components/AuthLegalModal";
 
 declare global {
@@ -67,8 +86,138 @@ const RadialGlow = ({ className }: { className: string }) => (
 );
 
 type StepStatus = "upcoming" | "active" | "done";
-type RoleType = "donor" | "organization" | null;
-type AuthenticatedRoleType = "donor" | "organization" | "honor" | null;
+type RoleType = "donor" | "organization" | "auditor" | null;
+// Mở rộng kiểu cho đủ ngữ nghĩa; backend /auth/google-login không trả vai trò auditor.
+type AuthenticatedRoleType = "donor" | "organization" | "honor" | "auditor" | null;
+type AuditorStakeStage = "NEED_TOKEN" | "AWAITING_PAYMENT" | "READY_TO_STAKE" | "VERIFYING" | "ACTIVATED" | "FAILED" | "RECOVERY_REQUIRED";
+
+type AuditorDepositStatus = "PENDING_PAYMENT" | "PAYMENT_CONFIRMED" | "MINT_COMPLETED" | "FAILED";
+
+type AuditorDepositCreateResult = {
+  orderCode: string;
+  paymentUrl: string;
+  status: "PENDING_PAYMENT";
+};
+
+type AuditorDepositStatusResult = {
+  status: AuditorDepositStatus;
+  paymentUrl?: string;
+  paymentExpiredAt?: string;
+  failureReason?: string | null;
+  isPaymentConfirmedButMintFailed?: boolean;
+};
+
+const MINIMUM_AUDITOR_DEPOSIT_AMOUNT = 10_000n;
+const MAX_SAFE_AUDITOR_DEPOSIT_AMOUNT = BigInt(Number.MAX_SAFE_INTEGER);
+const AUDITOR_DEPOSIT_STATUSES: readonly AuditorDepositStatus[] = ["PENDING_PAYMENT", "PAYMENT_CONFIRMED", "MINT_COMPLETED", "FAILED"];
+const AUDITOR_STAKE_THRESHOLD_STORAGE_KEY = "dcpAuditorOnboardingStakeThreshold";
+const AUDITOR_WALLET_ADDRESS_STORAGE_KEY = "dcpAuditorOnboardingWalletAddress";
+const AUDITOR_PAYMENT_RETURN_FLOW = "auditor_onboarding";
+const PAYOS_SUCCESS_CALLBACK_STATUSES = new Set(["PAID", "SUCCESS", "COMPLETED"]);
+const AUDITOR_ONCHAIN_STATUS_POLL_INTERVAL_MS = 5_000;
+const AUDITOR_AUTO_STAKE_RETRY_INTERVAL_MS = 5_000;
+const AUDITOR_AUTO_STAKE_MAX_ATTEMPTS = 2;
+const AUDITOR_LOGIN_REDIRECT_DELAY_MS = 3_000;
+
+/** Đọc errorCode an toàn từ payload lỗi để xử lý các nhánh nghiệp vụ đặc thù. */
+const getApiErrorCode = (error: unknown): string | undefined => {
+  if (typeof error !== "object" || error === null || !("errorCode" in error)) {
+    return undefined;
+  }
+
+  const errorCode = (error as { errorCode?: unknown }).errorCode;
+  return typeof errorCode === "string" ? errorCode : undefined;
+};
+
+/** Chỉ chấp nhận URL thanh toán HTTPS tuyệt đối trước khi mở tab hoặc render liên kết bên ngoài. */
+const getSafeAuditorPaymentUrl = (value: unknown): string | null => {
+  if (typeof value !== "string" || !value.trim()) {
+    return null;
+  }
+
+  try {
+    const parsedUrl = new URL(value);
+    return parsedUrl.protocol === "https:" ? parsedUrl.toString() : null;
+  } catch {
+    return null;
+  }
+};
+
+/** Rút gọn địa chỉ ví cho panel Auditor, giữ 6 ký tự đầu và 4 ký tự cuối để vẫn nhận diện được ví. */
+const formatAuditorWalletAddress = (walletAddress: string): string => {
+  if (walletAddress.length <= 10) {
+    return walletAddress;
+  }
+
+  return `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`;
+};
+
+/** Chuẩn hóa số dư DCT từ API thành số nguyên không âm để không lưu dữ liệu sai vào state. */
+const normalizeAuditorTokenBalance = (value: unknown): string | null => {
+  if (typeof value === "string" && /^\d+$/.test(value)) {
+    return value;
+  }
+
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
+    return String(value);
+  }
+
+  return null;
+};
+
+/** Kiểm tra object JSON tối thiểu trước khi đọc các trường từ response API không đáng tin cậy. */
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
+
+/** Xác nhận trạng thái deposit nằm trong contract PayOS mà UI có thể xử lý. */
+const isAuditorDepositStatus = (value: unknown): value is AuditorDepositStatus =>
+  typeof value === "string" && AUDITOR_DEPOSIT_STATUSES.includes(value as AuditorDepositStatus);
+
+/** Xác thực response tạo phiếu nạp trước khi chuyển UI sang trạng thái chờ thanh toán. */
+const isAuditorDepositCreateResult = (value: unknown): value is AuditorDepositCreateResult =>
+  isRecord(value)
+  && typeof value.orderCode === "string"
+  && value.orderCode.trim().length > 0
+  && typeof value.paymentUrl === "string"
+  && value.status === "PENDING_PAYMENT";
+
+/** Xác thực response trạng thái deposit để tránh UI kẹt khi backend trả dữ liệu 2xx ngoài contract. */
+const isAuditorDepositStatusResult = (value: unknown): value is AuditorDepositStatusResult => {
+  if (!isRecord(value) || !isAuditorDepositStatus(value.status)) {
+    return false;
+  }
+
+  const paymentUrlIsValid = value.paymentUrl === undefined || typeof value.paymentUrl === "string";
+  const paymentExpiryIsValid = value.paymentExpiredAt === undefined
+    || (typeof value.paymentExpiredAt === "string" && Number.isFinite(Date.parse(value.paymentExpiredAt)));
+  const failureReasonIsValid = value.failureReason === undefined
+    || value.failureReason === null
+    || typeof value.failureReason === "string";
+  const mintFailureStatusIsValid = value.isPaymentConfirmedButMintFailed === undefined
+    || typeof value.isPaymentConfirmedButMintFailed === "boolean";
+  return paymentUrlIsValid && paymentExpiryIsValid && failureReasonIsValid && mintFailureStatusIsValid;
+};
+
+/**
+ * Lấy orderCode từ callback PayOS thành công của luồng kích hoạt Auditor.
+ * Các tham số trên URL chỉ cho phép bắt đầu đối soát; backend vẫn xác minh trực tiếp với PayOS trước khi mint.
+ */
+const getSuccessfulAuditorPaymentReturnOrderCode = (searchParams: URLSearchParams): string | null => {
+  const orderCode = searchParams.get("orderCode") || "";
+  const isAuditorPaymentReturn = searchParams.get("role") === "auditor"
+    && searchParams.get("paymentFlow") === AUDITOR_PAYMENT_RETURN_FLOW
+    && /^\d{1,20}$/.test(orderCode);
+  const isPaymentExplicitlyCancelled = searchParams.get("cancel")?.trim().toLowerCase() === "true";
+  if (!isAuditorPaymentReturn || isPaymentExplicitlyCancelled) {
+    return null;
+  }
+
+  const hasConfiguredSuccessStatus = searchParams.get("paymentStatus")?.trim().toLowerCase() === "success";
+  const hasPayosSuccessStatus = searchParams.get("code")?.trim() === "00"
+    && PAYOS_SUCCESS_CALLBACK_STATUSES.has(searchParams.get("status")?.trim().toUpperCase() || "")
+    && searchParams.get("cancel")?.trim().toLowerCase() === "false";
+
+  return hasConfiguredSuccessStatus || hasPayosSuccessStatus ? orderCode : null;
+};
 
 type StepStyle = {
   circleClass: string;
@@ -142,14 +291,6 @@ const defaultLoadingText: LoadingTexts = {
   subtitle: "Kết nối với Amoy Testnet",
 };
 
-const donorRoleText = "💛 Nhà hảo tâm";
-const organizationRoleText = "🏢 Tổ chức từ thiện";
-
-const donorStepGreeting = "Tạo tài khoản Donor 💛";
-const organizationStepGreeting = "Tạo tài khoản Organization 🏢";
-const donorStepSubtitle = "Chỉ cần 1 click — ví của bạn được tạo tự động";
-const organizationStepSubtitle = "Yêu cầu KYC sau khi tạo ví Smart Account";
-
 const donorSuccessTitle = "🎉 Chào mừng đến với DCP!";
 const donorSuccessSubtitle = "Tài khoản Donor của bạn đã sẵn sàng";
 const organizationSuccessTitle = "📬 Hồ sơ đã được gửi!";
@@ -172,7 +313,7 @@ const createStepStyle = (status: StepStatus, labelStatus: StepStatus, isDone: bo
 
 // Ghi chú: Xây dựng trạng thái step indicator dựa theo bước và vai trò.
 const buildStepIndicatorState = (currentStep: number, roleType: RoleType): StepIndicatorState => {
-  const shouldShowThirdStep = roleType === "organization";
+  const shouldShowThirdStep = REGISTER_ROLE_CONFIG[roleType ?? "donor"].hasThirdStep;
   const secondStatus: StepStatus = currentStep >= 2 ? (currentStep === 2 ? "active" : "done") : "upcoming";
 
   return {
@@ -273,6 +414,27 @@ export default function RegisterPage() {
   const [createdWalletAddress, setCreatedWalletAddress] = useState<string>("");
   const [registeredUserEmail, setRegisteredUserEmail] = useState<string>("");
   const [authenticatedRole, setAuthenticatedRole] = useState<AuthenticatedRoleType>(null);
+  const [auditorGoogleCredential, setAuditorGoogleCredential] = useState<string>("");
+  const [auditorBankName, setAuditorBankName] = useState<string>("");
+  const [auditorBankAccountNumber, setAuditorBankAccountNumber] = useState<string>("");
+  const [auditorAccountHolderName, setAuditorAccountHolderName] = useState<string>("");
+  const [auditorBranchName, setAuditorBranchName] = useState<string>("");
+  const [auditorIntentId, setAuditorIntentId] = useState<string>("");
+  const [auditorMinimumStakeThreshold, setAuditorMinimumStakeThreshold] = useState<string>("");
+  const [auditorTokenBalance, setAuditorTokenBalance] = useState<string>("");
+  const [auditorStakeStage, setAuditorStakeStage] = useState<AuditorStakeStage>("NEED_TOKEN");
+  const [auditorStakeTxHash, setAuditorStakeTxHash] = useState<string>("");
+  const [auditorStatusMessage, setAuditorStatusMessage] = useState<string>("");
+  const [auditorErrorMessage, setAuditorErrorMessage] = useState<string>("");
+  const [isAuditorSuccessVisible, setIsAuditorSuccessVisible] = useState<boolean>(false);
+  const [isAuditorMintFailureVisible, setIsAuditorMintFailureVisible] = useState<boolean>(false);
+  const [auditorDepositOrderCode, setAuditorDepositOrderCode] = useState<string>("");
+  const [auditorDepositPaymentUrl, setAuditorDepositPaymentUrl] = useState<string>("");
+  const [auditorDepositExpiresAt, setAuditorDepositExpiresAt] = useState<string>("");
+  const [isAuditorAutoCompletionPending, setIsAuditorAutoCompletionPending] = useState<boolean>(false);
+  const reconciledAuditorPaymentOrderCodeRef = useRef<string>("");
+  const auditorAutoStakeAttemptRef = useRef<number>(0);
+  const hasAuditorAutoStakeSubmissionRef = useRef<boolean>(false);
 
   // State cho modal pháp lý (điều khoản sử dụng / chính sách bảo mật).
   const [isLegalModalOpen, setIsLegalModalOpen] = useState<boolean>(false);
@@ -307,9 +469,12 @@ export default function RegisterPage() {
     [currentStep, selectedRole]
   );
 
-  const greetingText = selectedRole === "organization" ? organizationStepGreeting : donorStepGreeting;
-  const subtitleText = selectedRole === "organization" ? organizationStepSubtitle : donorStepSubtitle;
-  const roleBadgeText = selectedRole === "organization" ? organizationRoleText : donorRoleText;
+  const roleConfig = REGISTER_ROLE_CONFIG[selectedRole ?? "donor"];
+  const [secondStepPrimaryLabel, secondStepSecondaryLabel] = roleConfig.stepLabels.second.split("|");
+  const [thirdStepPrimaryLabel, thirdStepSecondaryLabel] = roleConfig.stepLabels.third.split("|");
+  const greetingText = roleConfig.greeting;
+  const subtitleText = roleConfig.subtitle;
+  const roleBadgeText = roleConfig.badge;
 
   const isKycReady =
     organizationName.trim().length > 0 &&
@@ -317,6 +482,41 @@ export default function RegisterPage() {
     organizationDescription.trim().length > 0 &&
     organizationFiles.length > 0 &&
     organizationFiles.length <= maximumKycFileCount;
+
+  const isAuditorBankNameValid = AUDITOR_PAYOUT_SUPPORTED_BANKS.some((bank) => bank.value === auditorBankName);
+  const isAuditorBankAccountNumberValid = /^\d{8,20}$/.test(auditorBankAccountNumber);
+  const isAuditorAccountHolderNameValid =
+    auditorAccountHolderName.length >= 2
+    && auditorAccountHolderName.length <= 200
+    && /^[A-Z\s]+$/.test(auditorAccountHolderName);
+  const isAuditorBranchNameValid = auditorBranchName.length <= 200;
+  const isAuditorRegisterReady = isAuditorBankNameValid
+    && isAuditorBankAccountNumberValid
+    && isAuditorAccountHolderNameValid
+    && isAuditorBranchNameValid
+    && auditorGoogleCredential !== ""
+    && isTermsAccepted
+    && !isRegisterProcessing;
+
+  const auditorTokenShortfall = useMemo((): bigint => {
+    try {
+      const minimumStakeThreshold = BigInt(auditorMinimumStakeThreshold || "0");
+      const tokenBalance = BigInt(auditorTokenBalance || "0");
+      return minimumStakeThreshold > tokenBalance ? minimumStakeThreshold - tokenBalance : 0n;
+    } catch {
+      return 0n;
+    }
+  }, [auditorMinimumStakeThreshold, auditorTokenBalance]);
+
+  const auditorDepositAmount = useMemo((): number | null => {
+    if (auditorTokenShortfall > MAX_SAFE_AUDITOR_DEPOSIT_AMOUNT) {
+      return null;
+    }
+
+    return Number(auditorTokenShortfall < MINIMUM_AUDITOR_DEPOSIT_AMOUNT
+      ? MINIMUM_AUDITOR_DEPOSIT_AMOUNT
+      : auditorTokenShortfall);
+  }, [auditorTokenShortfall]);
 
   const descriptionCount = organizationDescription.length;
 
@@ -353,19 +553,79 @@ export default function RegisterPage() {
     organizationDescription.trim().length > 0
   );
 
+  const auditorBankNameClass = resolveValidationClass(isAuditorBankNameValid, auditorBankName.length > 0);
+  const auditorBankAccountNumberClass = resolveValidationClass(isAuditorBankAccountNumberValid, auditorBankAccountNumber.length > 0);
+  const auditorAccountHolderNameClass = resolveValidationClass(isAuditorAccountHolderNameValid, auditorAccountHolderName.length > 0);
+  const auditorBranchNameClass = resolveValidationClass(isAuditorBranchNameValid, auditorBranchName.length > 0);
+
+  /** Đặt lại toàn bộ state tạm của nhánh Kiểm toán viên trước khi người dùng chọn vai trò khác. */
+  const resetAuditorBranchState = useCallback((): void => {
+    setAuditorGoogleCredential("");
+    setAuditorBankName("");
+    setAuditorBankAccountNumber("");
+    setAuditorAccountHolderName("");
+    setAuditorBranchName("");
+    setAuditorIntentId("");
+    setAuditorMinimumStakeThreshold("");
+    setAuditorTokenBalance("");
+    setAuditorStakeStage("NEED_TOKEN");
+    setAuditorStakeTxHash("");
+    setAuditorStatusMessage("");
+    setAuditorErrorMessage("");
+    setIsAuditorSuccessVisible(false);
+    setIsAuditorMintFailureVisible(false);
+    setAuditorDepositOrderCode("");
+    setAuditorDepositPaymentUrl("");
+    setAuditorDepositExpiresAt("");
+    setIsAuditorAutoCompletionPending(false);
+    auditorAutoStakeAttemptRef.current = 0;
+    hasAuditorAutoStakeSubmissionRef.current = false;
+    window.localStorage.removeItem(AUDITOR_INTENT_STORAGE_KEY);
+    window.localStorage.removeItem(AUDITOR_STAKE_THRESHOLD_STORAGE_KEY);
+    window.localStorage.removeItem(AUDITOR_WALLET_ADDRESS_STORAGE_KEY);
+  }, []);
+
   // Ghi chú: Chọn vai trò và giữ lại bước đầu tiên của luồng đăng ký.
-  const handleRoleSelect = (role: RoleType) => {
+  const handleRoleSelect = useCallback((role: RoleType): void => {
+    resetAuditorBranchState();
     setSelectedRole(role);
     setAuthenticatedRole(null);
     setCurrentStep(1);
-  };
+  }, [resetAuditorBranchState]);
 
+  /** Khôi phục role từ URL nhưng không reset intent khi PayOS vừa trả về để đối soát giao dịch cọc. */
   useEffect(() => {
-    const roleFromUrl = new URLSearchParams(window.location.search).get("role");
-    if (roleFromUrl === "donor" || roleFromUrl === "organization") {
-      handleRoleSelect(roleFromUrl);
+    const searchParams = new URLSearchParams(window.location.search);
+    const roleFromUrl = searchParams.get("role");
+    const payosReturnOrderCode = getSuccessfulAuditorPaymentReturnOrderCode(searchParams);
+    const savedIntentId = window.localStorage.getItem(AUDITOR_INTENT_STORAGE_KEY);
+    const savedMinimumStakeThreshold = normalizeAuditorTokenBalance(
+      window.localStorage.getItem(AUDITOR_STAKE_THRESHOLD_STORAGE_KEY)
+    );
+    const savedWalletAddress = window.localStorage.getItem(AUDITOR_WALLET_ADDRESS_STORAGE_KEY);
+    if (roleFromUrl === "donor" || roleFromUrl === "organization" || roleFromUrl === "auditor") {
+      if (roleFromUrl === "auditor" && payosReturnOrderCode) {
+        // Callback hợp lệ phải giữ session/intent để effect đối soát phía dưới có thể tiếp tục ngay tại bước 3.
+        setSelectedRole("auditor");
+        setAuthenticatedRole(null);
+        setCurrentStep(3);
+      } else {
+        handleRoleSelect(roleFromUrl);
+      }
+      if (roleFromUrl === "auditor" && savedIntentId) {
+        setAuditorIntentId(savedIntentId);
+        window.localStorage.setItem(AUDITOR_INTENT_STORAGE_KEY, savedIntentId);
+      }
+      if (roleFromUrl === "auditor" && savedMinimumStakeThreshold) {
+        setAuditorMinimumStakeThreshold(savedMinimumStakeThreshold);
+        window.localStorage.setItem(AUDITOR_STAKE_THRESHOLD_STORAGE_KEY, savedMinimumStakeThreshold);
+      }
+      if (roleFromUrl === "auditor" && savedWalletAddress) {
+        setCreatedWalletAddress(savedWalletAddress);
+        window.localStorage.setItem(AUDITOR_WALLET_ADDRESS_STORAGE_KEY, savedWalletAddress);
+      }
     }
-  }, []);
+  }, [handleRoleSelect]);
 
   // Ghi chú: Điều hướng đến bước mong muốn và reset checkbox khi quay lại.
   const handleGoToStep = (step: number) => {
@@ -490,7 +750,60 @@ export default function RegisterPage() {
     [backendBaseUrl, handleRegisterSuccess, selectedRole]
   );
 
-  // Ghi chú: Nhận credential từ Google Identity Services để bắt đầu đăng ký.
+  /** Lưu session và snapshot cọc từ backend cho cả hồ sơ mới lẫn hồ sơ Auditor được khôi phục. */
+  const applyAuditorIntentResult = useCallback((result: RegisterAuditorIntentResult): void => {
+    const hasEnoughTokenForStake = BigInt(result.currentTokenBalance) >= BigInt(result.minimumStakeThreshold);
+    persistAuthSession({
+      accessToken: result.accessToken,
+      refreshToken: result.refreshToken,
+      csrfToken: result.csrfToken,
+      refreshSessionId: result.refreshSessionId,
+      refreshTokenExpiresAt: result.expiresAt,
+    });
+    setCreatedWalletAddress(result.walletAddress);
+    setRegisteredUserEmail("");
+    window.localStorage.setItem(AUDITOR_INTENT_STORAGE_KEY, result.intentId);
+    window.localStorage.setItem(AUDITOR_STAKE_THRESHOLD_STORAGE_KEY, result.minimumStakeThreshold);
+    window.localStorage.setItem(AUDITOR_WALLET_ADDRESS_STORAGE_KEY, result.walletAddress);
+    setAuditorIntentId(result.intentId);
+    setAuditorMinimumStakeThreshold(result.minimumStakeThreshold);
+    setAuditorTokenBalance(result.currentTokenBalance);
+    auditorAutoStakeAttemptRef.current = 0;
+    hasAuditorAutoStakeSubmissionRef.current = false;
+    setIsAuditorAutoCompletionPending(hasEnoughTokenForStake);
+    setAuditorStakeStage(hasEnoughTokenForStake ? "READY_TO_STAKE" : "NEED_TOKEN");
+    setAuditorGoogleCredential("");
+    setAuditorDepositOrderCode("");
+    setAuditorDepositPaymentUrl("");
+    setAuditorDepositExpiresAt("");
+    setAuditorStakeTxHash("");
+    setAuditorErrorMessage("");
+    setAuditorStatusMessage("");
+    setCurrentStep(3);
+  }, []);
+
+  /** Chỉ bỏ qua form tài khoản nhận tiền khi backend xác nhận đúng hồ sơ Auditor đang chờ đặt cọc. */
+  const resumeExistingAuditor = useCallback(async (identityToken: string): Promise<void> => {
+    setIsRegisterProcessing(true);
+    setRegisterErrorMessage("");
+    try {
+      const result = await resumeAuditorIntent({ identityToken });
+      applyAuditorIntentResult(result);
+    } catch (error) {
+      if (getApiErrorCode(error) === "AUDITOR_ONBOARDING_NOT_FOUND") {
+        setAuditorGoogleCredential(identityToken);
+        setAuditorStatusMessage("Đã xác thực Google. Hoàn tất thông tin tài khoản nhận tiền để tạo hồ sơ.");
+        return;
+      }
+      setAuditorGoogleCredential("");
+      setAuditorStatusMessage("");
+      setRegisterErrorMessage(getAuditorApiErrorMessage(error, "Không thể khôi phục hồ sơ Kiểm toán viên."));
+    } finally {
+      setIsRegisterProcessing(false);
+    }
+  }, [applyAuditorIntentResult]);
+
+  // Ghi chú: Nhận credential từ Google Identity Services để bắt đầu đăng ký hoặc khôi phục onboarding.
   const handleGoogleCredential = useCallback(
     (response: { credential?: string }) => {
       if (!response.credential) {
@@ -498,10 +811,455 @@ export default function RegisterPage() {
         return;
       }
 
+      if (selectedRole === "auditor") {
+        void resumeExistingAuditor(response.credential);
+        return;
+      }
+
       requestGoogleRegister(response.credential);
     },
-    [requestGoogleRegister]
+    [requestGoogleRegister, resumeExistingAuditor, selectedRole]
   );
+
+  /** Tạo header xác thực cho các endpoint nạp DCT dùng JSON trần. */
+  const buildAuditorAuthHeaders = useCallback((): HeadersInit => ({
+    Authorization: `Bearer ${readAuthSession().accessToken || ""}`,
+  }), []);
+
+  /** Đọc lại số dư VND on-chain và tự tiếp tục cọc khi số dư đã đạt ngưỡng. */
+  const handleRefreshAuditorTokenBalance = useCallback(async ({
+    minimumStakeThresholdToCompare = auditorMinimumStakeThreshold,
+    shouldAutoComplete = true,
+  }: {
+    minimumStakeThresholdToCompare?: string;
+    shouldAutoComplete?: boolean;
+  } = {}): Promise<void> => {
+    setIsRegisterProcessing(true);
+    setAuditorErrorMessage("");
+
+    const normalizedMinimumStakeThreshold = normalizeAuditorTokenBalance(minimumStakeThresholdToCompare);
+    if (!normalizedMinimumStakeThreshold) {
+      setAuditorErrorMessage("Không thể khôi phục mức cọc Auditor. Vui lòng quay lại trang đăng ký ban đầu.");
+      setIsRegisterProcessing(false);
+      return;
+    }
+
+    try {
+      const response = await fetch(`${backendBaseUrl}/api/deposit/balance`, {
+        method: "GET",
+        headers: buildAuditorAuthHeaders(),
+      });
+      const responseData = await response.json().catch(() => null);
+      const nextTokenBalance = isRecord(responseData)
+        ? normalizeAuditorTokenBalance(responseData.tokenBalance)
+        : null;
+      if (!response.ok || !nextTokenBalance) {
+        setAuditorErrorMessage("Không thể đọc số dư VND. Vui lòng thử lại.");
+        return;
+      }
+
+      // Chỉ cập nhật state sau khi cả số dư và ngưỡng có thể so sánh bằng BigInt để dữ liệu lỗi không làm sai số tiền cần nạp.
+      const isStakeThresholdMet = BigInt(nextTokenBalance) >= BigInt(normalizedMinimumStakeThreshold);
+      setAuditorTokenBalance(nextTokenBalance);
+      if (isStakeThresholdMet) {
+        if (shouldAutoComplete) {
+          auditorAutoStakeAttemptRef.current = 0;
+          hasAuditorAutoStakeSubmissionRef.current = false;
+          setIsAuditorAutoCompletionPending(true);
+        }
+        setAuditorStakeStage("READY_TO_STAKE");
+        setAuditorDepositOrderCode("");
+        setAuditorDepositPaymentUrl("");
+        setAuditorDepositExpiresAt("");
+      } else {
+        setAuditorStakeStage("NEED_TOKEN");
+      }
+    } catch {
+      setAuditorErrorMessage("Không thể đọc số dư VND. Vui lòng thử lại.");
+    } finally {
+      setIsRegisterProcessing(false);
+    }
+  }, [auditorMinimumStakeThreshold, backendBaseUrl, buildAuditorAuthHeaders]);
+
+  /** Tạo phiếu nạp DCT với số tiền thiếu đã được điền sẵn cho ngưỡng đặt cọc. */
+  const handleCreateAuditorDeposit = async (): Promise<void> => {
+    if (auditorDepositAmount === null) {
+      setAuditorErrorMessage("Số VND cần nạp vượt giới hạn thanh toán. Vui lòng liên hệ hỗ trợ.");
+      return;
+    }
+
+    setIsRegisterProcessing(true);
+    setAuditorErrorMessage("");
+    setAuditorStatusMessage("");
+
+    try {
+      const response = await fetch(`${backendBaseUrl}/api/deposit/create`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...buildAuditorAuthHeaders(),
+        },
+        body: JSON.stringify({ amountVnd: auditorDepositAmount, paymentFlow: "AUDITOR_ONBOARDING" }),
+      });
+      const responseData = await response.json().catch(() => null);
+      if (!response.ok || !isAuditorDepositCreateResult(responseData)) {
+        const message = isRecord(responseData) && typeof responseData.message === "string"
+          ? responseData.message
+          : "Không thể tạo phiếu nạp VND. Vui lòng thử lại.";
+        setAuditorErrorMessage(message);
+        return;
+      }
+
+      const safePaymentUrl = getSafeAuditorPaymentUrl(responseData.paymentUrl);
+      if (!safePaymentUrl) {
+        setAuditorErrorMessage("Đường dẫn thanh toán không hợp lệ. Vui lòng tạo phiếu nạp mới.");
+        return;
+      }
+
+      setAuditorDepositOrderCode(responseData.orderCode);
+      setAuditorDepositPaymentUrl(safePaymentUrl);
+      setAuditorStakeStage("AWAITING_PAYMENT");
+      window.open(safePaymentUrl, "_blank", "noopener,noreferrer");
+    } catch {
+      setAuditorErrorMessage("Không thể tạo phiếu nạp VND. Vui lòng thử lại.");
+    } finally {
+      setIsRegisterProcessing(false);
+    }
+  };
+
+  /** Kiểm tra phiếu nạp PayOS theo thao tác chủ động và phản ánh trạng thái phát DCT. */
+  const handleCheckAuditorDeposit = useCallback(async (
+    orderCodeToCheck = auditorDepositOrderCode,
+    minimumStakeThresholdToCompare = auditorMinimumStakeThreshold
+  ): Promise<void> => {
+    if (!orderCodeToCheck) {
+      return;
+    }
+
+    setIsRegisterProcessing(true);
+    setAuditorErrorMessage("");
+
+    try {
+      const response = await fetch(`${backendBaseUrl}/api/deposit/${encodeURIComponent(orderCodeToCheck)}?reconcile=true`, {
+        method: "GET",
+        headers: buildAuditorAuthHeaders(),
+      });
+      const responseData = await response.json().catch(() => null);
+      if (!response.ok || !isAuditorDepositStatusResult(responseData)) {
+        const message = isRecord(responseData) && typeof responseData.message === "string"
+          ? responseData.message
+          : "Không thể kiểm tra phiếu nạp VND. Vui lòng thử lại.";
+        setAuditorErrorMessage(message);
+        return;
+      }
+
+      if (typeof responseData.paymentUrl === "string") {
+        const safePaymentUrl = getSafeAuditorPaymentUrl(responseData.paymentUrl);
+        if (!safePaymentUrl) {
+          setAuditorErrorMessage("Đường dẫn thanh toán không hợp lệ. Vui lòng tạo phiếu nạp mới.");
+          return;
+        }
+
+        setAuditorDepositPaymentUrl(safePaymentUrl);
+      }
+      if (typeof responseData.paymentExpiredAt === "string") {
+        setAuditorDepositExpiresAt(responseData.paymentExpiredAt);
+      }
+
+      const paymentExpiredAt = responseData.paymentExpiredAt || auditorDepositExpiresAt;
+      if (responseData.status === "PENDING_PAYMENT" && paymentExpiredAt && Date.now() > new Date(paymentExpiredAt).getTime()) {
+        setAuditorStakeStage("NEED_TOKEN");
+        setAuditorDepositOrderCode("");
+        setAuditorDepositPaymentUrl("");
+        setAuditorDepositExpiresAt("");
+        setAuditorStatusMessage("");
+        setAuditorErrorMessage("Phiếu nạp đã hết hạn. Vui lòng tạo phiếu mới.");
+        return;
+      }
+
+      if (responseData.status === "PENDING_PAYMENT") {
+        setAuditorStatusMessage("Chưa nhận được thanh toán. Nếu bạn vừa chuyển khoản, đợi khoảng 1 phút rồi bấm lại.");
+        return;
+      }
+
+      if (responseData.status === "PAYMENT_CONFIRMED") {
+        setAuditorStatusMessage("Đã nhận thanh toán, đang cập nhật số dư VND tương ứng trong ví của bạn. Vui lòng bấm lại sau khoảng 1 phút.");
+        return;
+      }
+
+      if (responseData.status === "MINT_COMPLETED") {
+        if (!normalizeAuditorTokenBalance(minimumStakeThresholdToCompare)) {
+          setAuditorStakeStage("RECOVERY_REQUIRED");
+          setAuditorErrorMessage("Đã xác nhận thanh toán và phát VND vào ví, nhưng không thể khôi phục mức cọc Auditor. Vui lòng quay lại trang đăng ký ban đầu.");
+          return;
+        }
+        await handleRefreshAuditorTokenBalance({ minimumStakeThresholdToCompare });
+        return;
+      }
+
+      if (responseData.status === "FAILED") {
+        if (responseData.isPaymentConfirmedButMintFailed) {
+          // PayOS đã thu tiền nhưng token chưa thể mint; không tạo phiếu mới để tránh thu tiền lần hai.
+          setIsAuditorAutoCompletionPending(false);
+          setAuditorStakeStage("RECOVERY_REQUIRED");
+          setAuditorDepositOrderCode("");
+          setAuditorDepositPaymentUrl("");
+          setAuditorDepositExpiresAt("");
+          setAuditorStatusMessage("");
+          setAuditorErrorMessage("");
+          setIsAuditorMintFailureVisible(true);
+          return;
+        }
+        setAuditorStakeStage("NEED_TOKEN");
+        setAuditorDepositOrderCode("");
+        setAuditorDepositPaymentUrl("");
+        setAuditorDepositExpiresAt("");
+        setAuditorStatusMessage("");
+        setAuditorErrorMessage(`${responseData.failureReason || "Phiếu nạp VND không thành công."} Vui lòng tạo phiếu nạp mới.`);
+      }
+    } catch {
+      setAuditorErrorMessage("Không thể kiểm tra phiếu nạp VND. Vui lòng thử lại.");
+    } finally {
+      setIsRegisterProcessing(false);
+    }
+  }, [
+    auditorDepositExpiresAt,
+    auditorDepositOrderCode,
+    auditorMinimumStakeThreshold,
+    backendBaseUrl,
+    buildAuditorAuthHeaders,
+    handleRefreshAuditorTokenBalance,
+  ]);
+
+  /** Tự đối soát và phát VND khi PayOS trả người dùng về từ luồng kích hoạt Auditor. */
+  useEffect(() => {
+    const searchParams = new URLSearchParams(window.location.search);
+    const orderCode = getSuccessfulAuditorPaymentReturnOrderCode(searchParams);
+
+    if (!orderCode || reconciledAuditorPaymentOrderCodeRef.current === orderCode) {
+      return;
+    }
+
+    const savedMinimumStakeThreshold = normalizeAuditorTokenBalance(
+      window.localStorage.getItem(AUDITOR_STAKE_THRESHOLD_STORAGE_KEY)
+    );
+    reconciledAuditorPaymentOrderCodeRef.current = orderCode;
+    auditorAutoStakeAttemptRef.current = 0;
+    hasAuditorAutoStakeSubmissionRef.current = false;
+    setIsAuditorAutoCompletionPending(true);
+    setCurrentStep(3);
+    if (savedMinimumStakeThreshold) {
+      setAuditorMinimumStakeThreshold(savedMinimumStakeThreshold);
+    }
+    setAuditorDepositOrderCode(orderCode);
+    setAuditorStakeStage("AWAITING_PAYMENT");
+    setAuditorStatusMessage("Đang xác nhận thanh toán và cập nhật số dư VND vào ví Smart Account.");
+    void handleCheckAuditorDeposit(orderCode, savedMinimumStakeThreshold || "");
+  }, [handleCheckAuditorDeposit]);
+
+  /** Gửi giao dịch đặt cọc DCT sau khi số dư ví Smart Account đã đủ ngưỡng. */
+  const handleExecuteAuditorStake = async (): Promise<void> => {
+    setIsRegisterProcessing(true);
+    setAuditorErrorMessage("");
+    setAuditorStatusMessage("");
+    setLoadingTexts({
+      title: "Đang gửi giao dịch đặt cọc...",
+      subtitle: "Ký UserOperation bằng Smart Account",
+    });
+    setIsLoadingVisible(true);
+    setIsProgressLoading(true);
+
+    try {
+      const result = await executeAuditorStake(readAuthSession().accessToken || "");
+      hasAuditorAutoStakeSubmissionRef.current = true;
+      setAuditorStakeTxHash(result.txHash);
+      setAuditorStakeStage("VERIFYING");
+      setAuditorStatusMessage("Đã gửi giao dịch đặt cọc. Xác minh on-chain thường mất 30–60 giây.");
+      if (isAuditorAutoCompletionPending) {
+        void handleCheckAuditorStatus();
+      }
+    } catch (error) {
+      const errorCode = getApiErrorCode(error);
+      if (errorCode === "INSUFFICIENT_TOKEN_BALANCE") {
+        // Backend vừa xác nhận số dư Smart Account không đủ; bỏ số dư cache cũ để số tiền nạp lại không bị tính thiếu.
+        setIsAuditorAutoCompletionPending(false);
+        setAuditorTokenBalance("0");
+        setAuditorStakeStage("NEED_TOKEN");
+        setAuditorErrorMessage(getAuditorApiErrorMessage(error, "Không thể gửi giao dịch đặt cọc."));
+      } else if (isAuditorAutoCompletionPending && auditorAutoStakeAttemptRef.current < AUDITOR_AUTO_STAKE_MAX_ATTEMPTS) {
+        setAuditorStakeStage("FAILED");
+        setAuditorStatusMessage("Giao dịch đặt cọc tạm thời chưa gửi được. Hệ thống sẽ tự thử lại một lần.");
+      } else {
+        setIsAuditorAutoCompletionPending(false);
+        setAuditorStakeStage("FAILED");
+        setAuditorErrorMessage(getAuditorApiErrorMessage(error, "Không thể gửi giao dịch đặt cọc."));
+      }
+    } finally {
+      setIsRegisterProcessing(false);
+      setIsLoadingVisible(false);
+      setIsProgressLoading(false);
+    }
+  };
+
+  /** Hoàn tất kích hoạt Auditor, hủy phiên cũ và yêu cầu đăng nhập lại bằng role vừa được cấp. */
+  const finalizeAuditorActivation = (): void => {
+    setIsAuditorAutoCompletionPending(false);
+    setAuditorStakeStage("ACTIVATED");
+    setAuthenticatedRole(null);
+    clearAuthSession();
+    window.localStorage.removeItem(AUDITOR_INTENT_STORAGE_KEY);
+    window.localStorage.removeItem(AUDITOR_STAKE_THRESHOLD_STORAGE_KEY);
+    window.localStorage.removeItem(AUDITOR_WALLET_ADDRESS_STORAGE_KEY);
+    setAuditorStatusMessage("Đăng ký thành công. Bạn sẽ được chuyển sang trang đăng nhập để nhận quyền Kiểm toán viên.");
+    setIsAuditorSuccessVisible(true);
+  };
+
+  /** Đọc trạng thái xác minh đặt cọc để hoàn tất cấp quyền sau UserOperation hoặc khi người dùng kiểm tra thủ công. */
+  const handleCheckAuditorStatus = async (shouldRetryPendingStake = false): Promise<void> => {
+    if (!auditorIntentId) {
+      return;
+    }
+
+    setIsRegisterProcessing(true);
+    setAuditorErrorMessage("");
+
+    try {
+      const result = await getAuditorOnboardingStatus(readAuthSession().accessToken || "", auditorIntentId);
+      if (result.status === "PENDING_TX") {
+        // Chỉ retry khi người dùng chủ động kiểm tra lại sau lỗi gửi UserOperation.
+        // Với poll tự động, PENDING_TX có thể là độ trễ indexer nên không được gửi trùng giao dịch cọc.
+        await handleRefreshAuditorTokenBalance({ shouldAutoComplete: shouldRetryPendingStake });
+        return;
+      }
+
+      if (result.status === "VERIFYING") {
+        setAuditorStakeStage("VERIFYING");
+        setAuditorStatusMessage("Đang xác minh cọc on-chain. Vui lòng kiểm tra lại sau khoảng 1 phút.");
+        return;
+      }
+
+      if (result.status === "ACTIVATED") {
+        finalizeAuditorActivation();
+        return;
+      }
+
+      setAuditorStakeStage("FAILED");
+      if (isAuditorAutoCompletionPending && auditorAutoStakeAttemptRef.current < AUDITOR_AUTO_STAKE_MAX_ATTEMPTS) {
+        setAuditorStatusMessage("Xác minh giao dịch chưa hoàn tất. Hệ thống sẽ tự thử lại một lần.");
+      } else if (result.failureReason === "TX_REVERTED_OR_TIMEOUT") {
+        setIsAuditorAutoCompletionPending(false);
+        setAuditorErrorMessage("Giao dịch đặt cọc không thành công trên blockchain. Hệ thống đã thử lại tự động nhưng chưa thành công.");
+      } else if (result.failureReason === "VERIFICATION_TIMEOUT_24H") {
+        setIsAuditorAutoCompletionPending(false);
+        setAuditorErrorMessage("Yêu cầu đặt cọc đã quá hạn 24 giờ. Vui lòng tạo lại yêu cầu hỗ trợ.");
+      } else {
+        setIsAuditorAutoCompletionPending(false);
+        setAuditorErrorMessage("Xác minh cọc chưa thành công sau các lần thử tự động. Vui lòng liên hệ hỗ trợ.");
+      }
+    } catch (error) {
+      setAuditorErrorMessage(getAuditorApiErrorMessage(error, "Không thể kiểm tra trạng thái đặt cọc."));
+    } finally {
+      setIsRegisterProcessing(false);
+    }
+  };
+
+  /** Tự gửi cọc sau khi số dư VND on-chain đủ ngưỡng; giới hạn hai lần để không phát sinh UserOperation lặp vô hạn. */
+  useEffect(() => {
+    if (
+      !isAuditorAutoCompletionPending
+      || hasAuditorAutoStakeSubmissionRef.current
+      || auditorAutoStakeAttemptRef.current >= AUDITOR_AUTO_STAKE_MAX_ATTEMPTS
+      || auditorStakeStage !== "READY_TO_STAKE"
+      || isRegisterProcessing
+    ) {
+      return;
+    }
+
+    auditorAutoStakeAttemptRef.current += 1;
+    void handleExecuteAuditorStake();
+  }, [auditorStakeStage, handleExecuteAuditorStake, isAuditorAutoCompletionPending, isRegisterProcessing]);
+
+  /** Thử lại một lần khi bundler hoặc RPC từ chối trước khi UserOperation được chấp nhận. */
+  useEffect(() => {
+    if (
+      !isAuditorAutoCompletionPending
+      || auditorStakeStage !== "FAILED"
+      || auditorAutoStakeAttemptRef.current >= AUDITOR_AUTO_STAKE_MAX_ATTEMPTS
+    ) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setAuditorStakeStage("READY_TO_STAKE");
+    }, AUDITOR_AUTO_STAKE_RETRY_INTERVAL_MS);
+    return () => window.clearTimeout(timeoutId);
+  }, [auditorStakeStage, isAuditorAutoCompletionPending]);
+
+  /** Poll có kiểm soát trạng thái on-chain cho riêng luồng callback PayOS để chỉ cấp role sau khi backend xác minh. */
+  useEffect(() => {
+    if (!isAuditorAutoCompletionPending || auditorStakeStage !== "VERIFYING" || isRegisterProcessing || !auditorIntentId) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      void handleCheckAuditorStatus();
+    }, AUDITOR_ONCHAIN_STATUS_POLL_INTERVAL_MS);
+    return () => window.clearTimeout(timeoutId);
+  }, [auditorIntentId, auditorStakeStage, handleCheckAuditorStatus, isAuditorAutoCompletionPending, isRegisterProcessing]);
+
+  /** Tự chuyển sang đăng nhập sau khi người dùng đã thấy thông báo kích hoạt quyền Auditor thành công. */
+  useEffect(() => {
+    if (!isAuditorSuccessVisible) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      router.push("/login");
+    }, AUDITOR_LOGIN_REDIRECT_DELAY_MS);
+    return () => window.clearTimeout(timeoutId);
+  }, [isAuditorSuccessVisible, router]);
+
+  /** Tạo hồ sơ Kiểm toán viên sau khi Google và tài khoản nhận tiền đều đã hợp lệ. */
+  const handleSubmitAuditorRegister = async (): Promise<void> => {
+    if (!isAuditorRegisterReady) {
+      if (!isTermsAccepted) {
+        setTermsError("Vui lòng tích vào ô để tiếp tục.");
+      }
+      return;
+    }
+
+    setIsRegisterProcessing(true);
+    setRegisterErrorMessage("");
+    setAuditorErrorMessage("");
+    setLoadingTexts({
+      title: "Đang tạo hồ sơ Kiểm toán viên...",
+      subtitle: "Tạo ví Smart Account và lưu tài khoản nhận tiền",
+    });
+    setIsLoadingVisible(true);
+    setIsProgressLoading(true);
+
+    try {
+      const result = await registerAuditorIntent({
+        identityToken: auditorGoogleCredential,
+        payoutAccount: {
+          bankName: auditorBankName,
+          bankAccountNumber: auditorBankAccountNumber,
+          accountHolderName: auditorAccountHolderName,
+          branchName: auditorBranchName.trim() || undefined,
+        },
+      });
+      applyAuditorIntentResult(result);
+    } catch (error) {
+      setRegisterErrorMessage(getAuditorApiErrorMessage(error, "Không thể tạo hồ sơ Kiểm toán viên."));
+      if (getApiErrorCode(error) === "UNAUTHENTICATED") {
+        setAuditorGoogleCredential("");
+      }
+    } finally {
+      setIsRegisterProcessing(false);
+      setIsLoadingVisible(false);
+      setIsProgressLoading(false);
+    }
+  };
 
   /**
    * Hàm lấy đối tượng Google Accounts ID từ GSI script.
@@ -618,6 +1376,11 @@ export default function RegisterPage() {
   // Ghi chú: Đóng màn hình thông báo gửi hồ sơ KYC.
   const handleCloseOrganizationSuccess = () => {
     setIsOrganizationSuccessVisible(false);
+  };
+
+  // Ghi chú: Đóng màn hình chúc mừng sau khi quyền Kiểm toán viên đã được kích hoạt.
+  const handleCloseAuditorSuccess = () => {
+    setIsAuditorSuccessVisible(false);
   };
 
   // Ghi chú: Cập nhật giá trị tên tổ chức.
@@ -809,6 +1572,7 @@ export default function RegisterPage() {
   };
 
   const resolvedWalletAddress = createdWalletAddress || fallbackSmartAccountAddress;
+  const compactAuditorWalletAddress = formatAuditorWalletAddress(resolvedWalletAddress);
 
   // Ghi chú: Sao chép địa chỉ smart account vào clipboard.
   const handleCopyAddress = async () => {
@@ -834,13 +1598,18 @@ export default function RegisterPage() {
       return;
     }
 
+    if (currentStep === 2 && selectedRole === "auditor" && isAuditorRegisterReady) {
+      void handleSubmitAuditorRegister();
+      return;
+    }
+
     if (currentStep === 2) {
       handleGoogleRegister();
       return;
     }
 
     if (currentStep === 3 && selectedRole === "organization" && isKycReady) {
-      handleSubmitKyc();
+      void handleSubmitKyc();
     }
   };
 
@@ -955,6 +1724,50 @@ export default function RegisterPage() {
         </div>
       )}
 
+      {isAuditorSuccessVisible && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 px-4">
+          <div className="w-full max-w-md rounded-2xl bg-white p-6 text-center shadow-xl">
+            <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-violet-500 text-white">
+              <svg viewBox="0 0 24 24" className="h-6 w-6">
+                <polyline points="20 6 9 17 4 12" fill="none" stroke="currentColor" strokeWidth="2" />
+              </svg>
+            </div>
+            <div className="text-lg font-semibold text-slate-800">{AUDITOR_SUCCESS_TITLE}</div>
+            <div className="mt-1 text-sm text-slate-500">{AUDITOR_SUCCESS_SUBTITLE} Vui lòng đăng nhập lại để nhận phiên mới.</div>
+            <div className="mt-4 flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3 py-2 text-sm">
+              <span className="font-mono text-xs font-medium text-slate-700">{resolvedWalletAddress}</span>
+              <button className="text-xs font-semibold text-violet-600 hover:text-violet-700" onClick={handleCopyAddress}>
+                {isCopySuccess ? "✓ Đã sao chép" : "⎘ Sao chép"}
+              </button>
+            </div>
+            <Link
+              className="mt-5 inline-flex w-full items-center justify-center rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-violet-700"
+              href="/login"
+              onClick={handleCloseAuditorSuccess}
+            >
+              → Đăng nhập ngay
+            </Link>
+          </div>
+        </div>
+      )}
+
+      {isAuditorMintFailureVisible && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 px-4" role="dialog" aria-modal="true" aria-labelledby="auditor-mint-failure-title">
+          <div className="w-full max-w-md rounded-2xl bg-white p-6 text-center shadow-xl">
+            <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-red-500 text-white">!</div>
+            <div id="auditor-mint-failure-title" className="text-lg font-semibold text-slate-800">Thanh toán đã được xác nhận</div>
+            <p className="mt-2 text-sm leading-6 text-slate-600">Đã chuyển khoản thành công nhưng gặp vấn đề khi chuyển sang token trên mạng lưới Blockchain. Vui lòng liên hệ Admin qua SĐT 036740032 để được hỗ trợ nhanh nhất.</p>
+            <button
+              type="button"
+              className="mt-5 inline-flex w-full items-center justify-center rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-red-700"
+              onClick={() => setIsAuditorMintFailureVisible(false)}
+            >
+              Đã hiểu
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Ghi chú: Dùng layout lưới hai cột để đồng bộ bố cục với trang login. */}
       <div className="grid min-h-screen lg:grid-cols-[1.05fr_1.25fr]">
         <aside className="relative hidden flex-col overflow-hidden bg-gradient-to-br from-[#0e7c6b] via-[#0a5c50] to-[#073d36] px-12 py-10 text-white lg:flex">
@@ -1049,7 +1862,7 @@ export default function RegisterPage() {
             <div className={stepIndicatorState.second.connectorClass}></div>
             <div className="flex flex-col items-center gap-2">
               <div className={stepIndicatorState.second.circleClass}>2</div>
-              <div className={stepIndicatorState.second.labelClass}>Đăng ký<br />Google</div>
+              <div className={stepIndicatorState.second.labelClass}>{secondStepPrimaryLabel}<br />{secondStepSecondaryLabel}</div>
             </div>
             {stepIndicatorState.showSecondConnector && (
               <div className={stepIndicatorState.third?.connectorClass ?? ""}></div>
@@ -1057,7 +1870,7 @@ export default function RegisterPage() {
             {stepIndicatorState.showThird && (
               <div className="flex flex-col items-center gap-2">
                 <div className={stepIndicatorState.third?.circleClass ?? ""}>3</div>
-                <div className={stepIndicatorState.third?.labelClass ?? ""}>Xác minh<br />KYC</div>
+                <div className={stepIndicatorState.third?.labelClass ?? ""}>{thirdStepPrimaryLabel}<br />{thirdStepSecondaryLabel}</div>
               </div>
             )}
           </div>
@@ -1071,7 +1884,7 @@ export default function RegisterPage() {
                   Chọn loại tài khoản phù hợp để chúng tôi cá nhân hóa trải nghiệm
                 </p>
 
-                <div className="mt-6 grid gap-4 lg:grid-cols-2">
+                <div className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
                   <button
                     className={`group relative rounded-2xl border p-5 text-left transition-all ${selectedRole === "donor"
                       ? "border-emerald-500 bg-emerald-50 shadow-[0_12px_30px_rgba(16,185,129,0.2)]"
@@ -1173,6 +1986,51 @@ export default function RegisterPage() {
                       </div>
                     </div>
                   </button>
+
+                  <button
+                    className={`group relative rounded-2xl border p-5 text-left transition-all ${selectedRole === "auditor"
+                      ? "border-violet-500 bg-violet-50 shadow-[0_12px_30px_rgba(109,40,217,0.18)]"
+                      : "border-slate-200 bg-white hover:border-violet-200 hover:bg-violet-50/40"
+                      }`}
+                    onClick={() => handleRoleSelect("auditor")}
+                  >
+                    <div className="absolute right-4 top-4 flex h-7 w-7 items-center justify-center rounded-full border border-violet-500 bg-violet-500 text-white opacity-0 transition-opacity group-hover:opacity-100">
+                      <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
+                        <polyline points="20 6 9 17 4 12" />
+                      </svg>
+                    </div>
+                    {selectedRole === "auditor" && (
+                      <div className="absolute right-4 top-4 flex h-7 w-7 items-center justify-center rounded-full border border-violet-500 bg-violet-500 text-white">
+                        <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
+                          <polyline points="20 6 9 17 4 12" />
+                        </svg>
+                      </div>
+                    )}
+                    <div className="flex items-center gap-3">
+                      <div className="text-3xl">🔍</div>
+                      <div>
+                        <div className="text-base font-semibold text-slate-900">{AUDITOR_ROLE_LABEL}</div>
+                        <div className="text-xs uppercase text-slate-400">Auditor</div>
+                      </div>
+                    </div>
+                    <p className="mt-3 text-sm text-slate-500">
+                      Tôi muốn đi thực địa, xác minh dự án và nhận thưởng khi báo cáo đúng sự thật.
+                    </p>
+                    <div className="mt-4 space-y-2 text-sm text-slate-600">
+                      <div className="flex items-center gap-2">
+                        <span className="flex h-5 w-5 items-center justify-center rounded-full bg-emerald-100 text-emerald-600">✓</span>
+                        Xác minh dự án ngoài thực địa
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="flex h-5 w-5 items-center justify-center rounded-full bg-emerald-100 text-emerald-600">✓</span>
+                        Nhận thưởng khi kết luận đúng
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="flex h-5 w-5 items-center justify-center rounded-full bg-amber-100 text-amber-600">!</span>
+                        Yêu cầu đặt cọc VND
+                      </div>
+                    </div>
+                  </button>
                 </div>
 
                 {selectedRole === "organization" && (
@@ -1183,6 +2041,17 @@ export default function RegisterPage() {
                       <line x1="12" y1="8" x2="12.01" y2="8" />
                     </svg>
                     Tổ chức cần xác minh KYC sau khi đăng ký Google. Thường mất 1–3 ngày làm việc.
+                  </div>
+                )}
+
+                {selectedRole === "auditor" && (
+                  <div className="mt-5 flex items-start gap-2 rounded-xl border border-violet-200 bg-violet-50 p-4 text-sm text-slate-600">
+                    <svg viewBox="0 0 24 24" className="mt-0.5 h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
+                      <circle cx="12" cy="12" r="10" />
+                      <line x1="12" y1="16" x2="12" y2="12" />
+                      <line x1="12" y1="8" x2="12.01" y2="8" />
+                    </svg>
+                    Kiểm toán viên phải đặt cọc VND trước khi được cấp quyền. Cọc có thể rút lại sau thời gian chờ; nếu kết luận sai sự thật, một phần cọc sẽ bị phạt.
                   </div>
                 )}
 
@@ -1268,8 +2137,86 @@ export default function RegisterPage() {
                   </div>
                 </div>
 
+                {selectedRole === "auditor" && (
+                  <div className="mt-6 space-y-4 rounded-2xl border border-violet-100 bg-violet-50/40 p-4">
+                    <div>
+                      <h2 className="text-sm font-semibold text-slate-800">Tài khoản nhận tiền</h2>
+                      <p className="mt-1 text-xs text-slate-500">Thông tin này dùng để nhận thưởng và hoàn cọc khi đủ điều kiện.</p>
+                    </div>
+
+                    {auditorGoogleCredential ? (
+                      <p className="rounded-lg bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-700">✓ Đã xác thực Google</p>
+                    ) : (
+                      <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700">Vui lòng xác thực Google trước khi tạo hồ sơ.</p>
+                    )}
+
+                    <div>
+                      <label htmlFor="auditorBankName" className="text-sm font-semibold text-slate-700">Ngân hàng nhận tiền <span className="text-rose-500">*</span></label>
+                      <select
+                        id="auditorBankName"
+                        className={`mt-2 w-full rounded-xl border bg-white px-4 py-2.5 text-sm text-slate-700 shadow-sm focus:outline-none ${resolveInputValidationClass(auditorBankNameClass)}`}
+                        value={auditorBankName}
+                        onChange={(event) => setAuditorBankName(event.target.value)}
+                      >
+                        <option value="">Chọn ngân hàng nhận tiền</option>
+                        {AUDITOR_PAYOUT_SUPPORTED_BANKS.map((bank) => (
+                          <option key={bank.value} value={bank.value}>{bank.label}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label htmlFor="auditorBankAccountNumber" className="text-sm font-semibold text-slate-700">Số tài khoản <span className="text-rose-500">*</span></label>
+                      <input
+                        id="auditorBankAccountNumber"
+                        inputMode="numeric"
+                        className={`mt-2 w-full rounded-xl border bg-white px-4 py-2.5 text-sm text-slate-700 shadow-sm placeholder:text-slate-400 focus:outline-none ${resolveInputValidationClass(auditorBankAccountNumberClass)}`}
+                        placeholder="Từ 8 đến 20 chữ số"
+                        value={auditorBankAccountNumber}
+                        onChange={(event) => setAuditorBankAccountNumber(event.target.value.replace(/\D/g, ""))}
+                      />
+                    </div>
+
+                    <div>
+                      <label htmlFor="auditorAccountHolderName" className="text-sm font-semibold text-slate-700">Chủ tài khoản <span className="text-rose-500">*</span></label>
+                      <input
+                        id="auditorAccountHolderName"
+                        className={`mt-2 w-full rounded-xl border bg-white px-4 py-2.5 text-sm uppercase text-slate-700 shadow-sm placeholder:normal-case placeholder:text-slate-400 focus:outline-none ${resolveInputValidationClass(auditorAccountHolderNameClass)}`}
+                        placeholder="NGUYEN VAN A"
+                        value={auditorAccountHolderName}
+                        onChange={(event) => setAuditorAccountHolderName(normalizeAuditorAccountHolderName(event.target.value))}
+                      />
+                    </div>
+
+                    <div>
+                      <label htmlFor="auditorBranchName" className="text-sm font-semibold text-slate-700">Chi nhánh <span className="font-normal text-slate-400">(không bắt buộc)</span></label>
+                      <input
+                        id="auditorBranchName"
+                        className={`mt-2 w-full rounded-xl border bg-white px-4 py-2.5 text-sm text-slate-700 shadow-sm placeholder:text-slate-400 focus:outline-none ${resolveInputValidationClass(auditorBranchNameClass)}`}
+                        placeholder="Chi nhánh mở tài khoản"
+                        maxLength={200}
+                        value={auditorBranchName}
+                        onChange={(event) => setAuditorBranchName(event.target.value)}
+                      />
+                    </div>
+
+                    {auditorStatusMessage && (
+                      <p role="status" className="rounded-lg bg-violet-100 px-3 py-2 text-xs text-violet-700">{auditorStatusMessage}</p>
+                    )}
+
+                    <button
+                      type="button"
+                      className="w-full rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-violet-700 disabled:cursor-not-allowed disabled:bg-slate-200"
+                      disabled={!isAuditorRegisterReady}
+                      onClick={() => void handleSubmitAuditorRegister()}
+                    >
+                      Tạo hồ sơ Kiểm toán viên
+                    </button>
+                  </div>
+                )}
+
                 {registerErrorMessage && (
-                  <div className="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600">
+                  <div role="alert" className="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600">
                     {registerErrorMessage}
                   </div>
                 )}
@@ -1491,6 +2438,130 @@ export default function RegisterPage() {
                   <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
                     {kycSubmitErrorMessage}
                   </div>
+                )}
+              </div>
+            )}
+
+            {currentStep === 3 && selectedRole === "auditor" && (
+              <div>
+                <div className="text-sm font-semibold text-violet-600">Kích hoạt quyền kiểm toán 🔍</div>
+                <h1 className="mt-2 text-2xl font-semibold text-slate-900">Nạp VND & đặt cọc</h1>
+                <p className="mt-2 text-sm text-slate-500">{AUDITOR_STEP_THREE_SUBTITLE}</p>
+
+                <div className="mt-6 space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-slate-500">Mức cọc tối thiểu</span>
+                    <strong className="text-slate-800">{formatDctAmount(auditorMinimumStakeThreshold || "0")} VND</strong>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-slate-500">Số dư hiện có</span>
+                    <strong className="text-slate-800">{formatDctAmount(auditorTokenBalance || "0")} VND</strong>
+                  </div>
+                  <div className="flex items-start justify-between gap-3">
+                    <span className="text-slate-500">Ví Smart Account</span>
+                    <div className="flex items-center gap-2">
+                      <code className="font-mono text-xs text-slate-700">{compactAuditorWalletAddress}</code>
+                      <button type="button" className="text-xs font-semibold text-violet-600 hover:text-violet-700" onClick={handleCopyAddress}>
+                        {isCopySuccess ? "✓ Đã sao chép" : "⎘ Sao chép"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {auditorStakeStage === "NEED_TOKEN" && (
+                  <div className="mt-6 rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                    <p className="text-sm font-semibold text-amber-900">Bạn còn thiếu {formatDctAmount(auditorTokenShortfall.toString())} VND để đặt cọc.</p>
+                    <p className="mt-1 text-xs text-amber-800">VND được nạp trực tiếp vào ví Smart Account của bạn.</p>
+                    {auditorTokenShortfall > 0n && auditorTokenShortfall < 10000n && (
+                      <p className="mt-2 text-xs font-medium text-amber-800">Mức nạp tối thiểu mỗi lần là 10.000 VNĐ.</p>
+                    )}
+                    {auditorDepositAmount === null && (
+                      <p className="mt-2 text-xs font-medium text-rose-800">Số VND cần nạp vượt giới hạn thanh toán. Vui lòng liên hệ hỗ trợ.</p>
+                    )}
+                    <div className="mt-4 flex flex-col gap-3 sm:flex-row">
+                      <button
+                        type="button"
+                        className="flex-1 rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-violet-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+                        disabled={isRegisterProcessing || auditorDepositAmount === null}
+                        onClick={() => void handleCreateAuditorDeposit()}
+                      >
+                        {auditorDepositAmount === null
+                          ? "💳 Số VND vượt giới hạn"
+                          : `💳 Nạp ${formatDctAmount(String(auditorDepositAmount))} VND`}
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded-xl border border-slate-300 px-4 py-2.5 text-sm font-semibold text-slate-600 hover:border-slate-400 disabled:cursor-not-allowed disabled:text-slate-400"
+                        disabled={isRegisterProcessing}
+                        onClick={() => void handleRefreshAuditorTokenBalance()}
+                      >
+                        🔄 Kiểm tra lại số dư
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {auditorStakeStage === "AWAITING_PAYMENT" && (
+                  <div className="mt-6 rounded-2xl border border-sky-200 bg-sky-50 p-4">
+                    <p className="text-sm font-semibold text-sky-900">Đang chờ thanh toán phiếu nạp VND</p>
+                    <p className="mt-2 text-xs text-sky-800">Mã đơn đối soát: <code className="font-mono font-semibold">{auditorDepositOrderCode}</code></p>
+                    {auditorDepositExpiresAt && (
+                      <p className="mt-1 text-xs text-sky-800">Phiếu hết hạn lúc: {new Date(auditorDepositExpiresAt).toLocaleString("vi-VN")}</p>
+                    )}
+                    {auditorDepositPaymentUrl && (
+                      <a
+                        className="mt-3 inline-flex text-sm font-semibold text-violet-700 underline underline-offset-2"
+                        href={auditorDepositPaymentUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        Mở lại trang thanh toán
+                      </a>
+                    )}
+                    <button
+                      type="button"
+                      className="mt-4 w-full rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-violet-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+                      disabled={isRegisterProcessing}
+                      onClick={() => void handleCheckAuditorDeposit()}
+                    >
+                      ✅ Tôi đã thanh toán
+                    </button>
+                  </div>
+                )}
+
+                {auditorStakeStage === "READY_TO_STAKE" && (
+                  <div className="mt-6 rounded-2xl border border-violet-200 bg-violet-50 p-4">
+                    <p className="text-sm font-medium text-violet-900">Đã đủ số dư VND. Hệ thống đang tự động ghi nhận khoản cọc trên Blockchain.</p>
+                    <p className="mt-2 text-xs leading-5 text-violet-800">Bạn không cần gửi thêm thao tác. Quyền Kiểm toán viên chỉ được cấp sau khi giao dịch on-chain được xác minh thành công.</p>
+                  </div>
+                )}
+
+                {auditorStakeStage === "FAILED" && (
+                  <div className="mt-6 rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                    <p className="text-sm font-medium text-amber-900">Hệ thống chưa thể hoàn tất khoản cọc tự động.</p>
+                    <p className="mt-2 text-xs leading-5 text-amber-800">Không có khoản VND nào bị trừ thêm. Hệ thống chỉ gửi lại giao dịch cọc trong giới hạn an toàn và luôn kiểm tra số dư on-chain trước khi thực hiện.</p>
+                  </div>
+                )}
+
+                {(auditorStakeStage === "VERIFYING" || auditorStakeStage === "FAILED") && (
+                  <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4">
+                    {auditorStakeTxHash && <p className="break-all font-mono text-xs text-slate-600">Tx: {auditorStakeTxHash}</p>}
+                    <button
+                      type="button"
+                      className="mt-3 w-full rounded-xl border border-violet-300 px-4 py-2.5 text-sm font-semibold text-violet-700 hover:bg-violet-50 disabled:cursor-not-allowed disabled:text-slate-400"
+                      disabled={isRegisterProcessing || !auditorIntentId}
+                      onClick={() => void handleCheckAuditorStatus(auditorStakeStage === "FAILED")}
+                    >
+                      🔄 Kiểm tra trạng thái
+                    </button>
+                  </div>
+                )}
+
+                {auditorStatusMessage && (
+                  <p role="status" className="mt-4 rounded-xl border border-violet-100 bg-violet-50 px-3 py-2 text-sm text-violet-700">{auditorStatusMessage}</p>
+                )}
+                {auditorErrorMessage && (
+                  <p role="alert" className="mt-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">{auditorErrorMessage}</p>
                 )}
               </div>
             )}

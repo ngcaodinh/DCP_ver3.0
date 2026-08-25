@@ -502,11 +502,17 @@ function DepositHomePageContent() {
 
     setCurrentOrderCode(orderCodeFromQuery);
     setDepositStatusMessage('Đang kiểm tra trạng thái thanh toán và mint token...');
+    const isPayosPaymentSuccessRedirect = searchParams.get('paymentStatus') === 'success'
+      && (searchParams.get('status') === 'PAID' || searchParams.get('code') === '00');
+    let hasRequestedPayosReconciliation = false;
 
     const intervalIdentifier = window.setInterval(async () => {
       try {
         const authSession = readAuthSession();
-        const response = await fetch(`${backendBaseUrl}/api/deposit/${orderCodeFromQuery}`, {
+        const shouldReconcileWithPayos = isPayosPaymentSuccessRedirect && !hasRequestedPayosReconciliation;
+        hasRequestedPayosReconciliation = hasRequestedPayosReconciliation || shouldReconcileWithPayos;
+        const reconciliationQuery = shouldReconcileWithPayos ? '?reconcile=true' : '';
+        const response = await fetch(`${backendBaseUrl}/api/deposit/${orderCodeFromQuery}${reconciliationQuery}`, {
           method: 'GET',
           headers: {
             Authorization: `Bearer ${authSession.accessToken || ''}`

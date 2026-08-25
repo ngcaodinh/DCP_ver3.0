@@ -7,6 +7,7 @@
     "compile": "hardhat compile",
     "test": "hardhat test",
     "deploy": "hardhat run scripts/deploy-impact-sbt.js --network amoy",
+    "deploy:auditor-staking": "hardhat run scripts/deploy-auditor-staking.js --network amoy",
     "dev:node": "node scripts/check-port.js && hardhat node",
     "deploy:local": "hardhat run scripts/deploy.js --network localhost"
   },

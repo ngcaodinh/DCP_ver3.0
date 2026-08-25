@@ -22,6 +22,9 @@ import { startOverrideExpiryWorker, stopOverrideExpiryWorker } from './workers/o
 import { startSbtMintWorker, stopSbtMintWorker } from './workers/sbtMintWorker';
 import { startSbtMintRecoveryScheduler } from './workers/sbtMintRecoveryScheduler';
 import { startSbtStatusProjectionWorker, stopSbtStatusProjectionWorker } from './workers/sbtStatusProjectionWorker';
+import { startAuditorStakeEventProjectionWorker, stopAuditorStakeEventProjectionWorker } from './workers/auditorStakeEventProjectionWorker';
+import { startAuditorPayoutWorker, stopAuditorPayoutWorker } from './workers/auditorPayoutWorker';
+import { startAuditorDebtSettlementWorker, stopAuditorDebtSettlementWorker } from './workers/auditorDebtSettlementWorker';
 import { initializeSbtEventBridge } from './services/sbtEventBridge.service';
 import { startDataMapperWorker } from './workers/data-mapper.worker';
 import { startNotificationWorker, stopNotificationWorker } from './workers/notification.worker';
@@ -69,6 +72,10 @@ function startBackgroundWorkers(): void {
   startSbtMintWorker();
   // SBT status projector: replay TokenStatusUpdated thành Mongo read model cho gallery public.
   startSbtStatusProjectionWorker();
+  // Auditor stake projector: đồng bộ quyền auditor từ event cọc, rút và slash đã đủ confirmation.
+  startAuditorStakeEventProjectionWorker();
+  startAuditorPayoutWorker();
+  startAuditorDebtSettlementWorker();
   // SBT Mint Recovery Scheduler: cron 15 phut phat hien stuck jobs
   startSbtMintRecoveryScheduler();
   // Data Mapper Worker: dong bo PayOS + blockchain vao unified_transactions (5 phut)
@@ -128,6 +135,9 @@ async function startServer(): Promise<void> {
       await stopOracleWorker();
       await stopSbtMintWorker();
       stopSbtStatusProjectionWorker();
+      stopAuditorStakeEventProjectionWorker();
+      stopAuditorDebtSettlementWorker();
+      await stopAuditorPayoutWorker();
       // Notification worker: Bull queue.close() chờ active job xong (graceful per spec E1)
       await stopNotificationWorker();
       stopAdminAuditArchiveWorker();

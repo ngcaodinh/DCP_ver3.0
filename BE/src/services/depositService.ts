@@ -5,7 +5,11 @@ import {
   findDepositTransactionByOrderCode,
   updateDepositTransaction
 } from '../models/depositModel';
-import { createPayosPaymentLink, verifyPayosWebhookChecksum } from './payosService';
+import {
+  createPayosPaymentLink,
+  getPayosPaymentLinkStatus,
+  verifyPayosWebhookChecksum
+} from './payosService';
 import { mintTokenForDeposit } from './blockchainMintService';
 import { getLogger } from '../config/logger';
 
@@ -14,6 +18,7 @@ type CreateDepositInput = {
   walletAddress: string;
   amountVnd: number;
   correlationId: string;
+  paymentFlow?: 'STANDARD' | 'AUDITOR_ONBOARDING';
 };
 
 type CreateDepositResult = {
@@ -49,18 +54,19 @@ type WebhookChecksumVerifyResult = {
 const logger = getLogger();
 const minimumDepositAmountVnd = 10000;
 const paymentTimeoutMilliseconds = 15 * 60 * 1000;
+const payosOrderCodeRandomRange = 1_000_000;
+const activeDepositSettlementByOrderCode = new Map<string, Promise<DepositTransaction>>();
 
 /**
  * Hàm sinh orderCode duy nhất cho PayOS.
  * Mục đích: tạo mã đơn hàng dạng số để tương thích ràng buộc API PayOS.
  */
 function generateOrderCode(): string {
-  // Dùng timestamp (ms) + random từ crypto để tạo số duy nhất.
-  // Date.now() cho 13 chữ số, randomBytes 4 bytes cho thêm entropy,
-  // ghép lại thành số đủ lớn và đủ random.
-  const timestamp = Date.now();
-  const randomBytes = parseInt(crypto.randomBytes(4).toString('hex'), 16);
-  return String(timestamp * 10_000 + (randomBytes % 10_000));
+  // PayOS chỉ nhận số nguyên JavaScript an toàn. Timestamp mili-giây ghép 4 chữ số
+  // tạo ra 17 chữ số và đã vượt giới hạn này, nên dùng timestamp theo giây + 6 chữ số random.
+  const timestampInSeconds = Math.floor(Date.now() / 1_000);
+  const randomValue = crypto.randomBytes(3).readUIntBE(0, 3) % payosOrderCodeRandomRange;
+  return `${timestampInSeconds}${randomValue.toString().padStart(6, '0')}`;
 }
 
 /**
@@ -99,8 +105,8 @@ export async function createDepositRequest(input: CreateDepositInput): Promise<C
 
   // Ghi chú logic phức tạp: luôn đính kèm orderCode vào URL để frontend polling đúng giao dịch
   // ngay cả khi cổng thanh toán không tự thêm orderCode khi redirect về hệ thống.
-  const returnUrl = `${configuredReturnUrl}${configuredReturnUrl.includes('?') ? '&' : '?'}orderCode=${orderCode}`;
-  const cancelUrl = `${configuredCancelUrl}${configuredCancelUrl.includes('?') ? '&' : '?'}orderCode=${orderCode}`;
+  const returnUrl = buildDepositPaymentRedirectUrl(configuredReturnUrl, orderCode, input.paymentFlow);
+  const cancelUrl = buildDepositPaymentRedirectUrl(configuredCancelUrl, orderCode, input.paymentFlow);
 
   logger.info('Bắt đầu tạo payment link deposit.', {
     correlationId,
@@ -215,6 +221,35 @@ function detectPaymentSuccess(payload: PayosWebhookPayload, webhookData: Record<
 }
 
 /**
+ * Xây dựng URL PayOS trả người dùng về đúng ngữ cảnh đã khởi tạo phiếu nạp.
+ * Mục đích: chỉ cho phép các luồng nội bộ đã định nghĩa, không tin URL redirect do client gửi lên.
+ */
+function buildDepositPaymentRedirectUrl(
+  configuredRedirectUrl: string,
+  orderCode: string,
+  paymentFlow: CreateDepositInput['paymentFlow']
+): string {
+  const redirectUrl = new URL(configuredRedirectUrl);
+
+  if (paymentFlow === 'AUDITOR_ONBOARDING') {
+    redirectUrl.pathname = '/register';
+    redirectUrl.searchParams.set('role', 'auditor');
+    redirectUrl.searchParams.set('paymentFlow', 'auditor_onboarding');
+  }
+
+  redirectUrl.searchParams.set('orderCode', orderCode);
+  return redirectUrl.toString();
+}
+
+/**
+ * Hàm xác định trạng thái thanh toán thành công từ API đối soát PayOS.
+ * Mục đích: chỉ mint khi PayOS trả về trạng thái hoàn tất, không tin dữ liệu redirect từ trình duyệt.
+ */
+function isPayosPaymentStatusPaid(status: string): boolean {
+  return ['PAID', 'SUCCESS', 'COMPLETED'].includes(status.trim().toUpperCase());
+}
+
+/**
  * Hàm trích xuất mã giao dịch PayOS từ webhook.
  * Mục đích: lưu dấu vết đối soát để audit và truy vết giao dịch ngân hàng.
  */
@@ -266,6 +301,104 @@ async function mintTokenWithRetry(
   }
 
   throw new Error('Mint token thất bại sau khi đã retry tối đa.');
+}
+
+/**
+ * Hàm xác nhận giao dịch đã thanh toán và mint token vào ví người dùng.
+ * Mục đích: dùng chung cho webhook đã xác thực và kết quả đối soát trực tiếp từ PayOS.
+ */
+async function finalizeVerifiedDepositPayment(
+  depositTransaction: DepositTransaction,
+  payosTransactionId: string | null
+): Promise<DepositTransaction> {
+  const paymentConfirmedAt = new Date();
+  const paymentConfirmedTransaction: DepositTransaction = {
+    ...depositTransaction,
+    status: 'PAYMENT_CONFIRMED',
+    updatedAt: paymentConfirmedAt,
+    paymentConfirmedAt,
+    webhookProcessedAt: paymentConfirmedAt,
+    payosTransactionId: payosTransactionId || depositTransaction.payosTransactionId
+  };
+
+  await updateDepositTransaction(paymentConfirmedTransaction);
+  logger.info('Thanh toán deposit đã được xác nhận, bắt đầu mint token.', {
+    correlationId: paymentConfirmedTransaction.correlationId,
+    orderCode: paymentConfirmedTransaction.orderCode,
+    walletAddress: paymentConfirmedTransaction.walletAddress,
+    finalStatus: paymentConfirmedTransaction.status
+  });
+
+  try {
+    const mintResult = await mintTokenWithRetry(
+      paymentConfirmedTransaction.walletAddress,
+      paymentConfirmedTransaction.tokenAmount,
+      paymentConfirmedTransaction.orderCode,
+      paymentConfirmedTransaction.correlationId
+    );
+
+    const mintCompletedAt = new Date();
+    const mintCompletedTransaction: DepositTransaction = {
+      ...paymentConfirmedTransaction,
+      status: 'MINT_COMPLETED',
+      onChainTransactionHash: mintResult.transactionHash,
+      mintCompletedAt,
+      updatedAt: mintCompletedAt,
+      failureReason: null
+    };
+
+    await updateDepositTransaction(mintCompletedTransaction);
+    logger.info('Mint token deposit thành công.', {
+      correlationId: mintCompletedTransaction.correlationId,
+      orderCode: mintCompletedTransaction.orderCode,
+      walletAddress: mintCompletedTransaction.walletAddress,
+      onChainTransactionHash: mintCompletedTransaction.onChainTransactionHash || undefined,
+      finalStatus: mintCompletedTransaction.status
+    });
+
+    return mintCompletedTransaction;
+  } catch (error) {
+    const failedAfterMintTransaction: DepositTransaction = {
+      ...paymentConfirmedTransaction,
+      status: 'FAILED',
+      updatedAt: new Date(),
+      failureReason: `Mint token thất bại: ${(error as Error).message}`
+    };
+
+    await updateDepositTransaction(failedAfterMintTransaction);
+    logger.error('Mint token deposit thất bại.', {
+      correlationId: paymentConfirmedTransaction.correlationId,
+      orderCode: failedAfterMintTransaction.orderCode,
+      walletAddress: failedAfterMintTransaction.walletAddress,
+      finalStatus: failedAfterMintTransaction.status,
+      errorMessage: (error as Error).message
+    });
+
+    return failedAfterMintTransaction;
+  }
+}
+
+/**
+ * Hàm tuần tự hóa việc mint theo orderCode trong một tiến trình backend.
+ * Mục đích: webhook và thao tác kiểm tra thủ công không thể mint lặp cùng một giao dịch.
+ */
+async function settleVerifiedDepositPayment(
+  depositTransaction: DepositTransaction,
+  payosTransactionId: string | null
+): Promise<DepositTransaction> {
+  const activeSettlement = activeDepositSettlementByOrderCode.get(depositTransaction.orderCode);
+  if (activeSettlement) {
+    return activeSettlement;
+  }
+
+  const settlementPromise = finalizeVerifiedDepositPayment(depositTransaction, payosTransactionId);
+  activeDepositSettlementByOrderCode.set(depositTransaction.orderCode, settlementPromise);
+
+  try {
+    return await settlementPromise;
+  } finally {
+    activeDepositSettlementByOrderCode.delete(depositTransaction.orderCode);
+  }
 }
 
 
@@ -434,70 +567,37 @@ export async function processDepositWebhook(payload: PayosWebhookPayload): Promi
     return failedTransaction;
   }
 
-  // Cập nhật trạng thái xác nhận thanh toán trước khi gọi mint để tách rõ lifecycle nghiệp vụ.
-  const paymentConfirmedTransaction: DepositTransaction = {
-    ...depositTransaction,
-    status: 'PAYMENT_CONFIRMED',
-    updatedAt: now,
-    paymentConfirmedAt: now,
-    webhookProcessedAt: now,
-    payosTransactionId: extractPayosTransactionId(webhookData)
-  };
+  return settleVerifiedDepositPayment(depositTransaction, extractPayosTransactionId(webhookData));
+}
 
-  await updateDepositTransaction(paymentConfirmedTransaction);
-  logger.info('Thanh toán deposit đã được xác nhận, bắt đầu mint token.', {
-    correlationId: paymentConfirmedTransaction.correlationId,
-    orderCode: paymentConfirmedTransaction.orderCode,
-    walletAddress: paymentConfirmedTransaction.walletAddress,
-    finalStatus: paymentConfirmedTransaction.status
-  });
-
-  try {
-    const mintResult = await mintTokenWithRetry(
-      paymentConfirmedTransaction.walletAddress,
-      paymentConfirmedTransaction.tokenAmount,
-      paymentConfirmedTransaction.orderCode,
-      paymentConfirmedTransaction.correlationId
-    );
-
-    const mintCompletedTransaction: DepositTransaction = {
-      ...paymentConfirmedTransaction,
-      status: 'MINT_COMPLETED',
-      onChainTransactionHash: mintResult.transactionHash,
-      mintCompletedAt: new Date(),
-      updatedAt: new Date(),
-      failureReason: null
-    };
-
-    await updateDepositTransaction(mintCompletedTransaction);
-    logger.info('Mint token deposit thành công.', {
-      correlationId: mintCompletedTransaction.correlationId,
-      orderCode: mintCompletedTransaction.orderCode,
-      walletAddress: mintCompletedTransaction.walletAddress,
-      onChainTransactionHash: mintCompletedTransaction.onChainTransactionHash || undefined,
-      finalStatus: mintCompletedTransaction.status
-    });
-
-    return mintCompletedTransaction;
-  } catch (error) {
-    const failedAfterMintTransaction: DepositTransaction = {
-      ...paymentConfirmedTransaction,
-      status: 'FAILED',
-      updatedAt: new Date(),
-      failureReason: `Mint token thất bại: ${(error as Error).message}`
-    };
-
-    await updateDepositTransaction(failedAfterMintTransaction);
-    logger.error('Mint token deposit thất bại.', {
-      correlationId: paymentConfirmedTransaction.correlationId,
-      orderCode: failedAfterMintTransaction.orderCode,
-      walletAddress: failedAfterMintTransaction.walletAddress,
-      finalStatus: failedAfterMintTransaction.status,
-      errorMessage: (error as Error).message
-    });
-
-    return failedAfterMintTransaction;
+/**
+ * Hàm đối soát giao dịch deposit đang chờ với PayOS.
+ * Mục đích: khôi phục luồng mint cho giao dịch đã PAID khi webhook bị trễ hoặc không tới được backend.
+ */
+export async function reconcilePendingDepositPayment(transaction: DepositTransaction): Promise<DepositTransaction> {
+  const isTimedOutPayment = transaction.status === 'FAILED'
+    && Boolean(transaction.failureReason?.includes('Quá thời gian thanh toán 15 phút.'));
+  if (transaction.status !== 'PENDING_PAYMENT' && !isTimedOutPayment) {
+    return transaction;
   }
+
+  const payosPaymentLink = await getPayosPaymentLinkStatus(transaction.orderCode);
+  if (payosPaymentLink.orderCode !== transaction.orderCode || payosPaymentLink.amountVnd !== transaction.amountVnd) {
+    throw new Error('Dữ liệu đối soát PayOS không khớp với giao dịch nạp tiền.');
+  }
+
+  if (!isPayosPaymentStatusPaid(payosPaymentLink.status)) {
+    return transaction;
+  }
+
+  if (isTimedOutPayment) {
+    logger.warn('Khôi phục giao dịch deposit đã timeout sau khi PayOS đối soát PAID.', {
+      correlationId: transaction.correlationId,
+      orderCode: transaction.orderCode
+    });
+  }
+
+  return settleVerifiedDepositPayment(transaction, payosPaymentLink.paymentLinkId);
 }
 
 /**

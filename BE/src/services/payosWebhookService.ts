@@ -6,6 +6,7 @@ import {
   type DisbursementResult
 } from './disbursementService';
 import { verifyPayosTransferWebhookChecksum } from './payosService';
+import { processAuditorPayoutPayosResult } from './auditorPayoutService';
 import {
   WebhookAuditLogModel,
   createWebhookAuditId,
@@ -86,6 +87,14 @@ function extractWebhookStatus(payload: DisbursementTransferWebhookPayload): stri
     || 'UNKNOWN';
 
   return String(rawStatus).trim().toUpperCase() || 'UNKNOWN';
+}
+
+/** Chỉ nhận diện payout Auditor từ reference UUID do hệ thống tạo, tránh query Mongo thừa cho lane giải ngân. */
+function isAuditorPayoutWebhook(payload: DisbursementTransferWebhookPayload): boolean {
+  const data = payload.data as Record<string, unknown> | undefined;
+  const referenceId = data?.referenceId ?? data?.requestId ?? payload.requestId;
+  return typeof referenceId === 'string'
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(referenceId.trim());
 }
 
 /**
@@ -281,6 +290,26 @@ export async function processPayosWebhook(
 
   // Buoc 3: Xu ly webhook thong qua service co san
   try {
+    const callbackData = payload.data as Record<string, unknown> | undefined;
+    const transferIdCandidate = callbackData?.transferId ?? callbackData?.id ?? payload.transferId;
+    let handledAuditorPayout = false;
+    if (isAuditorPayoutWebhook(payload)) {
+      try {
+        handledAuditorPayout = await processAuditorPayoutPayosResult(
+          typeof transferIdCandidate === 'string' ? transferIdCandidate : null,
+          extractWebhookStatus(payload)
+        );
+      } catch (error) {
+        // Lỗi lane Auditor không được phép làm PayOS retry webhook giải ngân đã hợp lệ.
+        logger.warn('Không thể xử lý webhook payout Auditor; tiếp tục lane giải ngân.', {
+          errorMessage: error instanceof Error ? error.message : 'UNKNOWN_ERROR'
+        });
+      }
+    }
+    if (handledAuditorPayout) {
+      await writeWebhookAuditLog('WEBHOOK_PROCESSED', sourceIp, payload, payload.signature || payload.checksum || null, orderCode, null);
+      return { success: true, isDuplicate: false, disbursement: null, message: 'Webhook chi trả Kiểm toán viên đã được xử lý.' };
+    }
     const disbursement = await processDisbursementTransferWebhook(payload);
 
     // Buoc 4: Ghi audit log thanh cong

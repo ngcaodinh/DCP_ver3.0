@@ -14,7 +14,8 @@ export const ADMIN_AUDIT_ACTIONS = [
   'FEEDBACK_RESTORE',
   'SBT_MINT_RERUN_REQUESTED',
   'SBT_MINT_RERUN_ENQUEUED',
-  'SBT_MINT_RERUN_DISPATCH_FAILED'
+  'SBT_MINT_RERUN_DISPATCH_FAILED',
+  'AUDITOR_PAYOUT_BURN_RETRY_REQUESTED'
 ] as const;
 
 export type AdminAuditAction = typeof ADMIN_AUDIT_ACTIONS[number];
@@ -23,7 +24,8 @@ export type AdminAuditTargetType =
   | 'DISBURSEMENT_REQUEST'
   | 'OVERRIDE_REQUEST'
   | 'BENEFICIARY_FEEDBACK'
-  | 'SBT_MINT_REQUEST';
+  | 'SBT_MINT_REQUEST'
+  | 'AUDITOR_PAYOUT';
 export type AdminAuditArchiveState = 'HOT' | 'ARCHIVED';
 
 /** Bản ghi canonical đầy đủ dùng bởi service ghi/đọc audit log. */
@@ -76,7 +78,7 @@ const adminAuditLogSchema = new Schema<AdminAuditLogRecord>({
   targetId: { type: String, index: true },
   targetType: {
     type: String,
-    enum: ['DISBURSEMENT_REQUEST', 'OVERRIDE_REQUEST', 'BENEFICIARY_FEEDBACK', 'SBT_MINT_REQUEST'],
+    enum: ['DISBURSEMENT_REQUEST', 'OVERRIDE_REQUEST', 'BENEFICIARY_FEEDBACK', 'SBT_MINT_REQUEST', 'AUDITOR_PAYOUT'],
     index: true
   },
   ipAddress: { type: String, default: null },

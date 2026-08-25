@@ -74,6 +74,10 @@ const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || DEFAULT_API_ORIGIN;
 const apiOrigin = safeGetOrigin(apiBaseUrl, DEFAULT_API_ORIGIN);
 const siteOrigin = safeGetOrigin(process.env.NEXT_PUBLIC_SITE_URL, '');
 const isDev = process.env.NODE_ENV !== 'production';
+// Tên chunk trong Next dev có thể giữ nguyên giữa các lần chạy; không cho trình duyệt giữ bundle cũ.
+const nextStaticCacheControl = isDev
+  ? 'no-store, max-age=0'
+  : 'public, max-age=31536000, immutable';
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
@@ -88,7 +92,8 @@ const nextConfig = {
   async headers() {
     return [
       {
-        source: '/:path*',
+        // Không áp dụng policy cấm thiết bị lên /auditor để tránh browser nhận hai Permissions-Policy mâu thuẫn.
+        source: '/((?!auditor(?:/|$)).*)',
         headers: [
           {
             key: 'X-Content-Type-Options',
@@ -126,6 +131,16 @@ const nextConfig = {
         ]
       },
       {
+        // Auditor cần gọi camera và GPS trực tiếp để chụp bằng chứng hiện trường; các route khác vẫn bị chặn mặc định.
+        source: '/auditor/:path*',
+        headers: [
+          {
+            key: 'Permissions-Policy',
+            value: 'camera=(self), microphone=(), geolocation=(self)'
+          }
+        ]
+      },
+      {
         // Trang feedback chứa ticket theo từng lượt mở; bắt buộc no-store để CDN không phát lại ticket cũ.
         source: '/feedback(/:path*)?',
         headers: [
@@ -138,6 +153,16 @@ const nextConfig = {
       {
         // Cổng FOUNDATION là form một lần và không được CDN giữ lại trạng thái hoặc payload cũ.
         source: '/foundation-kyc',
+        headers: [
+          {
+            key: 'Cache-Control',
+            value: 'no-store'
+          }
+        ]
+      },
+      {
+        // Danh sách niêm yết thay đổi ngay khi hết cửa sổ khiếu nại hoặc có tranh chấp.
+        source: '/pending-projects(/:path*)?',
         headers: [
           {
             key: 'Cache-Control',
@@ -161,7 +186,7 @@ const nextConfig = {
         headers: [
           {
             key: 'Cache-Control',
-            value: 'public, max-age=31536000, immutable'
+            value: nextStaticCacheControl
           }
         ]
       }

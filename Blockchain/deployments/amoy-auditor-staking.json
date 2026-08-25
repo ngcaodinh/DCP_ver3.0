@@ -1,0 +1,8 @@
+{
+  "network": "amoy",
+  "deployedAt": "2026-08-23T14:09:06.731Z",
+  "deployerAddress": "0x902130CeaF01D52523C38166fBdbAF31BD40f302",
+  "auditorStakingAddress": "0xC46065AB846BfE52C3549a1d952637aD558B728A",
+  "deployBlock": 45675710,
+  "deploymentTransactionHash": "0x8c16a05378a79917fdbc97b9641e556b5d1adee12c93964350516bb02128f9ab"
+}

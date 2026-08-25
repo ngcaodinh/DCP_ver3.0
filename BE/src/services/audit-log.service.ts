@@ -24,7 +24,7 @@ const CANONICAL_AUDIT_ACTIONS: readonly AdminAuditAction[] = [
   'MANUAL_APPROVE', 'MANUAL_REJECT', 'MANUAL_BANK_ACCOUNT_VIEW',
   'OVERRIDE_VOTE_APPROVE', 'OVERRIDE_VOTE_REJECT', 'OVERRIDE_EXPIRED',
   'FEEDBACK_FLAG', 'FEEDBACK_UNFLAG', 'FEEDBACK_DELETE', 'FEEDBACK_RESTORE', 'SBT_MINT_RERUN_REQUESTED',
-  'SBT_MINT_RERUN_ENQUEUED', 'SBT_MINT_RERUN_DISPATCH_FAILED'
+  'SBT_MINT_RERUN_ENQUEUED', 'SBT_MINT_RERUN_DISPATCH_FAILED', 'AUDITOR_PAYOUT_BURN_RETRY_REQUESTED'
 ] as const;
 const AUDIT_READ_PROJECTION = [
   'actionId', 'actorType', 'adminId', 'adminRole', 'actionType', 'targetId', 'targetType',
@@ -45,7 +45,8 @@ const ACTION_TARGET_TYPES: Record<AdminAuditAction, AdminAuditTargetType> = {
   FEEDBACK_RESTORE: 'BENEFICIARY_FEEDBACK',
   SBT_MINT_RERUN_REQUESTED: 'SBT_MINT_REQUEST',
   SBT_MINT_RERUN_ENQUEUED: 'SBT_MINT_REQUEST',
-  SBT_MINT_RERUN_DISPATCH_FAILED: 'SBT_MINT_REQUEST'
+  SBT_MINT_RERUN_DISPATCH_FAILED: 'SBT_MINT_REQUEST',
+  AUDITOR_PAYOUT_BURN_RETRY_REQUESTED: 'AUDITOR_PAYOUT'
 };
 
 const ACTION_CONTEXT_KEYS: Record<AdminAuditAction, readonly string[]> = {
@@ -61,7 +62,8 @@ const ACTION_CONTEXT_KEYS: Record<AdminAuditAction, readonly string[]> = {
   FEEDBACK_RESTORE: ['feedbackId', 'projectId', 'riskScore', 'deletedAt', 'deletedByAdminId', 'daysBeforePurge', 'reason'],
   SBT_MINT_RERUN_REQUESTED: ['mintRequestId', 'sbtId', 'previousStatus', 'previousAttemptNumber', 'reRunCount', 'jobId', 'enqueueResult', 'outboxEventId', 'dispatchAttempt'],
   SBT_MINT_RERUN_ENQUEUED: ['mintRequestId', 'sbtId', 'previousStatus', 'previousAttemptNumber', 'reRunCount', 'jobId', 'enqueueResult', 'outboxEventId', 'dispatchAttempt'],
-  SBT_MINT_RERUN_DISPATCH_FAILED: ['mintRequestId', 'sbtId', 'previousStatus', 'previousAttemptNumber', 'reRunCount', 'jobId', 'enqueueResult', 'outboxEventId', 'dispatchAttempt']
+  SBT_MINT_RERUN_DISPATCH_FAILED: ['mintRequestId', 'sbtId', 'previousStatus', 'previousAttemptNumber', 'reRunCount', 'jobId', 'enqueueResult', 'outboxEventId', 'dispatchAttempt'],
+  AUDITOR_PAYOUT_BURN_RETRY_REQUESTED: ['payoutId']
 };
 
 export type RecordAdminAuditLogInput = {

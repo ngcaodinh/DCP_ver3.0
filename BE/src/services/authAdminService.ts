@@ -6,6 +6,26 @@ import { getRedisClientIfReady } from '../config/redis';
 const logger = getLogger();
 
 /**
+ * Tăng authVersion và xoá cache Redis để mọi JWT cũ được kiểm tra lại ở request kế tiếp.
+ * Việc disconnect socket giữ ở caller để không thay đổi thứ tự side effect nghiệp vụ hiện có.
+ */
+export async function invalidateAuthSessionsForUser(userId: string): Promise<number> {
+  const newAuthVersion = await incrementAuthVersion(userId);
+  const redis = getRedisClientIfReady();
+  if (redis) {
+    try {
+      await redis.del(`auth_version:${userId}`);
+    } catch (error) {
+      logger.warn('Clear Redis authVersion cache thất bại.', {
+        userId,
+        errorMessage: String(error)
+      });
+    }
+  }
+  return newAuthVersion;
+}
+
+/**
  * Thay đổi role của user và invalidate tất cả JWT + socket connections hiện tại.
  * Dùng bởi admin để promote/demote user hoặc revoke quyền.
  * [S-NEW2 fix]
@@ -30,21 +50,8 @@ export async function changeUserRole(
     return;
   }
 
-  // Bước 1: Tăng authVersion trong DB
-  const newAuthVersion = await incrementAuthVersion(userId);
-  
-  // Bước 2: Clear Redis cache authVersion (nếu có) để middleware socket load giá trị mới
-  const redis = getRedisClientIfReady();
-  if (redis) {
-    try {
-      await redis.del(`auth_version:${userId}`);
-    } catch (err) {
-      logger.warn('Clear Redis authVersion cache thất bại.', {
-        userId,
-        errorMessage: String(err)
-      });
-    }
-  }
+  // Bước 1-2: Tăng authVersion và xoá Redis cache trước khi ghi role mới.
+  const newAuthVersion = await invalidateAuthSessionsForUser(userId);
 
   // Bước 3: Update role trong DB
   user.role = newRole;
@@ -82,21 +89,8 @@ export async function revokeUserAccess(
     throw new Error(`User ${userId} not found`);
   }
 
-  // Bước 1: Tăng authVersion để invalidate tất cả JWT cũ
-  const newAuthVersion = await incrementAuthVersion(userId);
-
-  // Bước 2: Clear Redis cache
-  const redis = getRedisClientIfReady();
-  if (redis) {
-    try {
-      await redis.del(`auth_version:${userId}`);
-    } catch (err) {
-      logger.warn('Clear Redis authVersion cache thất bại.', {
-        userId,
-        errorMessage: String(err)
-      });
-    }
-  }
+  // Bước 1-2: Invalidate JWT và cache theo đúng hành vi trước khi refactor.
+  const newAuthVersion = await invalidateAuthSessionsForUser(userId);
 
   // Bước 3: Disconnect tất cả socket connections
   disconnectUserSockets(userId);

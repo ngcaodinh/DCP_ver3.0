@@ -1,7 +1,11 @@
-import { Router } from 'express';
+import { Router, urlencoded } from 'express';
 import { attachRequestMetadata } from '../../middleware/ipMetadataMiddleware';
 import { createRateLimitMiddleware } from '../../middleware/rateLimitMiddleware';
 import { handlePayosWebhookHealth, handlePayosWebhook } from '../../controllers/payosWebhookController';
+import {
+  handlePayosPaymentWebhook,
+  handlePayosPaymentWebhookHealth
+} from '../../controllers/payosPaymentWebhookController';
 
 /**
  * Hàm khởi tạo router cho webhook PayOS.
@@ -29,6 +33,18 @@ export function createPayosWebhookRoutes(): Router {
    * Actor: PayOS callback.
    */
   router.post('/', attachRequestMetadata(), webhookRateLimit, handlePayosWebhook);
+
+  /**
+   * GET /api/webhooks/payos/payment
+   * Health check cho URL webhook dùng chung của các luồng nạp tiền PayOS.
+   */
+  router.get('/payment', attachRequestMetadata(), webhookRateLimit, handlePayosPaymentWebhookHealth);
+
+  /**
+   * POST /api/webhooks/payos/payment
+   * Điều phối payment webhook theo orderCode cho guest, tài khoản đã đăng nhập và kích hoạt Kiểm toán viên.
+   */
+  router.post('/payment', attachRequestMetadata(), webhookRateLimit, urlencoded({ extended: false }), handlePayosPaymentWebhook);
 
   return router;
 }
