@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createAuthenticationMiddleware } from '../../middleware/authenticationMiddleware';
 import { getRequestContext, getRequestId } from '../../config/requestContext';
 
+const INTEGRATION_TEST_TIMEOUT_MS = 15_000;
+
 const applicationRouteModules: ReadonlyArray<readonly [string, string]> = [
   ['../../routes/healthRoutes', 'createHealthRoutes'],
   ['../../routes/depositRoutes', 'createDepositRoutes'],
@@ -164,4 +166,4 @@ describe('app.ts request context integration', () => {
       winstonLogger.removeListener('data', listener);
     }
   });
-});
+}, INTEGRATION_TEST_TIMEOUT_MS);

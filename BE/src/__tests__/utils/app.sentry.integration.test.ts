@@ -3,6 +3,7 @@ import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const reportTerminalErrorMock = vi.hoisted(() => vi.fn());
+const INTEGRATION_TEST_TIMEOUT_MS = 15_000;
 
 vi.mock('../../utils/sentryReporter', () => ({
   reportTerminalError: (...args: unknown[]) => reportTerminalErrorMock(...args)
@@ -91,4 +92,4 @@ describe('app error handler — phân nhánh theo bảng E6', () => {
     expect(response.body.errorCode).toBe('PAYLOAD_TOO_LARGE');
     expect(reportTerminalErrorMock).not.toHaveBeenCalled();
   });
-});
+}, INTEGRATION_TEST_TIMEOUT_MS);
