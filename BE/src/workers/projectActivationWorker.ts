@@ -2,8 +2,9 @@ import { getLogger } from '../config/logger';
 import { runWithWorkerContext } from '../config/requestContext';
 import { PROJECT_ACTIVATION_BATCH_LIMIT } from '../constants/projectListingPolicy';
 import { findPendingArbitrationsExpiredBeforeFromRepository } from '../repositories/projectArbitrationRepository';
-import { findProjectsReadyForActivationFromRepository } from '../repositories/projectRepository';
+import { findProjectsReadyForActivationFromRepository, findRejectedProjectsNeedingClosureFromRepository } from '../repositories/projectRepository';
 import { activateApprovedProject } from '../services/projectActivation.service';
+import { closeRejectedProject } from '../services/projectClosure.service';
 import { resolveArbitrationByTimeout } from '../services/projectArbitration.service';
 
 const logger = getLogger();
@@ -25,20 +26,25 @@ export function stopProjectActivationWorker(): void {
   intervalId = null;
 }
 
-/** Quét kích hoạt và timeout độc lập để lỗi một project không giết cả chu kỳ. */
+/** Quét kích hoạt, đóng on-chain và timeout độc lập để lỗi một project không giết cả chu kỳ. */
 export async function runProjectActivationCycle(): Promise<void> {
   if (isRunning) return;
   isRunning = true;
   try {
     await runWithWorkerContext('project-activation', async () => {
     const now = new Date();
-    const [readyProjects, overdueArbitrations] = await Promise.all([
+    const [readyProjects, projectsNeedingClosure, overdueArbitrations] = await Promise.all([
       findProjectsReadyForActivationFromRepository(now, PROJECT_ACTIVATION_BATCH_LIMIT),
+      findRejectedProjectsNeedingClosureFromRepository(now, PROJECT_ACTIVATION_BATCH_LIMIT),
       findPendingArbitrationsExpiredBeforeFromRepository(now, PROJECT_ACTIVATION_BATCH_LIMIT)
     ]);
     for (const project of readyProjects) {
       try { await activateApprovedProject(project.projectId, 'PENDING_ACTIVATION'); }
       catch (error) { logger.error('Project activation worker lỗi dự án.', { projectId: project.projectId, errorMessage: (error as Error).message }); }
+    }
+    for (const project of projectsNeedingClosure) {
+      try { await closeRejectedProject(project.projectId); }
+      catch (error) { logger.error('Project activation worker lỗi đóng dự án on-chain.', { projectId: project.projectId, errorMessage: (error as Error).message }); }
     }
     for (const arbitration of overdueArbitrations) {
       try { await resolveArbitrationByTimeout(arbitration.arbitrationId); }

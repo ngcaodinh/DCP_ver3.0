@@ -49,7 +49,13 @@ vi.mock('react-leaflet', () => ({
   }: {
     url: string;
     maxNativeZoom?: number;
-  }) => <div data-testid="tile-layer" data-url={url} data-max-native-zoom={maxNativeZoom} />,
+  }) => (
+    <div
+      data-testid={url.includes('administrative') ? 'administrative-tile-layer' : 'tile-layer'}
+      data-url={url}
+      data-max-native-zoom={maxNativeZoom}
+    />
+  ),
   Polygon: () => <div data-testid="polygon" />,
   Circle: ({ radius }: { radius: number }) => <div data-testid="circle" data-radius={radius} />,
   CircleMarker: ({
@@ -188,6 +194,8 @@ describe('GeofenceMap — fetch mode', () => {
       const tile = screen.getByTestId('tile-layer');
       expect(tile.getAttribute('data-url')).toBe('/api/tiles/{z}/{x}/{y}.png');
       expect(tile).toHaveAttribute('data-max-native-zoom', '19');
+      expect(screen.getByTestId('administrative-tile-layer'))
+        .toHaveAttribute('data-max-native-zoom', '16');
     });
   });
 });

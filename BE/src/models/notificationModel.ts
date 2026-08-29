@@ -14,6 +14,7 @@ export type NotificationType =
   | 'MANUAL_REVIEW_ESCALATION'
   | 'OVERRIDE_APPROVED'
   | 'SBT_MINT_FAILED'
+  | 'COMMITTEE_RESIGN_REQUIRED'
   | 'SYSTEM';
 
 /**

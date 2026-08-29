@@ -22,6 +22,10 @@ describe('sbtStatusProjectionModel', () => {
   beforeAll(async () => {
     mongoServer = await MongoMemoryServer.create();
     await mongoose.connect(mongoServer.getUri());
+    await Promise.all([
+      mongoose.model('SbtStatusProjectionEvent').syncIndexes(),
+      mongoose.model('SbtStatusProjectionCheckpoint').syncIndexes()
+    ]);
   });
 
   beforeEach(async () => {

@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ProjectRecord } from '../../models/projectModel';
 
-const { mockCreate, mockCreateRegistry, mockFindReport, mockFindProject, mockProcessPhotos } = vi.hoisted(() => ({ mockCreate: vi.fn(), mockCreateRegistry: vi.fn(), mockFindReport: vi.fn(), mockFindProject: vi.fn(), mockProcessPhotos: vi.fn() }));
+const { mockCleanupPhotos, mockCreate, mockCreateRegistry, mockFindReport, mockFindProject, mockProcessPhotos } = vi.hoisted(() => ({ mockCleanupPhotos: vi.fn(), mockCreate: vi.fn(), mockCreateRegistry: vi.fn(), mockFindReport: vi.fn(), mockFindProject: vi.fn(), mockProcessPhotos: vi.fn() }));
 vi.mock('../../repositories/auditorFieldReportRepository', () => ({ createAuditorFieldReportFromRepository: mockCreate, findAuditorFieldReportByProjectIdFromRepository: mockFindReport }));
 vi.mock('../../repositories/evidencePhotoRegistryRepository', () => ({ createEvidencePhotoRegistryRecordsFromRepository: mockCreateRegistry }));
 vi.mock('../../repositories/projectRepository', () => ({ findProjectById: mockFindProject }));
-vi.mock('../../services/evidencePhotoCapture.service', () => ({ processCapturedEvidencePhotos: mockProcessPhotos }));
+vi.mock('../../services/evidencePhotoCapture.service', () => ({ processCapturedEvidencePhotos: mockProcessPhotos, cleanupCapturedEvidencePhotos: mockCleanupPhotos }));
 vi.mock('../../utils/mongoTransaction', () => ({ runMongoTransaction: async (work: (session: undefined) => unknown) => work(undefined) }));
 import { submitAuditorFieldReport } from '../../services/auditorFieldReport.service';
 

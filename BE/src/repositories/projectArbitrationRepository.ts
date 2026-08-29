@@ -9,7 +9,7 @@ import {
 
 /** Tạo vụ xét xử và giữ atomic với lần khiếu nại đầu tiên khi có transaction. */
 export async function createProjectArbitrationFromRepository(
-  payload: Omit<ProjectArbitrationRecord, 'arbitrationId' | 'votes' | 'verdict' | 'abusiveChallengeUserIds' | 'resolvedAt' | 'createdAt' | 'updatedAt'>,
+  payload: Omit<ProjectArbitrationRecord, 'arbitrationId' | 'votes' | 'supersededVoteRounds' | 'verdict' | 'abusiveChallengeUserIds' | 'onChainDecisionTxHash' | 'onChainDecisionStatus' | 'onChainDecisionRecordedAt' | 'onChainDecisionAttemptCount' | 'onChainDecisionRecoveryCount' | 'onChainDecisionNextAttemptAt' | 'onChainDecisionLastError' | 'resolvedAt' | 'createdAt' | 'updatedAt'>,
   session?: ClientSession
 ): Promise<ProjectArbitrationRecord> {
   return createProjectArbitration(payload, session);

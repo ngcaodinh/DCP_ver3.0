@@ -57,17 +57,27 @@ const projectGeofenceSchema = new Schema<ProjectGeofenceRecord>(
   { timestamps: true }
 );
 
-const ProjectGeofenceMongoModel = mongoose.model<ProjectGeofenceRecord>(
-  'ProjectGeofence',
-  projectGeofenceSchema,
-  'project_geofences'
-);
+const ProjectGeofenceMongoModel = mongoose.models?.ProjectGeofence
+  || mongoose.model<ProjectGeofenceRecord>(
+    'ProjectGeofence',
+    projectGeofenceSchema,
+    'project_geofences'
+  );
 
 /** Lấy geofence của một dự án. */
 export async function findGeofenceByProjectId(
   projectId: string
 ): Promise<ProjectGeofenceRecord | null> {
   return ProjectGeofenceMongoModel.findOne({ projectId }).lean().exec();
+}
+
+/** Lấy geofence theo batch để hàng chờ Ủy ban không tạo N+1 truy vấn theo dự án. */
+export async function findGeofencesByProjectIds(projectIds: string[]): Promise<ProjectGeofenceRecord[]> {
+  const normalizedProjectIds = [...new Set(projectIds.map(projectId => String(projectId || '').trim()).filter(Boolean))];
+  if (!normalizedProjectIds.length) return [];
+  return ProjectGeofenceMongoModel.find({ projectId: { $in: normalizedProjectIds } })
+    .lean<ProjectGeofenceRecord[]>()
+    .exec();
 }
 
 /** Lấy tập projectId đã có geofence để hiển thị đúng điều kiện submit trong danh sách dự án. */

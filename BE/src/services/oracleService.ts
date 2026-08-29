@@ -9,6 +9,10 @@ import {
   findGeofenceByProjectId,
   type GpsCoordinate
 } from '../models/projectGeofenceModel';
+import { haversineDistance } from '../utils/geoDistance';
+
+// Giữ export tương thích cho test/consumer cũ; công thức sống ở utils để portal Ủy ban tái sử dụng.
+export { haversineDistance } from '../utils/geoDistance';
 import {
   createOracleVerificationResult,
   linkOverrideRequestToVerification,
@@ -97,30 +101,6 @@ export function extractExifGps(buffer: Buffer): GpsCoordinate | null {
     });
     return null;
   }
-}
-
-/**
- * Tính khoảng cách giữa 2 tọa độ GPS bằng công thức Haversine.
- * Sai số < 0.1% với khoảng cách < 10km (đủ cho bài toán geofence 2km max).
- * Bán kính Trái Đất: 6371000m (WGS-84 mean radius).
- *
- * @returns Khoảng cách tính bằng mét.
- */
-export function haversineDistance(a: GpsCoordinate, b: GpsCoordinate): number {
-  const R = 6_371_000;
-  const toRad = (deg: number) => (deg * Math.PI) / 180;
-
-  const dLat = toRad(b.lat - a.lat);
-  const dLng = toRad(b.lng - a.lng);
-
-  const sinDLat = Math.sin(dLat / 2);
-  const sinDLng = Math.sin(dLng / 2);
-
-  const h =
-    sinDLat * sinDLat +
-    Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * sinDLng * sinDLng;
-
-  return 2 * R * Math.asin(Math.sqrt(h));
 }
 
 /**

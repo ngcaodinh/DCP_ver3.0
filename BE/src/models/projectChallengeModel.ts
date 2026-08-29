@@ -88,3 +88,12 @@ export async function countProjectChallengesByProjectRound(projectIds: string[])
 export async function countProjectChallengesByUserSince(userId: string, from: Date): Promise<number> {
   return ProjectChallengeMongoModel.countDocuments({ challengerUserId: userId, submittedAt: { $gte: from } }).exec();
 }
+
+/** Liệt kê khiếu nại của chính auditor kèm ảnh minh chứng, dùng index { challengerUserId, submittedAt }. */
+export async function findProjectChallengesByChallengerUserId(userId: string, limitCount: number): Promise<ProjectChallengeRecord[]> {
+  return ProjectChallengeMongoModel.find({ challengerUserId: userId })
+    .sort({ submittedAt: -1 })
+    .limit(limitCount)
+    .lean<ProjectChallengeRecord[]>()
+    .exec();
+}

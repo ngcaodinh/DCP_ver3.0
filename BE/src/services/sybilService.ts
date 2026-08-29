@@ -14,6 +14,7 @@ import { findDonationsByDonorAddress, type DonationRecord } from '../models/dona
 import { recalculateRankingSnapshot } from './rankingService';
 import { invalidateRankingCache } from './rankingCacheService';
 import * as eventLoggerService from './event-logger.service';
+import { suspendAuditorRole } from './auditorRoleActivationService';
 
 const logger = getLogger();
 
@@ -358,6 +359,7 @@ async function buildSybilUserRecord(user: AuthUser): Promise<SybilUserRecord> {
   const sortedDonations = [...donationList].sort((a, b) =>
     new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
   );
+  const accountActivityDate = user.lastLoginAt || new Date(0);
 
   return {
     userId: user.id,
@@ -370,12 +372,12 @@ async function buildSybilUserRecord(user: AuthUser): Promise<SybilUserRecord> {
     totalRiskScore,
     donationCount: donationList.length,
     totalDonationAmount,
-    firstActivity: sortedDonations[0]?.timestamp.toISOString() || user.lastLoginAt.toISOString(),
-    lastActivity: sortedDonations[sortedDonations.length - 1]?.timestamp.toISOString() || user.lastLoginAt.toISOString(),
+    firstActivity: sortedDonations[0]?.timestamp.toISOString() || accountActivityDate.toISOString(),
+    lastActivity: sortedDonations[sortedDonations.length - 1]?.timestamp.toISOString() || accountActivityDate.toISOString(),
     ipAddresses: Array.from(ipAddressSet),
     deviceFingerprint: null,
     riskFactors,
-    createdAt: user.lastLoginAt.toISOString(),
+    createdAt: accountActivityDate.toISOString(),
     reviewedAt: null,
     reviewedBy: null,
     reviewNote: null
@@ -638,6 +640,7 @@ export async function getSybilUserDetail(userId: string): Promise<SybilUserDetai
     ipAddress: d.correlationId.startsWith('ip:') ? d.correlationId.replace('ip:', '') : 'N/A',
     isAnonymous: d.isAnonymous
   }));
+  const accountActivityDate = user.lastLoginAt || new Date(0);
 
   return {
     userId: user.id,
@@ -650,13 +653,13 @@ export async function getSybilUserDetail(userId: string): Promise<SybilUserDetai
     totalRiskScore,
     donationCount: donationList.length,
     totalDonationAmount,
-    firstActivity: sortedDonations[0]?.timestamp.toISOString() || user.lastLoginAt.toISOString(),
-    lastActivity: sortedDonations[sortedDonations.length - 1]?.timestamp.toISOString() || user.lastLoginAt.toISOString(),
+    firstActivity: sortedDonations[0]?.timestamp.toISOString() || accountActivityDate.toISOString(),
+    lastActivity: sortedDonations[sortedDonations.length - 1]?.timestamp.toISOString() || accountActivityDate.toISOString(),
     ipAddresses: Array.from(ipAddressSet),
     deviceFingerprint: null,
     riskFactors,
     donationHistory,
-    createdAt: user.lastLoginAt.toISOString(),
+    createdAt: accountActivityDate.toISOString(),
     reviewedAt: null,
     reviewedBy: null,
     reviewNote: null
@@ -713,6 +716,17 @@ export async function toggleSybilStatus(payload: SybilTogglePayload): Promise<Sy
     isSybil: newIsSybilValue
   };
   await updateUser(updatedUser);
+
+  if (action === 'mark' && user.role === 'auditor') {
+    try {
+      await suspendAuditorRole(user.id, 'SYBIL_DETECTED');
+    } catch (error) {
+      logger.error('Khong the thu quyen Auditor sau khi danh dau Sybil.', {
+        userId: user.id,
+        errorMessage: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
 
   // Ghi audit log ngay sau khi cập nhật
   const auditLogEntry: SybilAuditLogEntry = {

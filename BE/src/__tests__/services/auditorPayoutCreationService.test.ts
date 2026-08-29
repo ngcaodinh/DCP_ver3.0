@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { mockCreatePayout, mockEnqueue, mockFindAccount, mockFindById, mockFindBySource, mockLinkWithdrawal, mockPromoteLock, mockWarn } = vi.hoisted(() => ({
+const { mockCreatePayout, mockEnqueue, mockFindAccount, mockFindById, mockFindBySource, mockLinkWithdrawal, mockPromoteLock, mockAcquireRewardLock, mockReleaseLock, mockClaimableReward, mockHasWalletBalance, mockWarn } = vi.hoisted(() => ({
   mockCreatePayout: vi.fn(),
   mockEnqueue: vi.fn(),
   mockFindAccount: vi.fn(),
@@ -8,6 +8,10 @@ const { mockCreatePayout, mockEnqueue, mockFindAccount, mockFindById, mockFindBy
   mockFindBySource: vi.fn(),
   mockLinkWithdrawal: vi.fn(),
   mockPromoteLock: vi.fn(),
+  mockAcquireRewardLock: vi.fn(),
+  mockReleaseLock: vi.fn(),
+  mockClaimableReward: vi.fn(),
+  mockHasWalletBalance: vi.fn(),
   mockWarn: vi.fn()
 }));
 
@@ -19,10 +23,16 @@ vi.mock('../../models/auditorPayoutModel', () => ({
   linkAuditorPayoutToOnchainWithdrawal: mockLinkWithdrawal,
   findAuditorPayoutBySource: mockFindBySource
 }));
-vi.mock('../../models/auditorStakeGuardModel', () => ({ promoteAuditorWithdrawalLockToPayout: mockPromoteLock }));
+vi.mock('../../models/auditorStakeGuardModel', () => ({
+  acquireAuditorRewardPayoutLock: mockAcquireRewardLock,
+  promoteAuditorWithdrawalLockToPayout: mockPromoteLock,
+  releaseAuditorWalletLock: mockReleaseLock
+}));
 vi.mock('../../queues/auditorPayoutQueue', () => ({ enqueueAuditorPayout: mockEnqueue }));
+vi.mock('../../services/auditorRewardService', () => ({ getAuditorClaimableRewardVnd: mockClaimableReward }));
+vi.mock('../../services/auditorPayoutService', () => ({ hasAuditorWalletBalance: mockHasWalletBalance }));
 
-import { confirmStakeWithdrawalPayout, createStakeWithdrawalPayout } from '../../services/auditorPayoutCreationService';
+import { confirmStakeWithdrawalPayout, createAuditorRewardWithdrawalPayout, createStakeWithdrawalPayout } from '../../services/auditorPayoutCreationService';
 
 describe('stake withdrawal payout creation', () => {
   beforeEach(() => {
@@ -33,6 +43,9 @@ describe('stake withdrawal payout creation', () => {
     });
     mockCreatePayout.mockImplementation(async (payout: unknown) => payout);
     mockEnqueue.mockResolvedValue(true);
+    mockAcquireRewardLock.mockResolvedValue({ walletLock: 'PAYOUT_IN_FLIGHT' });
+    mockClaimableReward.mockResolvedValue(3_000_000);
+    mockHasWalletBalance.mockResolvedValue(true);
   });
 
   it('creates one snapshot payout with the configured user fee from a confirmed withdrawal', async () => {
@@ -93,5 +106,33 @@ describe('stake withdrawal payout creation', () => {
 
     expect(mockPromoteLock).toHaveBeenCalledWith('auditor-1', 'payout-1');
     expect(mockEnqueue).toHaveBeenCalledWith('payout-1');
+  });
+
+  it('locks and enqueues a reward payout immediately after validating its claimable balance', async () => {
+    const payout = await createAuditorRewardWithdrawalPayout({ auditorUserId: 'auditor-1', amountVnd: 3_000_000 });
+
+    expect(mockAcquireRewardLock).toHaveBeenCalledWith('auditor-1', expect.any(String));
+    expect(mockCreatePayout).toHaveBeenCalledWith(expect.objectContaining({
+      payoutType: 'REWARD', amountVnd: 3_000_000, netAmountVnd: 2_995_000, onchainTxHash: null
+    }));
+    expect(mockEnqueue).toHaveBeenCalledWith(payout.payoutId);
+  });
+
+  it('rejects a reward withdrawal above its credited and unreserved balance before taking a lock', async () => {
+    mockClaimableReward.mockResolvedValue(100_000);
+
+    await expect(createAuditorRewardWithdrawalPayout({ auditorUserId: 'auditor-1', amountVnd: 100_001 }))
+      .rejects.toMatchObject({ errorCode: 'CONFLICT' });
+
+    expect(mockAcquireRewardLock).not.toHaveBeenCalled();
+  });
+
+  it('rejects a reward payout when DCT has already left the Auditor wallet before taking a lock', async () => {
+    mockHasWalletBalance.mockResolvedValue(false);
+
+    await expect(createAuditorRewardWithdrawalPayout({ auditorUserId: 'auditor-1', amountVnd: 3_000_000 }))
+      .rejects.toMatchObject({ errorCode: 'CONFLICT' });
+
+    expect(mockAcquireRewardLock).not.toHaveBeenCalled();
   });
 });

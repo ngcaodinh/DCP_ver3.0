@@ -13,7 +13,7 @@ export default function robots(): MetadataRoute.Robots {
     rules: [
       {
         userAgent: '*',
-        allow: ['/', '/donations', '/organizations', '/impact-gallery'],
+        allow: ['/', '/donations', '/organizations', '/impact-gallery', '/pending-projects'],
         disallow: ['/admin', '/login', '/register', '/unauthorized', '/deposit', '/donors', '/regulatory-bodies', '/feedback', '/foundation-kyc']
       }
     ],

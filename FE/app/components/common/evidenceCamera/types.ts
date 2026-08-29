@@ -1,0 +1,2 @@
+export interface CapturedEvidencePhoto { localId: string; contentBase64: string; mimeType: 'image/jpeg'; fileName: string; previewObjectUrl: string; gps: { latitude: number; longitude: number }; accuracyMeters: number; capturedAtClient: string; geolocationTimestamp: string; lowAccuracyOverride: boolean; overrideUnlockedAfterMs: number | null; lowAccuracyReason: string | null; }
+export type GeolocationGateState = 'IDLE' | 'UNSUPPORTED' | 'PERMISSION_DENIED' | 'CAPTURE_ERROR' | 'ACQUIRING' | 'LOW_ACCURACY' | 'READY' | 'OVERRIDE_AVAILABLE';

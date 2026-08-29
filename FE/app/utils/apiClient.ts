@@ -41,6 +41,20 @@ export function buildApiUrl(pathname: string): string {
   return `${normalizedBaseUrl}${normalizedPathname}`;
 }
 
+/** Tạo URL same-origin cho client API được Next rewrite, tránh mất Authorization khi gọi khác origin. */
+export function buildSameOriginApiUrl(pathname: string): string {
+  const normalizedPathname = pathname.startsWith("/")
+    ? pathname
+    : `/${pathname}`;
+
+  const isApiPath = normalizedPathname === "/api" || normalizedPathname.startsWith("/api/");
+  if (typeof window !== "undefined" && isApiPath) {
+    return normalizedPathname;
+  }
+
+  return buildApiUrl(normalizedPathname);
+}
+
 /** Hàm parse response JSON an toàn. Mục đích: tránh lỗi runtime khi API trả body rỗng hoặc sai định dạng. */
 export async function parseJsonSafely(response: Response): Promise<unknown> {
   const responseText = await response.text();
@@ -67,12 +81,16 @@ export async function fetchApi<T>(
   init?: RequestInit,
   options?: { skipBodyValidation?: boolean },
 ): Promise<ApiSuccessResponse<T>> {
+  // Dùng Headers thay vì spread object để không làm mất Authorization khi caller
+  // truyền Headers instance hoặc tuple HeadersInit (thường xảy ra sau refresh token).
+  const requestHeaders = new Headers(init?.headers);
+  if (!requestHeaders.has("Content-Type")) {
+    requestHeaders.set("Content-Type", "application/json");
+  }
+
   const response = await fetch(input, {
     ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(init?.headers || {}),
-    },
+    headers: requestHeaders,
   });
 
   const responseBody = await parseJsonSafely(response);

@@ -38,6 +38,7 @@ export async function applyAuditorPenalty(input: {
     txHash: null,
     reasonCode,
     status: 'PENDING',
+    payableAt: null,
     createdAt: new Date()
   };
   if (!await claimAuditorLedgerEntry(ledgerEntry)) {
@@ -63,6 +64,6 @@ export async function applyAuditorPenalty(input: {
   if (penaltyDebtVnd > 0 && !await increaseAuditorPenaltyDebt(input.auditorUserId, penaltyDebtVnd)) {
     throw new Error('Không thể ghi nợ phạt Auditor sau khi xử lý on-chain.');
   }
-  await completeAuditorLedgerEntry(input.fieldReportId, 'PENALTY', txHash);
+  await completeAuditorLedgerEntry(input.fieldReportId, 'PENALTY', null, txHash);
   return { applied: true, collectedOnChainVnd: Number(collectedOnChain), penaltyDebtVnd, txHash };
 }

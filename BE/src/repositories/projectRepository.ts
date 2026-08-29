@@ -1,18 +1,21 @@
 import { type ClientSession } from 'mongoose';
 import {
-  countActiveProjectsByOrganizationId,
   createProjectRecord,
   findProjectByOrganizationIdAndName,
   findProjectByProjectId,
   findProjectsByOrganizationId,
   findProjectsByStatus,
+  findProjectsByStatusCursor,
   findProjectsByStatusList,
   findPendingActivationProjectsForPublic,
   findProjectsReadyForActivation,
+  findRejectedProjectsNeedingClosure,
   claimProjectForActivation,
+  claimProjectForClosure,
   findPublicSupportProjectByProjectId,
   findPublicSupportProjects,
   findAllProjectsByProjectIdList,
+  findProjectStatusesByProjectIdList,
   ProjectEvidenceFileRecord,
   ProjectRecord,
   ProjectStatus,
@@ -62,9 +65,15 @@ export async function findProjectsByIdList(projectIdList: string[]): Promise<Pro
   return findAllProjectsByProjectIdList(projectIdList);
 }
 
-/** Hàm repository đếm số dự án ACTIVE theo tổ chức. Mục đích: enforce giới hạn 5 dự án ACTIVE. */
-export async function countActiveProjectsByOrganizationIdFromRepository(organizationId: string): Promise<number> {
-  return countActiveProjectsByOrganizationId(organizationId);
+/**
+ * Hàm repository lọc dự án theo danh sách id và trạng thái, chỉ lấy projectId/name/status.
+ * Mục đích: xét ràng buộc thoát vai trò Auditor mà không dính bộ lọc deadline của findProjectsByIdList.
+ */
+export async function findProjectStatusesByIdListFromRepository(
+  projectIdList: string[],
+  statusList: ProjectStatus[]
+): Promise<Array<Pick<ProjectRecord, 'projectId' | 'name' | 'status'>>> {
+  return findProjectStatusesByProjectIdList(projectIdList, statusList);
 }
 
 /** Hàm repository tạo mới dự án. Mục đích: chuẩn hóa payload trước khi gọi model MongoDB. */
@@ -80,6 +89,15 @@ export async function findProjectsByOrganizationIdFromRepository(organizationId:
 /** Hàm repository lấy danh sách dự án theo trạng thái. Mục đích: tách data-access cho màn hình duyệt dự án mới. */
 export async function findProjectsByStatusFromRepository(status: ProjectStatus): Promise<ProjectRecord[]> {
   return findProjectsByStatus(status);
+}
+
+/** Lấy trang project theo cursor, giữ repository làm boundary cho dashboard Ủy ban. */
+export async function findProjectsByStatusCursorFromRepository(
+  status: ProjectStatus,
+  cursor: string | null,
+  limitCount: number
+): Promise<Array<Pick<ProjectRecord, 'projectId' | 'name' | 'organizationId' | 'milestonePlan'>>> {
+  return findProjectsByStatusCursor(status, cursor, limitCount);
 }
 
 /** Hàm repository lấy queue review kèm dự án đã xử lý để Regulatory có lịch sử đầy đủ. */
@@ -107,9 +125,19 @@ export async function findProjectsReadyForActivationFromRepository(now: Date, li
   return findProjectsReadyForActivation(now, limitCount);
 }
 
+/** Lấy batch dự án cần đóng on-chain, chỉ trả record đã được giới hạn từ model. */
+export async function findRejectedProjectsNeedingClosureFromRepository(now: Date, limitCount: number): Promise<ProjectRecord[]> {
+  return findRejectedProjectsNeedingClosure(now, limitCount);
+}
+
 /** Claim dự án nguyên tử để chỉ một instance sở hữu lần kích hoạt. */
 export async function claimProjectForActivationFromRepository(projectId: string, expectedStatus: ProjectStatus, staleClaimCutoff: Date): Promise<ProjectRecord | null> {
   return claimProjectForActivation(projectId, expectedStatus, staleClaimCutoff);
+}
+
+/** Claim duy nhất một dự án cần đóng on-chain để retry nhiều instance vẫn an toàn. */
+export async function claimProjectForClosureFromRepository(projectId: string, staleClaimCutoff: Date): Promise<ProjectRecord | null> {
+  return claimProjectForClosure(projectId, staleClaimCutoff);
 }
 
 /** Đổi trạng thái dự án có điều kiện để transaction khiếu nại không đè worker. */

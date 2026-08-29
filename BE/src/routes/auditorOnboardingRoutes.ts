@@ -1,12 +1,16 @@
 import { Router } from 'express';
 import {
   handleExecuteAuditorStake,
+  handleCancelAuditorRewardPayout,
+  handleGetAuditorEarnings,
   handleGetAuditorOnboardingStatus,
+  handleGetAuditorStakeOverview,
   handleRegisterAuditorIntent,
   handleResumeAuditorIntent,
   handleRequestAuditorUnstake,
   handleRetryAuditorPayoutBurn,
   handleUpdateAuditorPayoutAccount,
+  handleWithdrawAuditorReward,
   handleWithdrawAuditorStake
 } from '../controllers/auditorOnboardingController';
 import { createAuthenticationMiddleware, type AuthenticatedRequest } from '../middleware/authenticationMiddleware';
@@ -28,8 +32,12 @@ export function createAuditorOnboardingRoutes(): Router {
   router.post('/stake', attachRequestMetadata(), authentication, userRateLimit('auditor-onboarding:stake', 10, 60 * 60 * 1_000), handleExecuteAuditorStake);
   router.post('/unstake', attachRequestMetadata(), authentication, userRateLimit('auditor-onboarding:unstake', 10, 60 * 60 * 1_000), handleRequestAuditorUnstake);
   router.post('/withdraw', attachRequestMetadata(), authentication, userRateLimit('auditor-onboarding:withdraw', 10, 60 * 60 * 1_000), handleWithdrawAuditorStake);
+  router.post('/reward/withdraw', attachRequestMetadata(), authentication, userRateLimit('auditor-onboarding:reward-withdraw', 10, 60 * 60 * 1_000), handleWithdrawAuditorReward);
   router.post('/payouts/:payoutId/retry-burn', attachRequestMetadata(), authentication, freshAdminAuthorization, userRateLimit('auditor-onboarding:retry-burn', 10, 60 * 60 * 1_000), handleRetryAuditorPayoutBurn);
+  router.post('/payouts/:payoutId/cancel-reward', attachRequestMetadata(), authentication, freshAdminAuthorization, userRateLimit('auditor-onboarding:cancel-reward-payout', 10, 60 * 60 * 1_000), handleCancelAuditorRewardPayout);
   router.patch('/payout-account', attachRequestMetadata(), authentication, userRateLimit('auditor-onboarding:payout-account', 10, 60 * 60 * 1_000), handleUpdateAuditorPayoutAccount);
+  router.get('/stake-overview', attachRequestMetadata(), authentication, userRateLimit('auditor-onboarding:stake-overview', 30, 60_000), handleGetAuditorStakeOverview);
+  router.get('/earnings', attachRequestMetadata(), authentication, userRateLimit('auditor-onboarding:earnings', 30, 60_000), handleGetAuditorEarnings);
   router.get('/status/:intentId', attachRequestMetadata(), authentication, userRateLimit('auditor-onboarding:status', 60, 60 * 1_000), handleGetAuditorOnboardingStatus);
   return router;
 }

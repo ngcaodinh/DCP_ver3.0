@@ -8,6 +8,7 @@ import { readAuthSession } from "../../../utils/authSession";
 
 import { getPageTitle } from "./helpers";
 import IpfsEvidencePreviewCard from "../../common/IpfsEvidencePreviewCard";
+import { GeofenceMapLazy } from "@/app/components/oracle/GeofenceMapLazy";
 
 import type { PageKey, UrgentRequestItem } from "./types";
 
@@ -20,6 +21,12 @@ type NonDashboardPanelProps = {
   selectedPageKey: PageKey;
 
   onOpenDisbursementRequest?: (urgentRequestItem: UrgentRequestItem) => void;
+
+  onPushToast?: (
+    titleText: string,
+    bodyText: string,
+    tone: "success" | "error" | "info",
+  ) => void;
 };
 
 type VerifiedAccessTokenProps = {
@@ -978,13 +985,15 @@ type ProjectReviewItem = {
 
   submittedAt: string | null;
 
-  status: "PENDING_APPROVAL" | "ACTIVE" | "REJECTED";
+  status: "PENDING_APPROVAL" | "PENDING_ACTIVATION" | "DISPUTED" | "ACTIVE" | "REJECTED";
 
   reviewedAt: string | null;
 
   reviewedBy: string | null;
 
   rejectionReason: string | null;
+
+  milestonePlan: ProjectMilestonePlanItem[];
 
   evidenceCids: string[];
 
@@ -997,17 +1006,43 @@ type ProjectReviewItem = {
   }>;
 };
 
+type ProjectMilestonePlanItem = {
+  milestoneIndex: number;
+
+  milestoneKey: string;
+
+  percentage: number;
+
+  description: string;
+};
+
+const MILESTONE_LABEL_BY_KEY: Record<string, string> = {
+  M1_ADVANCE: "M1 — Tạm ứng",
+  M2_CONSTRUCTION: "M2 — Thi công",
+  M3_HANDOVER: "M3 — Nghiệm thu và bàn giao",
+};
+
+const PROJECT_REVIEW_STATUS_PRIORITY: Record<ProjectReviewItem["status"], number> = {
+  PENDING_APPROVAL: 0,
+  PENDING_ACTIVATION: 1,
+  DISPUTED: 2,
+  REJECTED: 3,
+  ACTIVE: 4,
+};
+
 /** Hàm kiểm tra trạng thái dự án có thuộc lịch sử review mà Regulatory được phép xem hay không. */
 function isProjectReviewStatus(
   value: unknown,
 ): value is ProjectReviewItem["status"] {
-  return value === "PENDING_APPROVAL" || value === "ACTIVE" || value === "REJECTED";
+  return value === "PENDING_APPROVAL" || value === "PENDING_ACTIVATION" || value === "DISPUTED" || value === "ACTIVE" || value === "REJECTED";
 }
 
 /** Hàm chuyển trạng thái review dự án sang nhãn tiếng Việt để hiển thị nhất quán. */
 function getProjectReviewStatusLabel(status: ProjectReviewItem["status"]): string {
   if (status === "ACTIVE") return "Đã chấp nhận";
   if (status === "REJECTED") return "Đã từ chối";
+  if (status === "PENDING_ACTIVATION") return "Đang niêm yết 48 giờ";
+  if (status === "DISPUTED") return "Đang tranh chấp";
   return "Chờ phê duyệt";
 }
 
@@ -1015,7 +1050,64 @@ function getProjectReviewStatusLabel(status: ProjectReviewItem["status"]): strin
 function getProjectReviewStatusClassName(status: ProjectReviewItem["status"]): string {
   if (status === "ACTIVE") return "border-emerald-200 bg-emerald-100 text-emerald-700";
   if (status === "REJECTED") return "border-red-200 bg-red-100 text-red-700";
+  if (status === "PENDING_ACTIVATION") return "border-violet-200 bg-violet-100 text-violet-700";
+  if (status === "DISPUTED") return "border-red-200 bg-red-100 text-red-700";
   return "border-amber-200 bg-amber-100 text-amber-700";
+}
+
+/** Sắp xếp danh sách review theo mức độ cần xử lý để dự án chờ luôn xuất hiện trước lịch sử đã xử lý. */
+function sortProjectReviewItems(projectItems: ProjectReviewItem[]): ProjectReviewItem[] {
+  return projectItems
+    .map((projectItem, originalIndex) => ({ projectItem, originalIndex }))
+    .sort((leftItem, rightItem) => {
+      const priorityDifference =
+        PROJECT_REVIEW_STATUS_PRIORITY[leftItem.projectItem.status] -
+        PROJECT_REVIEW_STATUS_PRIORITY[rightItem.projectItem.status];
+
+      return priorityDifference || leftItem.originalIndex - rightItem.originalIndex;
+    })
+    .map(({ projectItem }) => projectItem);
+}
+
+/** Chuẩn hóa toàn bộ cột mốc từ API để reviewer luôn thấy dữ liệu hợp lệ, đúng thứ tự và không lỗi khi thiếu field. */
+function normalizeProjectMilestonePlan(rawValue: unknown): ProjectMilestonePlanItem[] {
+  if (!Array.isArray(rawValue)) {
+    return [];
+  }
+
+  return rawValue
+    .map((rawMilestone): ProjectMilestonePlanItem | null => {
+      if (!rawMilestone || typeof rawMilestone !== "object") {
+        return null;
+      }
+
+      const milestoneRecord = rawMilestone as Record<string, unknown>;
+      const milestoneIndex = Number(milestoneRecord.milestoneIndex);
+      const percentage = Number(milestoneRecord.percentage);
+      const milestoneKey = typeof milestoneRecord.milestoneKey === "string"
+        ? milestoneRecord.milestoneKey.trim()
+        : "";
+      const description = typeof milestoneRecord.description === "string"
+        ? milestoneRecord.description.trim()
+        : "";
+
+      if (
+        !Number.isInteger(milestoneIndex) ||
+        milestoneIndex < 1 ||
+        milestoneIndex > 3 ||
+        !Number.isFinite(percentage) ||
+        percentage < 0 ||
+        percentage > 100 ||
+        milestoneKey.length === 0 ||
+        description.length === 0
+      ) {
+        return null;
+      }
+
+      return { milestoneIndex, milestoneKey, percentage, description };
+    })
+    .filter((milestone): milestone is ProjectMilestonePlanItem => milestone !== null)
+    .sort((leftMilestone, rightMilestone) => leftMilestone.milestoneIndex - rightMilestone.milestoneIndex);
 }
 
 /** Hàm chuẩn hóa dữ liệu lịch sử review dự án từ API để tránh lỗi khi backend trả thiếu trường. */
@@ -1081,6 +1173,8 @@ function normalizeProjectReviewItem(
         ? rawProject.rejectionReason
         : null,
 
+    milestonePlan: normalizeProjectMilestonePlan(rawProject.milestonePlan),
+
     evidenceCids: Array.isArray(rawProject.evidenceCids)
       ? rawProject.evidenceCids.filter(
           (cidItem): cidItem is string => typeof cidItem === "string",
@@ -1104,14 +1198,10 @@ function normalizeProjectReviewItem(
 
 /** Hàm hiển thị panel Duyệt dự án. Mục đích: tải queue và lịch sử để chỉ cho phép xử lý dự án đang chờ duyệt. */
 
-function ProjectReviewPanel() {
+function ProjectReviewPanel({ onPushToast }: Pick<NonDashboardPanelProps, "onPushToast">) {
   const [isLoading, setIsLoading] = useState(false);
 
   const [isSubmittingReview, setIsSubmittingReview] = useState(false);
-
-  const [errorMessage, setErrorMessage] = useState("");
-
-  const [successMessage, setSuccessMessage] = useState("");
 
   const [projectReviewList, setProjectReviewList] = useState<
     ProjectReviewItem[]
@@ -1140,14 +1230,16 @@ function ProjectReviewPanel() {
     const authSession = readAuthSession();
 
     if (!authSession.accessToken) {
-      setErrorMessage("Bạn cần đăng nhập trước khi duyệt dự án.");
+      onPushToast?.(
+        "Không thể duyệt dự án",
+        "Bạn cần đăng nhập trước khi duyệt dự án.",
+        "error",
+      );
 
       return;
     }
 
     setIsLoading(true);
-
-    setErrorMessage("");
 
     try {
       const response = await fetchApi<ProjectReviewItem[]>(
@@ -1159,14 +1251,14 @@ function ProjectReviewPanel() {
         },
       );
 
-      const normalizedProjectList = (response.data || [])
+      const normalizedProjectList = sortProjectReviewItems((response.data || [])
 
         .map(normalizeProjectReviewItem)
 
         .filter(
           (projectItem): projectItem is ProjectReviewItem =>
             projectItem !== null,
-        );
+        ));
 
       setProjectReviewList(normalizedProjectList);
 
@@ -1188,13 +1280,15 @@ function ProjectReviewPanel() {
     } catch (error) {
       const apiError = error as ApiErrorResponse;
 
-      setErrorMessage(
+      onPushToast?.(
+        "Không thể tải lịch sử duyệt",
         apiError.message || "Không thể tải lịch sử review dự án.",
+        "error",
       );
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [onPushToast]);
 
   /** Hàm gửi hành động review dự án lên backend. Mục đích: cập nhật trạng thái APPROVE/REJECT trực tiếp từ màn duyệt dự án mới. */
 
@@ -1205,7 +1299,11 @@ function ProjectReviewPanel() {
       }
 
       if (action === "REJECT" && rejectReason.trim().length === 0) {
-        setErrorMessage("Vui lòng nhập lý do từ chối trước khi reject dự án.");
+        onPushToast?.(
+          "Thiếu lý do từ chối",
+          "Vui lòng nhập lý do từ chối trước khi reject dự án.",
+          "info",
+        );
 
         return;
       }
@@ -1213,19 +1311,19 @@ function ProjectReviewPanel() {
       const authSession = readAuthSession();
 
       if (!authSession.accessToken) {
-        setErrorMessage("Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.");
+        onPushToast?.(
+          "Phiên đăng nhập đã hết hạn",
+          "Vui lòng đăng nhập lại để duyệt dự án.",
+          "error",
+        );
 
         return;
       }
 
       setIsSubmittingReview(true);
 
-      setErrorMessage("");
-
-      setSuccessMessage("");
-
       try {
-        await fetchApi<ProjectReviewItem>(buildApiUrl("/projects/review"), {
+        const reviewResponse = await fetchApi<ProjectReviewItem & { warning?: string | null }>(buildApiUrl("/projects/review"), {
           method: "POST",
 
           headers: { Authorization: `Bearer ${authSession.accessToken}` },
@@ -1244,24 +1342,28 @@ function ProjectReviewPanel() {
 
         setIsRejectFormVisible(false);
 
-        setSuccessMessage(
+        onPushToast?.(
+          action === "APPROVE" ? "Duyệt dự án thành công" : "Đã từ chối dự án",
           action === "APPROVE"
-            ? "Phê duyệt dự án thành công."
+            ? `Đã niêm yết công khai — tự động mở quỹ sau 48 giờ nếu không có khiếu nại.${reviewResponse.data.warning === "NO_ACTIVE_AUDITOR" ? " Cảnh báo: chưa có Kiểm toán viên giám sát cửa sổ khiếu nại." : ""}`
             : "Từ chối dự án thành công.",
+          action === "APPROVE" ? "success" : "info",
         );
 
         await loadProjectReviewHistory();
       } catch (error) {
         const apiError = error as ApiErrorResponse;
 
-        setErrorMessage(
+        onPushToast?.(
+          "Không thể cập nhật kết quả duyệt",
           apiError.message || "Không thể cập nhật kết quả duyệt dự án.",
+          "error",
         );
       } finally {
         setIsSubmittingReview(false);
       }
     },
-    [loadProjectReviewHistory, rejectReason, selectedProject],
+    [loadProjectReviewHistory, onPushToast, rejectReason, selectedProject],
   );
 
   /** Hàm mở modal xác nhận trước khi phê duyệt dự án để tránh thao tác nhầm. */
@@ -1270,10 +1372,6 @@ function ProjectReviewPanel() {
     if (!isSelectedProjectPendingApproval) {
       return;
     }
-
-    setErrorMessage("");
-
-    setSuccessMessage("");
 
     setIsApproveConfirmModalVisible(true);
   };
@@ -1312,18 +1410,6 @@ function ProjectReviewPanel() {
         </p>
       </div>
 
-      {errorMessage ? (
-        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-xs text-red-700">
-          {errorMessage}
-        </div>
-      ) : null}
-
-      {successMessage ? (
-        <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-xs text-emerald-700">
-          {successMessage}
-        </div>
-      ) : null}
-
       <div className="grid gap-4 overflow-hidden rounded-xl border border-emerald-900/15 bg-white p-4 lg:grid-cols-[320px_1fr]">
         <div className="max-h-[620px] overflow-y-auto border-r border-slate-100 pr-3">
           {isLoading ? (
@@ -1341,6 +1427,7 @@ function ProjectReviewPanel() {
           {projectReviewList.map((projectItem) => (
             <button
               key={projectItem.projectId}
+              data-testid={`project-review-list-item-${projectItem.projectId}`}
               type="button"
               onClick={() => { setSelectedProjectId(projectItem.projectId); setIsRejectFormVisible(false); setRejectReason(""); }}
               className={`mb-2 w-full rounded-lg border px-3 py-2 text-left ${selectedProjectId === projectItem.projectId ? "border-cyan-500 bg-cyan-50" : "border-slate-200 bg-white"}`}
@@ -1432,6 +1519,73 @@ function ProjectReviewPanel() {
                     {selectedProject.rejectionReason}
                   </p>
                 ) : null}
+              </div>
+
+              <div
+                data-testid="project-review-milestone-plan"
+                className="rounded-lg border border-slate-200 p-3"
+              >
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-semibold text-slate-800">
+                      Kế hoạch cột mốc giải ngân
+                    </p>
+                    <p className="mt-1 text-[11px] text-slate-500">
+                      Toàn bộ lộ trình sử dụng vốn theo từng giai đoạn của dự án.
+                    </p>
+                  </div>
+                  {selectedProject.milestonePlan.length > 0 ? (
+                    <span className="shrink-0 rounded-full bg-cyan-50 px-2 py-1 text-[10px] font-semibold text-cyan-700">
+                      {selectedProject.milestonePlan.reduce(
+                        (totalPercentage, milestone) => totalPercentage + milestone.percentage,
+                        0,
+                      )}%
+                    </span>
+                  ) : null}
+                </div>
+
+                {selectedProject.milestonePlan.length === 0 ? (
+                  <p data-testid="project-review-milestone-plan-empty" className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+                    Dự án chưa có kế hoạch cột mốc giải ngân hợp lệ.
+                  </p>
+                ) : (
+                  <ol className="space-y-2">
+                    {selectedProject.milestonePlan.map((milestone) => (
+                      <li
+                        key={`${selectedProject.projectId}-${milestone.milestoneIndex}-${milestone.milestoneKey}`}
+                        data-testid={`project-review-milestone-${milestone.milestoneIndex}`}
+                        className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <p className="text-xs font-semibold text-slate-800">
+                            {MILESTONE_LABEL_BY_KEY[milestone.milestoneKey] || `M${milestone.milestoneIndex} — ${milestone.milestoneKey}`}
+                          </p>
+                          <span className="shrink-0 text-xs font-bold text-cyan-700">
+                            {milestone.percentage}%
+                          </span>
+                        </div>
+                        <p className="mt-1 text-xs leading-5 text-slate-600">
+                          {milestone.description}
+                        </p>
+                      </li>
+                    ))}
+                  </ol>
+                )}
+              </div>
+
+              <div
+                data-testid="project-review-geofence"
+                className="rounded-lg border border-slate-200 p-3"
+              >
+                <div className="mb-2">
+                  <p className="text-xs font-semibold text-slate-800">
+                    Vùng địa lý dự án
+                  </p>
+                  <p className="mt-1 text-[11px] text-slate-500">
+                    Bản đồ chỉ xem để đối chiếu ranh giới trước khi duyệt.
+                  </p>
+                </div>
+                <GeofenceMapLazy projectId={selectedProject.projectId} />
               </div>
 
               <div className="rounded-lg border border-slate-200 p-3">
@@ -2693,11 +2847,12 @@ export default function NonDashboardPanel({
   accessToken,
   selectedPageKey,
   onOpenDisbursementRequest,
+  onPushToast,
 }: NonDashboardPanelProps) {
   const sectionTitle = getPageTitle(selectedPageKey);
 
   if (selectedPageKey === "projectReview") {
-    return <ProjectReviewPanel />;
+    return <ProjectReviewPanel onPushToast={onPushToast} />;
   }
 
   if (selectedPageKey === "bankAccountApproval") {

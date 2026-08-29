@@ -88,11 +88,30 @@ export async function findAuditorPayoutByOnchainTxHash(onchainTxHash: string): P
 
 /** Đọc số lượng hữu hạn payout chưa enqueue để worker phục hồi sau Redis hoặc process restart. */
 export async function findPendingAuditorPayouts(limit: number): Promise<AuditorPayout[]> {
-  return AuditorPayoutModel.find({ status: 'PENDING', onchainTxHash: { $ne: null } })
+  return AuditorPayoutModel.find({
+    status: 'PENDING',
+    $or: [{ onchainTxHash: { $ne: null } }, { payoutType: 'REWARD' }]
+  })
     .sort({ createdAt: 1 })
     .limit(limit)
     .lean<AuditorPayout[]>()
     .exec();
+}
+
+/** Lấy toàn bộ payout thưởng chưa hủy để tính chính xác số dư thưởng còn có thể rút. */
+export async function listAllAuditorRewardPayoutsByUserId(auditorUserId: string): Promise<AuditorPayout[]> {
+  return AuditorPayoutModel.find({ auditorUserId, payoutType: 'REWARD' })
+    .lean<AuditorPayout[]>()
+    .exec();
+}
+
+/** Cộng payout thưởng đang giữ chỗ trong Mongo để tránh tải toàn bộ lịch sử khi tạo yêu cầu rút. */
+export async function sumReservedAuditorRewardPayoutsByUserId(auditorUserId: string): Promise<number> {
+  const [result] = await AuditorPayoutModel.aggregate<{ total: number }>([
+    { $match: { auditorUserId, payoutType: 'REWARD', status: { $ne: 'CANCELLED' } } },
+    { $group: { _id: null, total: { $sum: '$amountVnd' } } }
+  ]).exec();
+  return result?.total ?? 0;
 }
 
 /** Chỉ worker sở hữu job mới được chuyển trạng thái để chống kết quả provider stale. */
@@ -142,6 +161,23 @@ export async function linkAuditorPayoutToOnchainWithdrawal(
 export async function cancelAuditorPayout(payoutId: string, errorMessage: string): Promise<AuditorPayout | null> {
   const updated = await AuditorPayoutModel.findOneAndUpdate(
     { payoutId, status: 'PENDING', onchainTxHash: null },
+    { $set: { status: 'CANCELLED', errorMessage } },
+    { returnDocument: 'after' }
+  ).exec();
+  return updated ? updated.toObject() as AuditorPayout : null;
+}
+
+/** Hủy payout thưởng kẹt trước PayOS để giải phóng phần thưởng và khóa ví mà không thể hủy tiền đã chuyển. */
+export async function cancelUnsubmittedAuditorRewardPayout(payoutId: string, errorMessage: string): Promise<AuditorPayout | null> {
+  const updated = await AuditorPayoutModel.findOneAndUpdate(
+    {
+      payoutId,
+      payoutType: 'REWARD',
+      status: 'MANUAL_REVIEW',
+      onchainTxHash: null,
+      payosTransferId: null,
+      burnTxHash: null
+    },
     { $set: { status: 'CANCELLED', errorMessage } },
     { returnDocument: 'after' }
   ).exec();

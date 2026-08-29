@@ -12,7 +12,7 @@ export function buildAuditorPenaltyReasonCode(fieldCaseId: string, auditorUserId
   return `PENALTY:${normalizeReasonCodePart(fieldCaseId, 'Mã vụ việc')}:${normalizeReasonCodePart(auditorUserId, 'Mã Kiểm toán viên')}`;
 }
 
-/** Dựng mã thưởng duy nhất theo vụ việc và Auditor để không dùng lại mã slash đã bất biến trên chain. */
-export function buildAuditorRewardReasonCode(fieldCaseId: string, auditorUserId: string): string {
-  return `REWARD:${normalizeReasonCodePart(fieldCaseId, 'Mã vụ việc')}:${normalizeReasonCodePart(auditorUserId, 'Mã Kiểm toán viên')}`;
+/** Dựng mã thưởng duy nhất theo biên bản và Auditor để khóa idempotency on-chain trùng với ledger. */
+export function buildAuditorRewardReasonCode(fieldReportId: string, auditorUserId: string): string {
+  return `REWARD:${normalizeReasonCodePart(fieldReportId, 'Mã biên bản')}:${normalizeReasonCodePart(auditorUserId, 'Mã Kiểm toán viên')}`;
 }

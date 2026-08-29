@@ -3,9 +3,10 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
+    "clean:next": "node scripts/clean-next-output.mjs",
+    "dev": "npm run clean:next && next dev --port 3000",
+    "build": "npm run clean:next && next build",
+    "start": "npm run build && next start",
     "lint": "next lint",
     "test": "vitest run",
     "test:watch": "vitest",

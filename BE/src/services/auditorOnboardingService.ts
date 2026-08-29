@@ -31,6 +31,8 @@ import { AUDITOR_STAKE_CONFIRMATION_BLOCKS, AUDITOR_STAKE_FAST_PATH_TIMEOUT_MS }
 import { cancelAuditorPayout } from '../models/auditorPayoutModel';
 import {
   acquireAuditorUnstakeLock,
+  acquireAuditorPartialUnstakeLock,
+  acquireAuditorPartialWithdrawalLock,
   acquireAuditorPayoutAccountUpdateLock,
   acquireAuditorWithdrawalLock,
   hasAuditorWalletLock,
@@ -39,6 +41,7 @@ import {
   releaseAuditorWalletLock
 } from '../models/auditorStakeGuardModel';
 import { confirmStakeWithdrawalPayout, createStakeWithdrawalPayout } from './auditorPayoutCreationService';
+import { evaluateAuditorFullExitEligibility, type AuditorExitEligibilityResult } from './auditorStakeEligibility.service';
 import { getLogger } from '../config/logger';
 
 let googleOAuthClient: OAuth2Client | null = null;
@@ -463,13 +466,20 @@ function isPaymasterPolicyMismatch(error: unknown): boolean {
     || normalizedMessages.includes('no erc20 gas token data present');
 }
 
-/** Gửi UserOperation cọc bù đúng phần thiếu, kèm approve khi allowance của smart account chưa đủ. */
-export async function executeAuditorStake(userId: string): Promise<ExecuteAuditorStakeResult> {
+/** Gửi UserOperation đặt cọc; nếu không truyền amount thì cọc đúng phần thiếu của luồng onboarding. */
+export async function executeAuditorStake(userId: string, requestedAmount?: bigint): Promise<ExecuteAuditorStakeResult> {
   const user = await findUserById(userId);
   if (!user) throw new ApplicationError('Không tìm thấy người dùng đăng nhập.', 404, 'NOT_FOUND');
-  if (user.accountStatus !== 'PENDING_STAKE_VERIFICATION' && user.accountStatus !== 'SUSPENDED') {
+  if (user.accountStatus !== 'PENDING_STAKE_VERIFICATION' && user.accountStatus !== 'SUSPENDED' && user.accountStatus !== 'ACTIVE') {
     throw new ApplicationError('Tài khoản hiện không ở trạng thái có thể đặt cọc.', 409, 'INVALID_STATUS_TRANSITION');
   }
+  if (user.accountStatus === 'ACTIVE' && user.role !== 'auditor') {
+    throw new ApplicationError('Chỉ tài khoản Kiểm toán viên đang hoạt động mới có thể đặt cọc thêm.', 403, 'FORBIDDEN');
+  }
+  if (requestedAmount !== undefined && requestedAmount <= 0n) {
+    throw new ApplicationError('Số tiền đặt cọc phải lớn hơn 0.', 400, 'AMOUNT_INVALID');
+  }
+  const isOnboardingStake = user.accountStatus !== 'ACTIVE';
   const canReactivateByRestaking = user.suspendedReasonCode === 'STAKE_BELOW_THRESHOLD'
     || user.suspendedReasonCode === 'CHALLENGE_REJECTED';
   if (user.accountStatus === 'SUSPENDED' && !canReactivateByRestaking) {
@@ -480,8 +490,8 @@ export async function executeAuditorStake(userId: string): Promise<ExecuteAudito
     throw new ApplicationError('Ví đang có giao dịch chi trả chờ đốt DCT; bạn chưa thể đặt cọc lúc này.', 409, 'CONFLICT');
   }
   const intent = await findLatestAuditorStakeIntentByUserId(user.id);
-  if (!intent) throw new ApplicationError('Không tìm thấy yêu cầu đặt cọc.', 404, 'INTENT_NOT_FOUND');
-  if (intent.status === 'VERIFYING') {
+  if (isOnboardingStake && !intent) throw new ApplicationError('Không tìm thấy yêu cầu đặt cọc.', 404, 'INTENT_NOT_FOUND');
+  if (intent?.status === 'VERIFYING') {
     throw new ApplicationError('Yêu cầu đặt cọc đang được xác minh.', 409, 'ALREADY_SUBMITTED');
   }
 
@@ -501,11 +511,14 @@ export async function executeAuditorStake(userId: string): Promise<ExecuteAudito
     stakingContract.stakedBalance(kernelAddress) as Promise<bigint>,
     tokenContract.balanceOf(kernelAddress) as Promise<bigint>
   ]);
-  if (currentStakedBalance >= minimumStakeThreshold) {
+  if (requestedAmount === undefined && currentStakedBalance >= minimumStakeThreshold) {
     await reconcileAuditorStakeForWallet(kernelAddress);
     throw new ApplicationError('Số cọc hiện tại đã đạt ngưỡng xác minh.', 409, 'ALREADY_SUBMITTED');
   }
-  const stakeAmount = minimumStakeThreshold - currentStakedBalance;
+  const stakeAmount = requestedAmount ?? (minimumStakeThreshold - currentStakedBalance);
+  if (stakeAmount <= 0n) {
+    throw new ApplicationError('Số tiền đặt cọc phải lớn hơn 0.', 400, 'AMOUNT_INVALID');
+  }
   if (currentTokenBalance < stakeAmount) {
     const shortfall = stakeAmount - currentTokenBalance;
     throw new ApplicationError(
@@ -542,16 +555,18 @@ export async function executeAuditorStake(userId: string): Promise<ExecuteAudito
     throw error;
   }
 
-  await updateAuditorStakeIntent({
-    ...intent,
-    walletAddress: synchronizedUser.walletAddress,
-    status: 'VERIFYING',
-    txHash,
-    failureReason: null,
-    updatedAt: new Date()
-  });
-  // Fast path không được await: endpoint phải trả ngay sau khi bundler chấp nhận UserOperation.
-  void runFastPathVerification(intent.id, txHash);
+  if (isOnboardingStake && intent) {
+    await updateAuditorStakeIntent({
+      ...intent,
+      walletAddress: synchronizedUser.walletAddress,
+      status: 'VERIFYING',
+      txHash,
+      failureReason: null,
+      updatedAt: new Date()
+    });
+    // Fast path không được await: endpoint phải trả ngay sau khi bundler chấp nhận UserOperation.
+    void runFastPathVerification(intent.id, txHash);
+  }
   return { status: 'VERIFYING', txHash };
 }
 
@@ -591,7 +606,19 @@ async function runFastPathVerification(intentId: string, txHash: string): Promis
   }
 }
 
-/** Gửi yêu cầu unbonding và thu quyền đồng bộ khi số cọc dự kiến sau rút thấp hơn ngưỡng. */
+/** Dựng lỗi thoát vai trò kèm đủ mọi lý do để người dùng biết hết việc phải làm trong một lần. */
+function buildFullExitNotEligibleError(eligibility: AuditorExitEligibilityResult): ApplicationError {
+  return new ApplicationError(
+    `Chưa đủ điều kiện rút hết toàn bộ cọc: ${eligibility.reasons.map(reason => reason.message).join('; ')}`,
+    409,
+    'FULL_EXIT_NOT_ELIGIBLE'
+  );
+}
+
+/**
+ * Gửi yêu cầu unbonding. Số cọc còn lại chỉ được phép bằng 0 (thoát hẳn vai trò) hoặc từ ngưỡng tối
+ * thiểu trở lên; khoảng lửng lơ ở giữa bị chặn cứng thay vì cho rút rồi âm thầm thu quyền.
+ */
 export async function requestAuditorUnstake(userId: string, amount: bigint): Promise<RequestAuditorUnstakeResult> {
   const user = await findUserById(userId);
   if (!user || user.role !== 'auditor' || (user.accountStatus !== 'ACTIVE' && user.accountStatus !== 'SUSPENDED')) {
@@ -602,33 +629,49 @@ export async function requestAuditorUnstake(userId: string, amount: bigint): Pro
     throw new ApplicationError('Bạn cần đăng ký tài khoản ngân hàng nhận tiền trước khi rút cọc.', 409, 'CONFLICT');
   }
 
+  // Đọc trạng thái on-chain trước khi giành khóa: loại khóa phụ thuộc vào việc đây là rút một phần
+  // hay thoát hẳn vai trò, mà điều đó chỉ biết được sau khi có stakedBalance.
+  const kernelClient = await createAuditorKernelClient(user);
+  const kernelAddress = kernelClient.account?.address;
+  if (!kernelAddress) throw new ApplicationError('Không thể lấy địa chỉ ví đặt cọc.', 503, 'BLOCKCHAIN_UNAVAILABLE');
+  const synchronizedUser: AuthUser = await synchronizeAuditorWalletAddress(user, kernelAddress);
+  const contract = getReadOnlyAuditorStakingContract();
+  const [stakedBalance, minimumStakeThreshold, unbondingPeriodSeconds, previousReleaseAt] = await Promise.all([
+    contract.stakedBalance(kernelAddress) as Promise<bigint>,
+    contract.minimumStakeThreshold() as Promise<bigint>,
+    contract.unbondingPeriodSeconds() as Promise<bigint>,
+    contract.unbondingReleaseAt(kernelAddress) as Promise<bigint>
+  ]);
+  if (amount > stakedBalance) {
+    throw new ApplicationError('Số tiền yêu cầu rút vượt quá số cọc hiện có.', 400, 'AMOUNT_INVALID');
+  }
+
+  const remaining = stakedBalance - amount;
+  if (remaining > 0n && remaining < minimumStakeThreshold) {
+    throw new ApplicationError(
+      `Số cọc còn lại sau khi rút phải đạt tối thiểu ${minimumStakeThreshold.toLocaleString('vi-VN')} VNĐ, hoặc chọn rút toàn bộ để thoát vai trò Kiểm toán viên.`,
+      400,
+      'AMOUNT_BELOW_MINIMUM_FLOOR'
+    );
+  }
+
+  const isFullExit = remaining === 0n;
+  if (isFullExit) {
+    const eligibility = await evaluateAuditorFullExitEligibility(synchronizedUser.id);
+    if (!eligibility.eligible) throw buildFullExitNotEligibleError(eligibility);
+  }
+
   const lockRefId = crypto.randomUUID();
   await initializeAuditorStakeGuard(user.id);
-  if (!await acquireAuditorUnstakeLock(user.id, lockRefId)) {
+  const acquiredLock = isFullExit
+    ? await acquireAuditorUnstakeLock(user.id, lockRefId)
+    : await acquireAuditorPartialUnstakeLock(user.id, lockRefId);
+  if (!acquiredLock) {
     throw new ApplicationError('Ví đang bị khóa do có vụ việc, nợ phạt hoặc giao dịch cọc/chi trả đang xử lý.', 409, 'CONFLICT');
   }
 
   let txHash = '';
-  let stakedBalance = 0n;
-  let minimumStakeThreshold = 0n;
-  let unbondingPeriodSeconds = 0n;
-  let previousReleaseAt = 0n;
-  let synchronizedUser: AuthUser = user;
   try {
-    const kernelClient = await createAuditorKernelClient(user);
-    const kernelAddress = kernelClient.account?.address;
-    if (!kernelAddress) throw new ApplicationError('Không thể lấy địa chỉ ví đặt cọc.', 503, 'BLOCKCHAIN_UNAVAILABLE');
-    synchronizedUser = await synchronizeAuditorWalletAddress(user, kernelAddress);
-    const contract = getReadOnlyAuditorStakingContract();
-    [stakedBalance, minimumStakeThreshold, unbondingPeriodSeconds, previousReleaseAt] = await Promise.all([
-      contract.stakedBalance(kernelAddress) as Promise<bigint>,
-      contract.minimumStakeThreshold() as Promise<bigint>,
-      contract.unbondingPeriodSeconds() as Promise<bigint>,
-      contract.unbondingReleaseAt(kernelAddress) as Promise<bigint>
-    ]);
-    if (amount > stakedBalance) {
-      throw new ApplicationError('Số tiền yêu cầu rút vượt quá số cọc hiện có.', 400, 'AMOUNT_INVALID');
-    }
     txHash = await kernelClient.sendTransaction({
       calls: [{
         to: (await contract.getAddress()) as `0x${string}`,
@@ -641,7 +684,7 @@ export async function requestAuditorUnstake(userId: string, amount: bigint): Pro
     await releaseAuditorUnstakeLock(user.id, lockRefId);
     throw error;
   }
-  if (stakedBalance - amount < minimumStakeThreshold) {
+  if (isFullExit) {
     try {
       await suspendAuditorRole(synchronizedUser.id, 'STAKE_BELOW_THRESHOLD');
     } catch (error) {
@@ -667,24 +710,40 @@ export async function withdrawAuditorStake(userId: string): Promise<WithdrawAudi
   if (!await findAuditorPayoutAccountByUserId(user.id)) {
     throw new ApplicationError('Bạn cần đăng ký tài khoản ngân hàng nhận tiền trước khi rút cọc.', 409, 'CONFLICT');
   }
+  // Đọc on-chain trước khi giành khóa: chỉ khi stakedBalance đã về 0 thì đây mới là bước nhận lại
+  // cuối cùng của một lần thoát vai trò, và mới phải xét lại điều kiện thoát.
+  const kernelClient = await createAuditorKernelClient(user);
+  const walletAddress = kernelClient.account?.address;
+  if (!walletAddress) throw new ApplicationError('Không thể khởi tạo ví để rút cọc.', 503, 'BLOCKCHAIN_UNAVAILABLE');
+  await synchronizeAuditorWalletAddress(user, walletAddress);
+  const contract = getReadOnlyAuditorStakingContract();
+  const [pendingAmount, stakedBalance] = await Promise.all([
+    contract.pendingWithdrawAmount(walletAddress) as Promise<bigint>,
+    contract.stakedBalance(walletAddress) as Promise<bigint>
+  ]);
+  if (pendingAmount <= 0n) {
+    throw new ApplicationError('Hiện không có khoản cọc nào chờ rút.', 409, 'CONFLICT');
+  }
+
+  // Vá khe hở của 7 ngày unbonding: một vụ việc mới có thể mở ra sau lúc gửi yêu cầu rút.
+  const isFullExitClaim = stakedBalance === 0n;
+  if (isFullExitClaim) {
+    const eligibility = await evaluateAuditorFullExitEligibility(user.id);
+    if (!eligibility.eligible) throw buildFullExitNotEligibleError(eligibility);
+  }
+
   const payoutId = crypto.randomUUID();
   await initializeAuditorStakeGuard(user.id);
-  if (!await acquireAuditorWithdrawalLock(user.id, payoutId)) {
+  const acquiredLock = isFullExitClaim
+    ? await acquireAuditorWithdrawalLock(user.id, payoutId)
+    : await acquireAuditorPartialWithdrawalLock(user.id, payoutId);
+  if (!acquiredLock) {
     throw new ApplicationError('Ví đang bị khóa do có vụ việc, nợ phạt hoặc giao dịch cọc/chi trả đang xử lý.', 409, 'CONFLICT');
   }
 
   let txHash: string | null = null;
   let preparedPayout = false;
   try {
-    const kernelClient = await createAuditorKernelClient(user);
-    const walletAddress = kernelClient.account?.address;
-    if (!walletAddress) throw new ApplicationError('Không thể khởi tạo ví để rút cọc.', 503, 'BLOCKCHAIN_UNAVAILABLE');
-    await synchronizeAuditorWalletAddress(user, walletAddress);
-    const contract = getReadOnlyAuditorStakingContract();
-    const pendingAmount = await contract.pendingWithdrawAmount(walletAddress) as bigint;
-    if (pendingAmount <= 0n) {
-      throw new ApplicationError('Hiện không có khoản cọc nào chờ rút.', 409, 'CONFLICT');
-    }
     await createStakeWithdrawalPayout({
       auditorUserId: user.id,
       payoutId,

@@ -28,6 +28,23 @@ export type DisbursementTransferStatus =
   | 'FAILED'
   | 'MANUAL_REVIEW';
 
+/** Metadata bất biến của ảnh camera/GPS được chụp khi tổ chức gửi yêu cầu giải ngân. */
+export type DisbursementEvidencePhoto = {
+  cid: string;
+  contentSha256: string;
+  fileName: string;
+  mimeType: 'image/jpeg';
+  gps: { latitude: number; longitude: number };
+  accuracyMeters: number;
+  lowAccuracyOverride: boolean;
+  overrideUnlockedAfterMs: number | null;
+  lowAccuracyReason: string | null;
+  capturedAt: Date;
+  capturedAtClient: Date;
+  geolocationTimestamp: string;
+  clockSkewSeconds: number;
+};
+
 /**
  * Bản ghi yêu cầu giải ngân trong MongoDB.
  * Đồng bộ với MultisigDisbursement.sol on-chain.
@@ -52,6 +69,8 @@ export type DisbursementRecord = {
   amount: number;                       // Số token muốn rút
   usagePurpose: string;                // Mục đích sử dụng khoản giải ngân
   evidenceCid: string;                 // CID IPFS của bằng chứng sử dụng tiền
+  /** Legacy records trước T3 có thể chưa có field này; mọi request mới bắt buộc dùng ảnh camera/GPS. */
+  evidencePhotos?: DisbursementEvidencePhoto[];
   status: DisbursementStatus;
   // Tracking chữ ký từ 3 vai trò
   approvals: Array<{
@@ -75,6 +94,8 @@ export type DisbursementRecord = {
   payosTransferAttemptCount: number;
   payosTransferLastError: string | null;
   transferIdempotencyKey: string | null;
+  /** Hash tạo request on-chain, dùng cho audit và saga recovery; không phải hash finalize transfer. */
+  creationTransactionHash?: string | null;
   transactionHash: string | null;      // Hash giao dịch burn token trên blockchain
   finalizeTransactionHash: string | null;
   /** Lease claim ngắn chặn nhiều caller cùng finalize on-chain. */
@@ -103,9 +124,28 @@ const rejectionSchema = new Schema({
   rejectedAt: { type: Date, required: true }
 }, { _id: false });
 
+const disbursementEvidencePhotoSchema = new Schema<DisbursementEvidencePhoto>({
+  cid: { type: String, required: true },
+  contentSha256: { type: String, required: true },
+  fileName: { type: String, required: true },
+  mimeType: { type: String, enum: ['image/jpeg'], required: true },
+  gps: {
+    latitude: { type: Number, required: true, min: -90, max: 90 },
+    longitude: { type: Number, required: true, min: -180, max: 180 }
+  },
+  accuracyMeters: { type: Number, required: true, min: 0 },
+  lowAccuracyOverride: { type: Boolean, required: true },
+  overrideUnlockedAfterMs: { type: Number, default: null },
+  lowAccuracyReason: { type: String, default: null },
+  capturedAt: { type: Date, required: true },
+  capturedAtClient: { type: Date, required: true },
+  geolocationTimestamp: { type: String, required: true },
+  clockSkewSeconds: { type: Number, required: true }
+}, { _id: false, strict: 'throw' });
+
 const disbursementSchema = new Schema<DisbursementRecord>({
   requestId: { type: String, required: true, unique: true },
-  onChainRequestId: { type: Number, required: true, index: true },
+  onChainRequestId: { type: Number, required: true },
   projectId: { type: String, required: true, index: true },
   onChainProjectId: { type: Number, required: true },
   organizationId: { type: String, required: true, index: true },
@@ -123,6 +163,7 @@ const disbursementSchema = new Schema<DisbursementRecord>({
   amount: { type: Number, required: true },
   usagePurpose: { type: String, required: true, trim: true },
   evidenceCid: { type: String, required: true },
+  evidencePhotos: { type: [disbursementEvidencePhotoSchema], default: [] },
   status: { type: String, required: true, index: true },
   approvals: { type: [approvalSchema], default: [] },
   rejection: { type: rejectionSchema, default: null },
@@ -132,6 +173,7 @@ const disbursementSchema = new Schema<DisbursementRecord>({
   payosTransferAttemptCount: { type: Number, default: 0 },
   payosTransferLastError: { type: String, default: null },
   transferIdempotencyKey: { type: String, default: null },
+  creationTransactionHash: { type: String, default: null, index: true, sparse: true },
   transactionHash: { type: String, default: null },
   finalizeTransactionHash: { type: String, default: null },
   finalizeClaimId: { type: String, default: null },
@@ -151,8 +193,11 @@ disbursementSchema.index({ projectId: 1, status: 1, createdAt: -1 });
 disbursementSchema.index({ beneficiaryWalletAddress: 1 });
 disbursementSchema.index({ status: 1, createdAt: -1 });
 disbursementSchema.index({ payosTransferId: 1 }, { sparse: true });
+// Legacy/test records có thể chưa có id on-chain; uniqueness chỉ áp dụng khi request đã được materialize từ chain.
+disbursementSchema.index({ onChainRequestId: 1 }, { unique: true, sparse: true });
 
-const DisbursementMongoModel = mongoose.model<DisbursementRecord>('Disbursement', disbursementSchema);
+const DisbursementMongoModel = mongoose.models?.Disbursement
+  || mongoose.model<DisbursementRecord>('Disbursement', disbursementSchema);
 
 // ============ CRUD FUNCTIONS ============
 
@@ -189,8 +234,10 @@ export async function findDisbursementsByRequestIds(requestIds: string[]): Promi
 }
 
 /** Tìm bản ghi theo onChainRequestId để đồng bộ event blockchain với record off-chain. */
-export async function findDisbursementByOnChainRequestId(onChainRequestId: number): Promise<DisbursementRecord | null> {
-  return DisbursementMongoModel.findOne({ onChainRequestId }).lean<DisbursementRecord>().exec();
+export async function findDisbursementByOnChainRequestId(onChainRequestId: number, session?: ClientSession): Promise<DisbursementRecord | null> {
+  const query = DisbursementMongoModel.findOne({ onChainRequestId });
+  if (session) query.session(session);
+  return query.lean<DisbursementRecord>().exec();
 }
 
 /** Tìm bản ghi theo payosTransferId. Mục đích: xử lý callback hoặc đối soát transfer từ cổng thanh toán. */
@@ -234,6 +281,42 @@ export async function findDisbursementsByProjectId(
     .limit(normalizedLimitCount)
     .lean<DisbursementRecord[]>()
     .exec();
+}
+
+/** Lấy batch PENDING nhỏ để saga recovery kiểm tra record nào thiếu committee case. */
+export async function findPendingDisbursementsForCommitteeRecovery(limitCount: number): Promise<DisbursementRecord[]> {
+  const limit = Number.isFinite(limitCount) ? Math.max(1, Math.min(100, Math.floor(limitCount))) : 25;
+  return DisbursementMongoModel.find({ status: 'PENDING' })
+    .sort({ createdAt: 1 })
+    .limit(limit)
+    .lean<DisbursementRecord[]>()
+    .exec();
+}
+
+/** Lấy batch giải ngân theo project để portal Ủy ban không tạo truy vấn lặp cho từng hồ sơ. */
+export async function findDisbursementsByProjectIds(projectIds: string[], limitPerProject: number = 200): Promise<DisbursementRecord[]> {
+  const normalizedProjectIds = [...new Set(projectIds.map(projectId => String(projectId || '').trim()).filter(Boolean))];
+  if (!normalizedProjectIds.length) return [];
+  const normalizedLimit = Number.isFinite(limitPerProject) ? Math.max(1, Math.min(200, Math.floor(limitPerProject))) : 200;
+  return DisbursementMongoModel.aggregate<DisbursementRecord>([
+    { $match: { projectId: { $in: normalizedProjectIds } } },
+    { $sort: { projectId: 1, createdAt: -1 } },
+    { $group: { _id: '$projectId', items: { $push: '$$ROOT' } } },
+    { $project: { items: { $slice: ['$items', normalizedLimit] } } },
+    { $unwind: '$items' },
+    { $replaceRoot: { newRoot: '$items' } }
+  ]).exec();
+}
+
+/** Đếm yêu cầu giải ngân PENDING theo nhiều dự án bằng một aggregate để portal Ủy ban không tạo N+1 query. */
+export async function countPendingDisbursementsByProjectIds(projectIds: string[]): Promise<Map<string, number>> {
+  const normalizedProjectIds = [...new Set(projectIds.map(projectId => String(projectId || '').trim()).filter(Boolean))];
+  if (normalizedProjectIds.length === 0) return new Map();
+  const rows = await DisbursementMongoModel.aggregate<{ _id: string; count: number }>([
+    { $match: { projectId: { $in: normalizedProjectIds }, status: 'PENDING' } },
+    { $group: { _id: '$projectId', count: { $sum: 1 } } }
+  ]).exec();
+  return new Map(rows.map(row => [row._id, row.count]));
 }
 
 /** Lấy tối đa các khoản giải ngân COMPLETED gần nhất để giới hạn payload summary. */
@@ -298,9 +381,24 @@ export async function findPendingDisbursementByBeneficiary(beneficiaryWalletAddr
 }
 
 /** Tạo mới bản ghi giải ngân. Mục đích: lưu yêu cầu rút tiền vào MongoDB. */
-export async function createDisbursementRecord(record: DisbursementRecord): Promise<DisbursementRecord> {
-  const created = await DisbursementMongoModel.create(record);
-  return created.toObject() as DisbursementRecord;
+export async function createDisbursementRecord(record: DisbursementRecord, session?: ClientSession): Promise<DisbursementRecord> {
+  const created = await DisbursementMongoModel.create([record], session ? { session } : undefined);
+  return created[0].toObject() as DisbursementRecord;
+}
+
+/** Upsert theo id request contract để event replay không tạo record giải ngân trùng. */
+export async function upsertDisbursementRecordByOnChainRequestId(
+  record: DisbursementRecord,
+  session?: ClientSession
+): Promise<{ record: DisbursementRecord; created: boolean }> {
+  const updateResult = await DisbursementMongoModel.updateOne(
+    { onChainRequestId: record.onChainRequestId },
+    { $setOnInsert: record },
+    { upsert: true, ...(session ? { session } : {}) }
+  ).exec();
+  const persistedRecord = await findDisbursementByOnChainRequestId(record.onChainRequestId, session);
+  if (!persistedRecord) throw new Error(`Không thể đọc lại disbursement on-chain requestId=${record.onChainRequestId}.`);
+  return { record: persistedRecord, created: updateResult.upsertedCount === 1 };
 }
 
 /** Cập nhật bản ghi giải ngân theo requestId. Mục đích: cập nhật trạng thái và chữ ký. */
@@ -329,6 +427,25 @@ export async function updateDisbursementByRequestIdWithCondition(
     { returnDocument: 'after', ...(session ? { session } : {}) }
   ).exec();
 
+  return updated ? (updated.toObject() as DisbursementRecord) : null;
+}
+
+/** Ghi chữ ký worker một lần theo vai; điều kiện mảng bảo vệ khi nhiều instance worker cùng quét một request. */
+export async function appendDisbursementApprovalIfRoleAbsent(
+  requestId: string,
+  approval: DisbursementRecord['approvals'][number],
+  status: DisbursementStatus,
+  requiredApprovals: number,
+  timeoutDeadline: Date | null
+): Promise<DisbursementRecord | null> {
+  const updated = await DisbursementMongoModel.findOneAndUpdate(
+    { requestId, 'approvals.signerRole': { $ne: approval.signerRole } },
+    {
+      $push: { approvals: approval },
+      $set: { status, requiredApprovals, timeoutDeadline, transactionHash: approval.transactionHash, updatedAt: new Date() }
+    },
+    { returnDocument: 'after' }
+  ).exec();
   return updated ? (updated.toObject() as DisbursementRecord) : null;
 }
 

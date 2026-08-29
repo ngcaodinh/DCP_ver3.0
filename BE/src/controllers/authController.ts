@@ -1,7 +1,9 @@
 import { Request, Response } from 'express';
 import {
   getMyActiveSessions,
+  buildWalletLoginMessage,
   loginWithGoogle,
+  loginWithWallet,
   refreshAccessToken,
   logFailedGoogleLogin,
   revokeAllRefreshSessionsForUser
@@ -15,7 +17,8 @@ import {
   submitBeneficiaryBankAccount,
   submitOrganizationKyc
 } from '../services/organizationKycService';
-import { findUserById } from '../models/authModel';
+import { createWalletLoginNonce, findUserById } from '../models/authModel';
+import { isAddress } from 'ethers';
 import { getLogger } from '../config/logger';
 import { sendErrorFromUnknown, sendErrorResponse, sendSuccessResponse } from '../utils/apiResponse';
 
@@ -24,6 +27,12 @@ const logger = getLogger();
 type GoogleLoginPayload = {
   identityToken: string;
   role: 'donor' | 'organization';
+};
+
+type WalletLoginPayload = {
+  walletAddress: string;
+  nonce: string;
+  signature: string;
 };
 
 /**
@@ -46,6 +55,21 @@ function extractGoogleLoginPayload(request: Request): GoogleLoginPayload | null 
     identityToken: identityToken.trim(),
     role
   };
+}
+
+/** Kiểm tra payload ký ví trước khi gọi service để tránh tạo truy vấn DB với dữ liệu sai định dạng. */
+function extractWalletLoginPayload(request: Request): WalletLoginPayload | null {
+  const walletAddress = request.body?.walletAddress;
+  const nonce = request.body?.nonce;
+  const signature = request.body?.signature;
+  if (
+    typeof walletAddress !== 'string' || !isAddress(walletAddress)
+    || typeof nonce !== 'string' || nonce.trim().length === 0
+    || typeof signature !== 'string' || signature.trim().length === 0
+  ) {
+    return null;
+  }
+  return { walletAddress: walletAddress.toLowerCase(), nonce: nonce.trim(), signature: signature.trim() };
 }
 
 /**
@@ -146,9 +170,55 @@ export async function handleGoogleLogin(request: Request, response: Response): P
     logger.error('Google login failed.', {
       errorMessage: (error as Error).message
     });
-    response.status(401).json({
-      message: 'Đăng nhập Google thất bại. Vui lòng thử lại.'
+    const statusCode = (error as Error & { statusCode?: number }).statusCode || 401;
+    response.status(statusCode).json({
+      message: statusCode === 403
+        ? 'Tài khoản quản trị đăng nhập tại cổng riêng bằng ví MetaMask.'
+        : 'Đăng nhập Google thất bại. Vui lòng thử lại.'
     });
+  }
+}
+
+/** Tạo nonce đăng nhập ví có hiệu lực năm phút và trả đúng thông điệp cần ký cho MetaMask. */
+export async function handleCreateWalletLoginNonce(request: Request, response: Response): Promise<void> {
+  const walletAddress = request.body?.walletAddress;
+  if (typeof walletAddress !== 'string' || !isAddress(walletAddress)) {
+    sendErrorResponse(response, 400, 'Địa chỉ ví không hợp lệ.', 'VALIDATION_ERROR');
+    return;
+  }
+  try {
+    const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
+    const nonce = await createWalletLoginNonce(walletAddress.toLowerCase(), expiresAt);
+    sendSuccessResponse(response, 200, 'Đã tạo thông điệp đăng nhập.', {
+      nonce: nonce.nonce,
+      message: buildWalletLoginMessage(nonce.walletAddress, nonce.nonce, nonce.createdAt, nonce.expiresAt),
+      expiresAt: nonce.expiresAt
+    });
+  } catch (error) {
+    sendErrorFromUnknown(response, error, 'Không thể tạo nonce đăng nhập ví.');
+  }
+}
+
+/** Xử lý đăng nhập cổng quản trị bằng chữ ký MetaMask và trả cùng cấu trúc phiên Google login. */
+export async function handleWalletLogin(request: Request, response: Response): Promise<void> {
+  const payload = extractWalletLoginPayload(request);
+  const metadata = extractRequestMetadata(request);
+  if (!payload) {
+    sendErrorResponse(response, 400, 'Dữ liệu đăng nhập ví không hợp lệ.', 'VALIDATION_ERROR');
+    return;
+  }
+  try {
+    const loginResult = await loginWithWallet(
+      payload.walletAddress,
+      payload.nonce,
+      payload.signature,
+      metadata.ipAddress,
+      metadata.userAgent
+    );
+    response.status(200).json(loginResult);
+  } catch (error) {
+    const statusCode = (error as Error & { statusCode?: number }).statusCode || 401;
+    sendErrorResponse(response, statusCode, (error as Error).message, statusCode === 403 ? 'FORBIDDEN' : 'WALLET_LOGIN_FAILED');
   }
 }
 

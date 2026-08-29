@@ -4,6 +4,7 @@ import 'dotenv/config';
 import * as Sentry from '@sentry/node';
 import application from './app';
 import { connectToMongoDb } from './config/mongodb';
+import { verifyRequiredCommitteeGovernanceIndexes } from './config/requiredIndexes';
 import { connectToRedisSafely } from './config/redis';
 import { getLogger } from './config/logger';
 import { isSentryEnabled } from './config/sentryConfig';
@@ -13,18 +14,22 @@ import { startRankingScheduler } from './workers/rankingScheduler';
 import { startRankingReconcileWorker } from './workers/rankingReconcileWorker';
 import { startDonationReconciliationWorker } from './workers/donationReconciliationWorker';
 import { startDisbursementTransferStatusSweepPolling } from './services/disbursementService';
+import { startDisbursementOnChainSignerWorker, stopDisbursementOnChainSignerWorker } from './workers/disbursementOnChainSignerWorker';
+import { startCommitteeDecisionRelayerWorker, stopCommitteeDecisionRelayerWorker } from './workers/committeeDecisionRelayerWorker';
+import { startDisbursementCommitteeExpiryWorker, stopDisbursementCommitteeExpiryWorker } from './workers/disbursementCommitteeExpiryWorker';
+import { startDisbursementRequestReconciliationWorker, stopDisbursementRequestReconciliationWorker } from './workers/disbursementRequestReconciliationWorker';
+import { startGovernanceSeatProjectionWorker, stopGovernanceSeatProjectionWorker } from './workers/governanceSeatProjectionWorker';
 import { startPayosTransferWorker } from './workers/payosTransferWorker';
 import { initializeNotificationBridge } from './services/notificationBridge.service';
 import { initSocketServer, shutdownSocketServer } from './config/socketServer';
 import { startManualReviewEscalationWorker, stopManualReviewEscalationWorker } from './workers/manualReviewEscalationWorker';
-import { startOracleWorker, stopOracleWorker } from './workers/oracle.worker';
-import { startOverrideExpiryWorker, stopOverrideExpiryWorker } from './workers/overrideExpiryWorker';
 import { startSbtMintWorker, stopSbtMintWorker } from './workers/sbtMintWorker';
 import { startSbtMintRecoveryScheduler } from './workers/sbtMintRecoveryScheduler';
 import { startSbtStatusProjectionWorker, stopSbtStatusProjectionWorker } from './workers/sbtStatusProjectionWorker';
 import { startAuditorStakeEventProjectionWorker, stopAuditorStakeEventProjectionWorker } from './workers/auditorStakeEventProjectionWorker';
 import { startAuditorPayoutWorker, stopAuditorPayoutWorker } from './workers/auditorPayoutWorker';
 import { startAuditorDebtSettlementWorker, stopAuditorDebtSettlementWorker } from './workers/auditorDebtSettlementWorker';
+import { startAuditorRewardPayoutWorker, stopAuditorRewardPayoutWorker } from './workers/auditorRewardPayoutWorker';
 import { initializeSbtEventBridge } from './services/sbtEventBridge.service';
 import { startDataMapperWorker } from './workers/data-mapper.worker';
 import { startNotificationWorker, stopNotificationWorker } from './workers/notification.worker';
@@ -36,6 +41,10 @@ import { startEventRetentionWorker, stopEventRetentionWorker } from './workers/e
 import { initializeEventSocketBridge, shutdownEventSocketBridge } from './services/eventSocketBridge.service';
 import { startTrustScoreScheduler, stopTrustScoreScheduler } from './workers/trustScoreScheduler';
 import { startProjectActivationWorker, stopProjectActivationWorker } from './workers/projectActivationWorker';
+import { ensureRootAdminWallets } from './services/authService';
+import { reconcileGovernanceBootstrapFromChain, reconcileGovernanceRosterFromChain } from './services/governanceSeatService';
+import { isAddress } from 'ethers';
+import { validateAdminLoginWalletConfiguration } from './config/adminAccess';
 
 const logger = getLogger();
 
@@ -49,6 +58,39 @@ function shouldRunWorkers(): boolean {
   return process.env.RUN_WORKERS !== 'false';
 }
 
+/** Bật worker ký giải ngân chỉ bằng cờ tường minh để rollout không vô tình vượt qua gate Phase 2. */
+function shouldRunDisbursementOnChainSignerWorker(): boolean {
+  return process.env.ENABLE_DISBURSEMENT_ONCHAIN_SIGNER_WORKER === 'true';
+}
+
+/** Relayer tách riêng để rollout không vô tình tiêu thụ nonce EIP-712 khi operator chưa cấp ví dịch vụ. */
+function shouldRunCommitteeDecisionRelayerWorker(): boolean {
+  return process.env.ENABLE_COMMITTEE_DECISION_RELAYER_WORKER === 'true';
+}
+
+/** Kiểm tra tập cấu hình Phase 2 trước startup để operator nhận đủ biến thiếu thay vì lỗi RPC rời rạc sau khi listen. */
+function validateCommitteeRuntimeConfiguration(): void {
+  validateAdminLoginWalletConfiguration();
+  if (process.env.NODE_ENV !== 'production') return;
+  const missing: string[] = [];
+  const committeeAddress = process.env.COMMITTEE_GOVERNANCE_ADDRESS?.trim() || '';
+  if (!isAddress(committeeAddress)) missing.push('COMMITTEE_GOVERNANCE_ADDRESS');
+  if (!process.env.BLOCKCHAIN_RPC_URL?.trim()) missing.push('BLOCKCHAIN_RPC_URL');
+  const deploymentBlock = Number(process.env.COMMITTEE_GOVERNANCE_DEPLOYMENT_BLOCK);
+  if (!Number.isSafeInteger(deploymentBlock) || deploymentBlock <= 0) missing.push('COMMITTEE_GOVERNANCE_DEPLOYMENT_BLOCK');
+  if (shouldRunCommitteeDecisionRelayerWorker() && !process.env.COMMITTEE_GOVERNANCE_RELAYER_PRIVATE_KEY?.trim()) missing.push('COMMITTEE_GOVERNANCE_RELAYER_PRIVATE_KEY');
+  if (shouldRunDisbursementOnChainSignerWorker()) {
+    if (!shouldRunCommitteeDecisionRelayerWorker()) missing.push('ENABLE_COMMITTEE_DECISION_RELAYER_WORKER=true');
+    if (!isAddress(process.env.MULTISIG_DISBURSEMENT_ADDRESS?.trim() || '')) missing.push('MULTISIG_DISBURSEMENT_ADDRESS');
+    const multisigDeploymentBlock = Number(process.env.MULTISIG_DISBURSEMENT_DEPLOYMENT_BLOCK);
+    if (!Number.isSafeInteger(multisigDeploymentBlock) || multisigDeploymentBlock <= 0) missing.push('MULTISIG_DISBURSEMENT_DEPLOYMENT_BLOCK');
+  }
+  if (missing.length > 0) throw new Error(`Thiếu hoặc không hợp lệ cấu hình CommitteeGovernance runtime: ${missing.join(', ')}.`);
+  if ((shouldRunCommitteeDecisionRelayerWorker() || shouldRunDisbursementOnChainSignerWorker()) && !shouldRunWorkers()) {
+    throw new Error('Không thể bật CommitteeGovernance worker khi RUN_WORKERS=false.');
+  }
+}
+
 /**
  * Hàm khởi động các worker nền của hệ thống.
  * Mục đích: gom scheduler và polling vào một điểm để dễ kiểm soát trong production.
@@ -60,14 +102,20 @@ function startBackgroundWorkers(): void {
   // Donation reconciliation worker: chạy mỗi 15 phút kiểm tra pending donations
   startDonationReconciliationWorker();
   startDisbursementTransferStatusSweepPolling();
+  startDisbursementCommitteeExpiryWorker();
+  startDisbursementRequestReconciliationWorker();
+  startGovernanceSeatProjectionWorker();
+  if (shouldRunCommitteeDecisionRelayerWorker()) {
+    startCommitteeDecisionRelayerWorker();
+  }
   // PayOS Transfer Worker: xử lý disbursement transfer với Bull queue
   startPayosTransferWorker();
+  // Fail-closed: worker ký chỉ được bật sau khi operator hoàn tất EIP-712, DecisionRecorded và audit reconciliation Phase 2.
+  if (shouldRunDisbursementOnChainSignerWorker()) {
+    startDisbursementOnChainSignerWorker();
+  }
   // Manual Review Escalation Worker: cảnh báo admin khi disbursement MANUAL_REVIEW quá hạn SLA
   startManualReviewEscalationWorker();
-  // Oracle Worker: xác minh EXIF GPS ảnh minh chứng (concurrency 3)
-  startOracleWorker();
-  // Override Expiry Worker: expire override request PENDING quá 7 ngày không đủ vote
-  startOverrideExpiryWorker();
   // SBT Mint Worker: tự động mint SBT khi Oracle verified
   startSbtMintWorker();
   // SBT status projector: replay TokenStatusUpdated thành Mongo read model cho gallery public.
@@ -76,6 +124,7 @@ function startBackgroundWorkers(): void {
   startAuditorStakeEventProjectionWorker();
   startAuditorPayoutWorker();
   startAuditorDebtSettlementWorker();
+  startAuditorRewardPayoutWorker();
   // SBT Mint Recovery Scheduler: cron 15 phut phat hien stuck jobs
   startSbtMintRecoveryScheduler();
   // Data Mapper Worker: dong bo PayOS + blockchain vao unified_transactions (5 phut)
@@ -98,7 +147,12 @@ function startBackgroundWorkers(): void {
  * Mục đích: khởi tạo kết nối MongoDB + Redis trước, sau đó khởi động workers và lắng nghe cổng HTTP.
  */
 async function startServer(): Promise<void> {
+  validateCommitteeRuntimeConfiguration();
   await connectToMongoDb();
+  await verifyRequiredCommitteeGovernanceIndexes();
+  await ensureRootAdminWallets();
+  await reconcileGovernanceBootstrapFromChain();
+  await reconcileGovernanceRosterFromChain();
   await connectToRedisSafely();
 
   if (shouldRunWorkers()) {
@@ -131,12 +185,16 @@ async function startServer(): Promise<void> {
       stopTrustScoreScheduler();
       stopProjectActivationWorker();
       stopManualReviewEscalationWorker();
-      stopOverrideExpiryWorker();
-      await stopOracleWorker();
+      stopDisbursementOnChainSignerWorker();
+      stopCommitteeDecisionRelayerWorker();
+      stopDisbursementCommitteeExpiryWorker();
+      stopDisbursementRequestReconciliationWorker();
+      stopGovernanceSeatProjectionWorker();
       await stopSbtMintWorker();
       stopSbtStatusProjectionWorker();
       stopAuditorStakeEventProjectionWorker();
       stopAuditorDebtSettlementWorker();
+      stopAuditorRewardPayoutWorker();
       await stopAuditorPayoutWorker();
       // Notification worker: Bull queue.close() chờ active job xong (graceful per spec E1)
       await stopNotificationWorker();

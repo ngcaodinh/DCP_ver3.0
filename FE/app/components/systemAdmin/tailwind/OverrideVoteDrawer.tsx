@@ -1,3 +1,8 @@
+/**
+ * ⚠️ NGỪNG SỬ DỤNG từ 2026-08-27 — chức năng ghi đè GPS đã khai tử.
+ * Lý do: minh chứng nay chụp trực tiếp qua camera nên luôn có tọa độ.
+ * Giữ file để đọc lại dữ liệu lịch sử. Xem ADR-2026-08-27.
+ */
 'use client';
 
 // =============================================================================

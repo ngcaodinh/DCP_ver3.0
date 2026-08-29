@@ -3,7 +3,7 @@ import { createEvidencePhotoRegistryRecordsFromRepository } from '../repositorie
 import { findProjectById } from '../repositories/projectRepository';
 import { ApplicationError } from '../utils/applicationError';
 import { runMongoTransaction } from '../utils/mongoTransaction';
-import { processCapturedEvidencePhotos, type CapturedEvidencePhotoInput } from './evidencePhotoCapture.service';
+import { cleanupCapturedEvidencePhotos, processCapturedEvidencePhotos, type CapturedEvidencePhotoInput, type StoredEvidencePhoto } from './evidencePhotoCapture.service';
 
 /** Nộp biên bản hiện trường bằng evidence camera cho một dự án ACTIVE đúng một lần. */
 export async function submitAuditorFieldReport(auditorUserId: string, payload: {
@@ -24,16 +24,16 @@ export async function submitAuditorFieldReport(auditorUserId: string, payload: {
   if (payload.verifiedMilestoneIndexes.some(index => !planIndexes.has(index))) throw new ApplicationError('Có cột mốc không thuộc kế hoạch dự án.', 404, 'MILESTONE_NOT_FOUND');
 
   const serverReceivedAt = payload.serverReceivedAt || new Date();
-  const evidencePhotos = await processCapturedEvidencePhotos({
-    photos: payload.photos,
-    module: 'AUDITOR_FIELD_REPORT',
-    ownerUserId: auditorUserId,
-    clientSubmittedAt: payload.clientSubmittedAt,
-    serverReceivedAt
-  });
-  const reportPhotos = evidencePhotos.map(({ lowAccuracyOverride, ...photo }) => ({ ...photo, isLowAccuracyOverride: lowAccuracyOverride }));
-
+  let evidencePhotos: StoredEvidencePhoto[] = [];
   try {
+    evidencePhotos = await processCapturedEvidencePhotos({
+      photos: payload.photos,
+      module: 'AUDITOR_FIELD_REPORT',
+      ownerUserId: auditorUserId,
+      clientSubmittedAt: payload.clientSubmittedAt,
+      serverReceivedAt
+    });
+    const reportPhotos = evidencePhotos.map(({ lowAccuracyOverride, ...photo }) => ({ ...photo, isLowAccuracyOverride: lowAccuracyOverride }));
     return await runMongoTransaction(async session => {
       const report = await createAuditorFieldReportFromRepository({
         projectId: project.projectId,
@@ -54,6 +54,7 @@ export async function submitAuditorFieldReport(auditorUserId: string, payload: {
       return { reportId: report.reportId };
     });
   } catch (error) {
+    await cleanupCapturedEvidencePhotos(evidencePhotos);
     const duplicateKeyError = error as { code?: number; writeErrors?: Array<{ err?: { keyPattern?: Record<string, unknown> } }>; keyPattern?: Record<string, unknown> };
     const keyPattern = duplicateKeyError.keyPattern || duplicateKeyError.writeErrors?.[0]?.err?.keyPattern;
     if (duplicateKeyError.code === 11000 && keyPattern?.contentSha256) throw new ApplicationError('Ảnh này đã được dùng cho bản ghi khác.', 409, 'DUPLICATE_EVIDENCE_PHOTO');

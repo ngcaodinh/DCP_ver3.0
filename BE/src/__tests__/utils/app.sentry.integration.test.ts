@@ -24,6 +24,7 @@ const applicationRouteModules: Array<[string, string]> = [
   ['../../routes/oracleRoutes', 'createOracleRoutes'],
   ['../../routes/sbt.routes', 'createSbtRoutes'],
   ['../../routes/guestRoutes', 'createGuestRoutes'],
+  ['../../routes/auditorOnboardingRoutes', 'createAuditorOnboardingRoutes'],
   ['../../routes/webhooks/payos.webhook', 'createPayosWebhookRoutes'],
   ['../../routes/transparencyRoutes', 'createTransparencyRoutes'],
   ['../../routes/verification.routes', 'createVerificationRoutes'],

@@ -19,7 +19,6 @@ vi.mock('../../models/organizationKycModel', () => ({
 }));
 
 vi.mock('../../repositories/projectRepository', () => ({
-  countActiveProjectsByOrganizationIdFromRepository: vi.fn(),
   createProject: vi.fn(),
   findProjectById: vi.fn(),
   findProjectByOrganizationAndName: vi.fn(),

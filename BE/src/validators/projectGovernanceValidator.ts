@@ -21,7 +21,20 @@ export const milestonePlanSchema = z.array(z.object({
 
 export const updateMilestonePlanSchema = z.object({ projectId: z.string().trim().min(1), milestonePlan: milestonePlanSchema });
 export const projectChallengeSchema = z.object({ projectId: z.string().trim().min(1), reason: z.string().trim().min(30).max(2000), clientSubmittedAt: z.string().datetime(), photos: z.array(capturedEvidencePhotoSchema).max(5).default([]) }).strict();
-export const arbitrationVoteSchema = z.object({ arbitrationId: z.string().trim().min(1), decision: z.enum(['UPHOLD_PROJECT', 'REJECT_PROJECT']), reason: z.string().trim().min(10).max(500), markedAbusive: z.boolean().default(false) });
+// Nhánh "đúng sự thật" cố ý không có reason: kết luận xác nhận không mở vụ xét xử nên không cần lập luận.
+export const auditorListingVerificationSchema = z.object({
+  projectId: z.string().trim().min(1),
+  note: z.union([z.string().trim().max(500), z.literal('')]).optional(),
+  clientSubmittedAt: z.string().datetime(),
+  photos: z.array(capturedEvidencePhotoSchema).min(1).max(5)
+}).strict();
+const committeeEip712SignatureSchema = z.object({
+  signature: z.string().regex(/^0x[0-9a-fA-F]+$/),
+  signingRequestId: z.string().uuid()
+});
+export const arbitrationVoteSchema = z.object({ arbitrationId: z.string().trim().min(1), decision: z.enum(['UPHOLD_PROJECT', 'REJECT_PROJECT']), reason: z.string().trim().min(10).max(500), markedAbusive: z.boolean().default(false), donationLockRiskAcknowledged: z.boolean().default(false), eip712Signature: committeeEip712SignatureSchema.optional() }).strict();
+export const arbitrationSigningPayloadSchema = z.object({ arbitrationId: z.string().trim().min(1), decision: z.enum(['UPHOLD_PROJECT', 'REJECT_PROJECT']), reason: z.string().trim().min(10).max(500) }).strict();
+export const arbitrationOnChainDecisionRecoverySchema = z.object({ reason: z.string().trim().min(20).max(500) }).strict();
 export const retryActivationSchema = z.object({ projectId: z.string().trim().min(1) });
 export const fieldReportSchema = z.object({
   projectId: z.string().trim().min(1),

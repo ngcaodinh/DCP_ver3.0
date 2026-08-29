@@ -57,14 +57,17 @@ async function sweepOrphanedAuditorWalletLocks(): Promise<void> {
     const isInFlight = Boolean(payout?.onchainTxHash && payout.status !== 'BURNED' && payout.status !== 'CANCELLED');
     if (isInFlight) continue;
     if (payout?.status === 'PENDING' && !payout.onchainTxHash) {
-      await updateAuditorPayout(payout.payoutId, {
-        status: 'MANUAL_REVIEW',
-        errorMessage: 'Missing Withdrawn transaction hash while the wallet is locked; manual reconciliation is required before release.'
-      });
-      logger.error('Giữ wallet lock Auditor vì chưa xác định được trạng thái withdrawal.', {
-        auditorUserId: guard.auditorUserId,
-        payoutId: payout.payoutId
-      });
+      if (payout.payoutType !== 'REWARD') {
+        await updateAuditorPayout(payout.payoutId, {
+          status: 'MANUAL_REVIEW',
+          errorMessage: 'Missing Withdrawn transaction hash while the wallet is locked; manual reconciliation is required before release.'
+        });
+        logger.error('Giữ wallet lock Auditor vì chưa xác định được trạng thái withdrawal.', {
+          auditorUserId: guard.auditorUserId,
+          payoutId: payout.payoutId
+        });
+      }
+      // Payout REWARD không có Withdrawn hash theo thiết kế. Giữ lock đến khi retry queue hoàn tất burn DCT.
       continue;
     }
     await releaseAuditorWalletLock(guard.auditorUserId, guard.lockRefId, guard.walletLock as AuditorWalletLock);

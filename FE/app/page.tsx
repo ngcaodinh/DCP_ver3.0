@@ -8,6 +8,7 @@ import { authenticationSessionUpdatedEventName, clearAuthSession, readAuthSessio
 import IpfsEvidencePreviewCard from '@/app/components/common/IpfsEvidencePreviewCard';
 import { buildIpfsGatewayUrl, getIpfsContentType, resolveIpfsPreviewKind } from './utils/ipfs';
 import FairRankingTab from '@/app/components/fairRanking/FairRankingTab';
+import { PublicCommitteeGovernanceFeed } from '@/app/components/governance/PublicCommitteeGovernanceFeed';
 
 
 type HomeProjectEvidenceFile = {
@@ -318,6 +319,14 @@ const getPublicProjectStatusLabel = (statusValue: string): string => {
 
   if (statusValue === 'PENDING_APPROVAL') {
     return 'Chờ duyệt';
+  }
+
+  if (statusValue === 'PENDING_ACTIVATION') {
+    return 'Đang niêm yết chờ kích hoạt';
+  }
+
+  if (statusValue === 'DISPUTED') {
+    return 'Đang tranh chấp';
   }
 
   return statusValue;
@@ -2414,6 +2423,7 @@ export default function HomePage() {
         )}
       </section>
 
+      <PublicCommitteeGovernanceFeed />
       <section className="cta-section">
         <h2>
           Bắt đầu hành trình
@@ -2467,7 +2477,7 @@ export default function HomePage() {
             <h4>Nền tảng</h4>
             <ul>
               <li>
-                <a href="#">Dự án đang mở</a>
+                <a href="/pending-projects">Dự án đang niêm yết chờ kích hoạt</a>
               </li>
               <li>
                 <a href="#">Bảng xếp hạng QF</a>
@@ -2528,4 +2538,3 @@ export default function HomePage() {
     </main>
   );
 }
-

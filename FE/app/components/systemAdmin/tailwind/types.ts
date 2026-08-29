@@ -7,7 +7,7 @@
 /** Các trang/chức năng chính trong Admin panel. */
 export type PageKey =
   | 'dashboard'
-  | 'projectReview'
+  // Giữ key legacy cho mapping tiêu đề của component lưu trữ; sidebar không còn lối vào này.
   | 'disbursement'
   | 'kyc'
   | 'bankAccountApproval'
@@ -16,7 +16,8 @@ export type PageKey =
   | 'transparency'
   | 'sybilManagement'
   | 'transferQueue'
-  | 'feedbackFlagging';
+  | 'feedbackFlagging'
+  | 'committeeSeats';
 
 /** Mục điều hướng trong Sidebar. */
 export type NavigationItem = {

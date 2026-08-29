@@ -4,6 +4,8 @@ import { transparencyTransactionRows } from './mockData';
 import { ApiErrorDetail, ApiErrorResponse, fetchApi, buildApiUrl } from '@/app/utils/apiClient';
 import { readAuthSession } from '@/app/utils/authSession';
 import IpfsEvidencePreviewCard from '@/app/components/common/IpfsEvidencePreviewCard';
+import { EvidenceCameraCapture } from '@/app/components/common/evidenceCamera/EvidenceCameraCapture';
+import type { CapturedEvidencePhoto } from '@/app/components/common/evidenceCamera/types';
 import { DashboardDonationHistoryItem, DashboardFeaturedProject, ProjectSummary, StatisticItem, TimelineItem } from './types';
 
 type DisbursementSectionProps = {
@@ -142,7 +144,7 @@ type CreateDisbursementFormData = {
   usagePurpose: string;
 };
 
-type CreateDisbursementFormErrors = Partial<Record<keyof CreateDisbursementFormData | 'evidenceFiles', string>>;
+type CreateDisbursementFormErrors = Partial<Record<keyof CreateDisbursementFormData | 'evidencePhotos', string>>;
 
 const createProjectDefaultFormState: CreateProjectFormData = {
   name: '',
@@ -1756,7 +1758,7 @@ function validateDisbursementAmountField(
 /** Hàm kiểm tra dữ liệu form giải ngân. Mục đích: chặn submit sai trước khi upload minh chứng và gọi API. */
 function validateCreateDisbursementForm(
   formData: CreateDisbursementFormData,
-  selectedEvidenceFiles: File[],
+  evidencePhotos: CapturedEvidencePhoto[],
   maxWithdrawableAmount: number | null
 ): CreateDisbursementFormErrors {
   const nextFormErrors: CreateDisbursementFormErrors = {};
@@ -1775,8 +1777,8 @@ function validateCreateDisbursementForm(
     nextFormErrors.emergencyReason = 'Vui lòng nhập lý do khẩn cấp cho chế độ Khẩn cấp.';
   }
 
-  if (selectedEvidenceFiles.length === 0) {
-    nextFormErrors.evidenceFiles = 'Vui lòng tải lên ít nhất 1 tệp minh chứng.';
+  if (evidencePhotos.length === 0) {
+    nextFormErrors.evidencePhotos = 'Vui lòng chụp ít nhất một ảnh minh chứng cùng vị trí GPS.';
   }
 
   return nextFormErrors;
@@ -1791,7 +1793,7 @@ export function CreateDisbursementModal({
 }: CreateDisbursementModalProps) {
   const [formData, setFormData] = useState<CreateDisbursementFormData>(createDisbursementDefaultFormState);
   const [formErrors, setFormErrors] = useState<CreateDisbursementFormErrors>({});
-  const [selectedEvidenceFiles, setSelectedEvidenceFiles] = useState<File[]>([]);
+  const [evidencePhotos, setEvidencePhotos] = useState<CapturedEvidencePhoto[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isLoadingMaxWithdrawable, setIsLoadingMaxWithdrawable] = useState(true);
   const [maxWithdrawableAmount, setMaxWithdrawableAmount] = useState<number | null>(null);
@@ -1834,22 +1836,6 @@ export function CreateDisbursementModal({
     }
 
     setSubmitErrorMessage(null);
-  };
-
-  /** Hàm nhận danh sách file minh chứng. Mục đích: giữ file ở client để upload IPFS trước khi tạo request. */
-  const handleSelectEvidenceFiles = (event: ChangeEvent<HTMLInputElement>) => {
-    const nextFileList = Array.from(event.target.files || []);
-    setSelectedEvidenceFiles(nextFileList);
-    setFormErrors(currentFormErrors => ({
-      ...currentFormErrors,
-      evidenceFiles: undefined
-    }));
-    setSubmitErrorMessage(null);
-  };
-
-  /** Hàm xóa một file minh chứng đã chọn. Mục đích: cho phép người dùng chỉnh lại file trước khi gửi yêu cầu. */
-  const handleRemoveEvidenceFile = (fileIndex: number) => {
-    setSelectedEvidenceFiles(currentFileList => currentFileList.filter((_fileItem, currentIndex) => currentIndex !== fileIndex));
   };
 
   useEffect(() => {
@@ -1900,11 +1886,11 @@ export function CreateDisbursementModal({
     };
   }, [project.projectId]);
 
-  /** Hàm submit form giải ngân. Mục đích: upload minh chứng rồi gọi API tạo yêu cầu giải ngân. */
+  /** Hàm submit form giải ngân. Ảnh camera/GPS được backend kiểm tra và pin cùng request. */
   const handleSubmitCreateDisbursement = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
 
-    const nextFormErrors = validateCreateDisbursementForm(formData, selectedEvidenceFiles, maxWithdrawableAmount);
+    const nextFormErrors = validateCreateDisbursementForm(formData, evidencePhotos, maxWithdrawableAmount);
     if (Object.keys(nextFormErrors).length > 0) {
       setFormErrors(nextFormErrors);
       setSubmitErrorMessage('Vui lòng kiểm tra lại các trường bắt buộc trước khi gửi yêu cầu giải ngân.');
@@ -1921,22 +1907,6 @@ export function CreateDisbursementModal({
     setSubmitErrorMessage(null);
 
     try {
-      const uploadPayload: UploadEvidenceFilePayload[] = await Promise.all(
-        selectedEvidenceFiles.map(async fileItem => ({
-          fileName: fileItem.name,
-          mimeType: fileItem.type || 'application/octet-stream',
-          contentBase64: await convertFileToBase64(fileItem)
-        }))
-      );
-
-      const uploadResponse = await fetchApi<UploadEvidenceResponse>(buildApiUrl('/projects/evidences/upload'), {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${authSession.accessToken}` },
-        body: JSON.stringify({ files: uploadPayload })
-      });
-
-      const evidenceCid = uploadResponse.data.evidenceCids.join(',');
-
       const createResponse = await fetchApi<import('./types').DisbursementResult>(buildApiUrl('/api/disbursement/create'), {
         method: 'POST',
         headers: { Authorization: `Bearer ${authSession.accessToken}` },
@@ -1944,7 +1914,8 @@ export function CreateDisbursementModal({
           projectId: project.projectId,
           amount: Number(formData.amount),
           usagePurpose: formData.usagePurpose.trim(),
-          evidenceCid,
+          evidencePhotos: evidencePhotos.map(({ localId, previewObjectUrl, ...photo }) => photo),
+          clientSubmittedAt: new Date().toISOString(),
           requestMode: formData.requestMode,
           emergencyReason: formData.requestMode === 'EMERGENCY' ? formData.emergencyReason.trim() : undefined,
           beneficiaryBankAccount: {
@@ -2045,20 +2016,18 @@ export function CreateDisbursementModal({
             ) : null}
 
             <div className="md:col-span-2">
-              <p className="mb-1 text-xs font-semibold text-[#374151]">Minh chứng sử dụng tiền</p>
-              <input type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.docx" onChange={handleSelectEvidenceFiles} className="w-full rounded border border-[#D1D5DB] px-3 py-2" />
-              <p className="mt-1 text-xs text-[#6B7280]">Tải lên chứng từ, kế hoạch hoặc tài liệu liên quan để phục vụ ký duyệt 2/3.</p>
-              {formErrors.evidenceFiles ? <p className="mt-1 text-xs text-[#DC2626]">{formErrors.evidenceFiles}</p> : null}
-              {selectedEvidenceFiles.length > 0 ? (
-                <div className="mt-2 space-y-1">
-                  {selectedEvidenceFiles.map((fileItem, fileIndex) => (
-                    <div key={`${fileItem.name}-${fileIndex}`} className="flex items-center justify-between rounded border border-[#E5E7EB] bg-[#F9FAFB] px-2 py-1 text-xs">
-                      <span className="truncate">{fileItem.name}</span>
-                      <button type="button" onClick={() => handleRemoveEvidenceFile(fileIndex)} className="text-[#DC2626]">Xóa</button>
-                    </div>
-                  ))}
-                </div>
-              ) : null}
+              <EvidenceCameraCapture
+                maxPhotos={5}
+                photos={evidencePhotos}
+                onChange={nextPhotos => {
+                  setEvidencePhotos(nextPhotos);
+                  setFormErrors(currentErrors => ({ ...currentErrors, evidencePhotos: undefined }));
+                  setSubmitErrorMessage(null);
+                }}
+                moduleLabel="yêu cầu giải ngân"
+                disabled={isSubmitting}
+              />
+              {formErrors.evidencePhotos ? <p className="mt-1 text-xs text-[#DC2626]">{formErrors.evidencePhotos}</p> : null}
             </div>
           </div>
 

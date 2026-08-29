@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import { OAuth2Client, TokenPayload } from 'google-auth-library';
 import jsonWebToken, { Secret, SignOptions } from 'jsonwebtoken';
+import { isAddress, verifyMessage } from 'ethers';
 import { getGoogleAuthConfig } from '../config/googleAuth';
 import { getJsonWebTokenConfig, getJsonWebTokenSecret } from '../config/jsonWebToken';
 import { parseDurationToMilliseconds } from '../utils/timeUtils';
@@ -14,7 +15,11 @@ import {
   createRefreshSession,
   findRefreshSessionById,
   findUserByEmail,
+  findUserByGovernanceWalletAddress,
+  findRootAdminWalletUsers,
   findUserById,
+  findWalletLoginNonce,
+  consumeWalletLoginNonce,
   getActiveRefreshSessionsByUserId,
   revokeRefreshSession,
   revokeRefreshSessionsByUserId,
@@ -23,6 +28,7 @@ import {
   createUser
 } from '../models/authModel';
 import { getLogger } from '../config/logger';
+import { getAdminLoginWalletAddresses, isAuthorizedAdminLoginWallet } from '../config/adminAccess';
 
 const googleAuthConfig = getGoogleAuthConfig();
 const googleOAuthClient = new OAuth2Client(googleAuthConfig.clientId);
@@ -34,6 +40,7 @@ const refreshTokenExpirationMs = parseDurationToMilliseconds(
   jsonWebTokenConfig.refreshTokenExpiresIn,
   24 * 60 * 60 * 1000
 );
+const GOVERNANCE_WALLET_LOGIN_ROLES = new Set(['admin', 'executive_chair', 'executive_member']);
 
 type GoogleUserProfile = {
   email: string;
@@ -198,6 +205,48 @@ function createCorrelationId(): string {
   return crypto.randomUUID();
 }
 
+/** Tạo thông điệp EIP-4361 có domain, URI, chain ID và thời hạn để chữ ký không thể tái sử dụng ở origin hay mạng khác. */
+export function buildWalletLoginMessage(walletAddress: string, nonce: string, issuedAt: Date, expiresAt: Date): string {
+  const configuration = getWalletLoginConfiguration();
+  return [
+    `${configuration.domain} wants you to sign in with your Ethereum account:`,
+    walletAddress,
+    '',
+    'Sign in to the DCP governance portal.',
+    '',
+    `URI: ${configuration.uri}`,
+    'Version: 1',
+    `Chain ID: ${configuration.chainId}`,
+    `Nonce: ${nonce}`,
+    `Issued At: ${issuedAt.toISOString()}`,
+    `Expiration Time: ${expiresAt.toISOString()}`
+  ].join('\n');
+}
+
+/** Đọc và kiểm tra origin/chain cho SIWE; production fail-closed nếu thiếu cấu hình ràng buộc chữ ký. */
+function getWalletLoginConfiguration(): { domain: string; uri: string; chainId: number } {
+  const configuredFrontendUrl = process.env.FRONTEND_URL?.trim() || '';
+  const configuredChainId = Number(process.env.BLOCKCHAIN_CHAIN_ID || 0);
+  if (process.env.NODE_ENV === 'production' && (!configuredFrontendUrl || !Number.isSafeInteger(configuredChainId) || configuredChainId <= 0)) {
+    throw new Error('FRONTEND_URL và BLOCKCHAIN_CHAIN_ID là bắt buộc cho wallet login ở production.');
+  }
+  const frontendUrl = configuredFrontendUrl || 'http://localhost:3000';
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(frontendUrl);
+  } catch {
+    throw new Error('FRONTEND_URL phải là URL HTTP(S) hợp lệ cho wallet login.');
+  }
+  if (!['http:', 'https:'].includes(parsedUrl.protocol) || parsedUrl.username || parsedUrl.password || parsedUrl.pathname !== '/' || parsedUrl.search || parsedUrl.hash) {
+    throw new Error('FRONTEND_URL phải là origin HTTP(S) không chứa credentials hoặc path cho wallet login.');
+  }
+  return {
+    domain: parsedUrl.host,
+    uri: parsedUrl.origin,
+    chainId: Number.isSafeInteger(configuredChainId) && configuredChainId > 0 ? configuredChainId : 80002
+  };
+}
+
 /**
  * Hàm chuyển đổi dữ liệu Google thành hồ sơ người dùng.
  * Mục đích: chuẩn hóa dữ liệu đăng nhập.
@@ -261,10 +310,54 @@ async function generateTokenPair(user: AuthUser, ipAddress: string, userAgent: s
   };
 }
 
-/**
- * Hàm ghi audit log đăng nhập.
- * Mục đích: lưu dấu vết đăng nhập thất bại hoặc thiết bị mới.
- */
+/** Cập nhật metadata rồi phát đúng bộ token dùng chung cho mọi phương thức đăng nhập hợp lệ. */
+async function completeAuthenticatedLogin(
+  user: AuthUser,
+  ipAddress: string,
+  userAgent: string
+): Promise<{
+  accessToken: string;
+  refreshToken: string;
+  csrfToken: string;
+  refreshSessionId: string;
+  expiresAt: Date;
+  user: Pick<AuthUser, 'id' | 'email' | 'fullName' | 'walletAddress' | 'role' | 'accountStatus'>;
+  correlationId: string;
+}> {
+  const correlationId = createCorrelationId();
+  handleNewDeviceLogin(user, ipAddress, userAgent);
+  const authenticatedUser = await updateUser({
+    ...user,
+    lastLoginAt: new Date(),
+    lastLoginIp: ipAddress,
+    lastLoginUserAgent: userAgent,
+    correlationId
+  });
+  const tokenPair = await generateTokenPair(authenticatedUser, ipAddress, userAgent);
+  return {
+    accessToken: tokenPair.accessToken,
+    refreshToken: tokenPair.refreshToken,
+    csrfToken: tokenPair.csrfToken,
+    refreshSessionId: tokenPair.sessionId,
+    expiresAt: tokenPair.expiresAt,
+    user: {
+      id: authenticatedUser.id,
+      email: authenticatedUser.email,
+      fullName: authenticatedUser.fullName,
+      walletAddress: authenticatedUser.walletAddress,
+      role: authenticatedUser.role,
+      accountStatus: authenticatedUser.accountStatus
+    },
+    correlationId
+  };
+}
+
+/** Gắn mã lỗi HTTP có chủ đích cho controller mà không lộ chi tiết xác thực ra client. */
+function createWalletLoginError(message: string, statusCode: number): Error & { statusCode: number } {
+  return Object.assign(new Error(message), { statusCode });
+}
+
+/** Ghi audit log đăng nhập để lưu dấu vết thất bại hoặc thiết bị mới. */
 async function logAuthEvent(entry: AuditLogEntry): Promise<void> {
   await addAuditLog(entry);
 }
@@ -349,6 +442,7 @@ export async function loginWithGoogle(
         // Ghi chú logic phức tạp: đăng ký tổ chức chỉ tạo hồ sơ chờ KYC, không cấp quyền organization trước khi duyệt.
         role: initialUserRole,
         walletAddress: smartAccountCreationResult.walletAddress,
+        governanceWalletAddress: null,
         smartAccountOwnerAddress: smartAccountCreationResult.ownerAddress,
         smartAccountOwnerEncryptedPrivateKey: smartAccountCreationResult.encryptedOwnerPrivateKey,
         socialProvider: 'google',
@@ -387,6 +481,9 @@ export async function loginWithGoogle(
       });
     }
   } else {
+    if (GOVERNANCE_WALLET_LOGIN_ROLES.has(existingUser.role)) {
+      throw createWalletLoginError('Tài khoản quản trị đăng nhập tại cổng riêng bằng ví MetaMask.', 403);
+    }
     handleNewDeviceLogin(existingUser, ipAddress, userAgent);
 
     // Ghi chú logic phức tạp: user cũ có thể chưa có owner key mã hóa, cần tự động cấp để dùng flow one-click donation.
@@ -424,10 +521,189 @@ export async function loginWithGoogle(
   };
 }
 
-/**
- * Hàm làm mới access token.
- * Mục đích: xác thực refresh token và cấp token mới.
- */
+/** Xác minh chữ ký MetaMask, tiêu thụ nonce một lần và phát phiên quản trị cho tài khoản đã được cấp ghế. */
+export async function loginWithWallet(
+  walletAddress: string,
+  nonce: string,
+  signature: string,
+  ipAddress: string,
+  userAgent: string
+): Promise<{
+  accessToken: string;
+  refreshToken: string;
+  csrfToken: string;
+  refreshSessionId: string;
+  expiresAt: Date;
+  user: Pick<AuthUser, 'id' | 'email' | 'fullName' | 'walletAddress' | 'role' | 'accountStatus'>;
+  correlationId: string;
+}> {
+  if (!isAddress(walletAddress)) {
+    throw createWalletLoginError('Địa chỉ ví không hợp lệ.', 400);
+  }
+
+  const normalizedWalletAddress = walletAddress.toLowerCase();
+  const nonceRecord = await findWalletLoginNonce(normalizedWalletAddress, nonce);
+  if (!nonceRecord) {
+    throw createWalletLoginError('Nonce đăng nhập không hợp lệ hoặc đã hết hạn.', 401);
+  }
+
+  let recoveredAddress: string;
+  try {
+    recoveredAddress = verifyMessage(
+      buildWalletLoginMessage(normalizedWalletAddress, nonceRecord.nonce, nonceRecord.createdAt, nonceRecord.expiresAt),
+      signature
+    ).toLowerCase();
+  } catch {
+    throw createWalletLoginError('Chữ ký ví không hợp lệ.', 401);
+  }
+
+  if (recoveredAddress !== normalizedWalletAddress) {
+    throw createWalletLoginError('Chữ ký không thuộc địa chỉ ví đã khai báo.', 401);
+  }
+
+  if (!await consumeWalletLoginNonce(nonceRecord.id)) {
+    throw createWalletLoginError('Nonce đăng nhập đã được sử dụng.', 401);
+  }
+
+  const user = await findUserByGovernanceWalletAddress(normalizedWalletAddress);
+  if (!user || !GOVERNANCE_WALLET_LOGIN_ROLES.has(user.role)) {
+    throw createWalletLoginError('Địa chỉ này chưa được cấp quyền quản trị.', 403);
+  }
+  // Chỉ ví đã được chủ hệ thống chỉ định mới có thể phát hành phiên admin, kể cả khi DB còn bản ghi admin legacy.
+  if (user.role === 'admin' && !isAuthorizedAdminLoginWallet(user.governanceWalletAddress)) {
+    throw createWalletLoginError('Tài khoản admin chỉ được phép đăng nhập bằng ví đã ủy quyền.', 403);
+  }
+  if (user.accountStatus !== 'ACTIVE' || user.isSybil) {
+    throw createWalletLoginError('Tài khoản quản trị không còn hoạt động.', 403);
+  }
+
+  const loginResult = await completeAuthenticatedLogin(user, ipAddress, userAgent);
+  // Không ghi nonce/chữ ký vào audit vì chúng là dữ liệu xác thực nhạy cảm và chỉ dùng một lần.
+  logAuthEvent({
+    id: crypto.randomUUID(),
+    userId: user.id,
+    email: user.email,
+    eventType: 'WALLET_LOGIN_SUCCESS',
+    ipAddress,
+    userAgent,
+    detail: `Đăng nhập cổng quản trị bằng ví ${normalizedWalletAddress}`,
+    createdAt: new Date()
+  }).catch(() => undefined);
+  return loginResult;
+}
+
+/** Lưu audit bất biến khi một ví được trao lại quyền root admin qua cấu hình vận hành. */
+async function logRootAdminWalletAdded(userId: string, email: string, walletAddress: string): Promise<void> {
+  await logAuthEvent({
+    id: crypto.randomUUID(),
+    userId,
+    email,
+    eventType: 'ROOT_ADMIN_WALLET_ADDED',
+    ipAddress: 'SYSTEM',
+    userAgent: 'server-bootstrap',
+    detail: `Ví root admin ${walletAddress} đã được đồng bộ từ allowlist hệ thống.`,
+    createdAt: new Date()
+  });
+}
+
+/** Đồng bộ allowlist ví admin từ môi trường trước khi server nhận request và thu hồi root admin legacy. */
+export async function ensureRootAdminWallets(): Promise<void> {
+  const normalizedWalletAddresses = new Set(getAdminLoginWalletAddresses());
+  for (const normalizedWalletAddress of normalizedWalletAddresses) {
+    const existingGovernanceUser = await findUserByGovernanceWalletAddress(normalizedWalletAddress);
+    if (existingGovernanceUser) {
+      if (existingGovernanceUser.role !== 'admin') {
+        throw new Error('Ví admin gốc đã được gán cho tài khoản không phải admin.');
+      }
+      const shouldAuditAddition = existingGovernanceUser.accountStatus !== 'ACTIVE' || !existingGovernanceUser.isRootAdminWallet;
+      if (existingGovernanceUser.accountStatus !== 'ACTIVE') {
+        await updateUser({ ...existingGovernanceUser, accountStatus: 'ACTIVE', isRootAdminWallet: true, authVersion: existingGovernanceUser.authVersion + 1 });
+      } else if (!existingGovernanceUser.isRootAdminWallet) {
+        await updateUser({ ...existingGovernanceUser, isRootAdminWallet: true });
+      }
+      if (shouldAuditAddition) await logRootAdminWalletAdded(existingGovernanceUser.id, existingGovernanceUser.email, normalizedWalletAddress);
+      continue;
+    }
+
+    const email = `${normalizedWalletAddress}@wallet.dcp.local`;
+    const existingEmailUser = await findUserByEmail(email);
+    if (existingEmailUser) {
+      if (existingEmailUser.role !== 'admin') {
+        throw new Error('Email đại diện cho ví admin gốc đã thuộc tài khoản không phải admin.');
+      }
+      const shouldAuditAddition = existingEmailUser.accountStatus !== 'ACTIVE'
+        || !existingEmailUser.isRootAdminWallet
+        || existingEmailUser.governanceWalletAddress !== normalizedWalletAddress;
+      await updateUser({
+        ...existingEmailUser,
+        governanceWalletAddress: normalizedWalletAddress,
+        walletAddress: normalizedWalletAddress,
+        accountStatus: 'ACTIVE',
+        isRootAdminWallet: true,
+        authVersion: existingEmailUser.authVersion + 1
+      });
+      if (shouldAuditAddition) await logRootAdminWalletAdded(existingEmailUser.id, existingEmailUser.email, normalizedWalletAddress);
+      continue;
+    }
+
+    const userId = crypto.randomUUID();
+    await createUser({
+      id: userId,
+      // Email nội bộ giữ nguyên invariant schema cũ; tuyệt đối không dùng để gửi thư.
+      email,
+      fullName: `Quản trị gốc ${normalizedWalletAddress.slice(0, 8)}`,
+      role: 'admin',
+      walletAddress: normalizedWalletAddress,
+      governanceWalletAddress: normalizedWalletAddress,
+      isRootAdminWallet: true,
+      smartAccountOwnerAddress: null,
+      smartAccountOwnerEncryptedPrivateKey: null,
+      socialProvider: 'metamask',
+      socialAccountId: normalizedWalletAddress,
+      isEmailVerified: false,
+      accountStatus: 'ACTIVE',
+      organizationName: null,
+      legalRegistrationNumber: null,
+      isSybil: false,
+      lastLoginAt: null,
+      lastLoginIp: null,
+      lastLoginUserAgent: null,
+      correlationId: crypto.randomUUID(),
+      fcmDeviceToken: null,
+      phoneNumber: null,
+      authVersion: 1
+    });
+    await logRootAdminWalletAdded(userId, email, normalizedWalletAddress);
+  }
+
+  const previousRootAdmins = await findRootAdminWalletUsers();
+  await Promise.all(previousRootAdmins
+    .filter(user => !normalizedWalletAddresses.has((user.governanceWalletAddress || '').toLowerCase()))
+    .map(async user => {
+      const isRemoval = user.accountStatus !== 'SUSPENDED';
+      if (isRemoval) {
+        await updateUser({
+          ...user,
+          accountStatus: 'SUSPENDED',
+          authVersion: user.authVersion + 1
+        });
+      }
+      await revokeRefreshSessionsByUserId(user.id);
+      if (!isRemoval) return;
+      await logAuthEvent({
+        id: crypto.randomUUID(),
+        userId: user.id,
+        email: user.email,
+        eventType: 'ROOT_ADMIN_WALLET_REMOVED',
+        ipAddress: 'SYSTEM',
+        userAgent: 'server-bootstrap',
+        detail: 'Ví root admin đã bị thu hồi do không còn trong allowlist admin hệ thống.',
+        createdAt: new Date()
+      });
+    }));
+}
+
+/** Làm mới access token bằng refresh session hợp lệ và metadata thiết bị khớp. */
 export async function refreshAccessToken(
   refreshSessionId: string,
   refreshToken: string,
@@ -502,6 +778,15 @@ export async function refreshAccessToken(
   const userData = await findUserById(existingSession.userId);
   if (!userData) {
     throw new Error('User not found.');
+  }
+  if (userData.accountStatus !== 'ACTIVE' || userData.isSybil) {
+    await revokeRefreshSessionsByUserId(userData.id);
+    throw new Error('User account is no longer active.');
+  }
+  // Refresh cũng phải fail-closed để session admin legacy không sống lại sau khi allowlist đã thay đổi.
+  if (userData.role === 'admin' && !isAuthorizedAdminLoginWallet(userData.governanceWalletAddress)) {
+    await revokeRefreshSessionsByUserId(userData.id);
+    throw new Error('Admin wallet is no longer authorized.');
   }
 
   const newAccessToken = createAccessToken({

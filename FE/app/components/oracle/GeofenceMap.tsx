@@ -18,6 +18,9 @@ import L from 'leaflet';
 import { MapContainer, TileLayer, Polygon, Circle, CircleMarker, Popup, useMap } from 'react-leaflet';
 import { useGeofence } from '@/app/hooks/useGeofence';
 import {
+  ADMINISTRATIVE_BOUNDARY_ATTRIBUTION,
+  ADMINISTRATIVE_BOUNDARY_MAX_ZOOM,
+  getAdministrativeBoundaryTileUrl,
   getMapTileUrl,
   MAP_MAX_ZOOM,
   MAP_MIN_ZOOM,
@@ -371,6 +374,17 @@ export default function GeofenceMap({ projectId, snapshot, markers = EMPTY_GEOFE
           minZoom={MAP_MIN_ZOOM}
           maxZoom={MAP_MAX_ZOOM}
           maxNativeZoom={MAP_MAX_ZOOM}
+          noWrap
+        />
+
+        {/* Lớp địa giới và tên tỉnh/thành sau sáp nhập để reviewer đối chiếu đúng khu vực. */}
+        <TileLayer
+          attribution={ADMINISTRATIVE_BOUNDARY_ATTRIBUTION}
+          url={getAdministrativeBoundaryTileUrl()}
+          minZoom={MAP_MIN_ZOOM}
+          maxZoom={MAP_MAX_ZOOM}
+          maxNativeZoom={ADMINISTRATIVE_BOUNDARY_MAX_ZOOM}
+          opacity={0.9}
           noWrap
         />
 

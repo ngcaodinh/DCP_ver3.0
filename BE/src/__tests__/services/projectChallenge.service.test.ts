@@ -1,18 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ProjectRecord } from '../../models/projectModel';
 
-const { mockCreateChallenge, mockFindChallenge, mockFindProject, mockFindOne, mockOpenCase, mockProcessPhotos, mockQuota, mockUpdateIfStatus } = vi.hoisted(() => ({
+const { mockAcquireCase, mockCleanupPhotos, mockCreateChallenge, mockFindChallenge, mockFindProject, mockFindOne, mockOpenCase, mockProcessPhotos, mockQuota, mockReleaseCase, mockUpdateIfStatus } = vi.hoisted(() => ({
+  mockAcquireCase: vi.fn(),
   mockCreateChallenge: vi.fn(), mockFindChallenge: vi.fn(), mockFindProject: vi.fn(), mockFindOne: vi.fn(),
-  mockOpenCase: vi.fn(), mockProcessPhotos: vi.fn(() => Promise.resolve([])), mockQuota: vi.fn(), mockUpdateIfStatus: vi.fn()
+  mockOpenCase: vi.fn(), mockCleanupPhotos: vi.fn(), mockProcessPhotos: vi.fn(() => Promise.resolve([])), mockQuota: vi.fn(), mockReleaseCase: vi.fn(), mockUpdateIfStatus: vi.fn()
 }));
 
 vi.mock('../../utils/mongoTransaction', () => ({ runMongoTransaction: async (work: (session: undefined) => unknown) => work(undefined) }));
 vi.mock('../../repositories/projectRepository', () => ({ findProjectById: mockFindProject, updateProjectIfStatus: mockUpdateIfStatus }));
 vi.mock('../../repositories/projectChallengeRepository', () => ({ createProjectChallengeFromRepository: mockCreateChallenge, findChallengeByProjectRoundAndUser: mockFindChallenge, countProjectChallengesByUserSinceFromRepository: mockQuota }));
 vi.mock('../../repositories/evidencePhotoRegistryRepository', () => ({ createEvidencePhotoRegistryRecordsFromRepository: vi.fn() }));
-vi.mock('../../services/evidencePhotoCapture.service', () => ({ processCapturedEvidencePhotos: mockProcessPhotos }));
+vi.mock('../../services/evidencePhotoCapture.service', () => ({ processCapturedEvidencePhotos: mockProcessPhotos, cleanupCapturedEvidencePhotos: mockCleanupPhotos }));
 vi.mock('../../services/projectArbitration.service', () => ({ openArbitrationCase: mockOpenCase }));
 vi.mock('../../models/projectArbitrationModel', () => ({ ProjectArbitrationMongoModel: { findOne: mockFindOne } }));
+vi.mock('../../models/auditorStakeGuardModel', () => ({ acquireAuditorOpenCase: mockAcquireCase, initializeAuditorStakeGuard: vi.fn(), releaseAuditorOpenCase: mockReleaseCase }));
 
 import { submitProjectChallenge } from '../../services/projectChallenge.service';
 
@@ -30,6 +32,7 @@ describe('project challenge service', () => {
     mockCreateChallenge.mockResolvedValue({ challengeId: 'challenge-1' });
     mockUpdateIfStatus.mockResolvedValue(project('DISPUTED'));
     mockOpenCase.mockResolvedValue({ arbitrationId: 'case-1' });
+    mockAcquireCase.mockResolvedValue({ auditorUserId: 'auditor-1' });
   });
 
   it('closes the challenge window after a project is ACTIVE', async () => {

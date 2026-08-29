@@ -19,18 +19,6 @@ export function getNavigationItems(): NavigationItem[] {
       iconPath: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6',
     },
     {
-      key: 'projectReview',
-      label: 'Duyệt dự án mới',
-      badge: 2,
-      iconPath: 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z',
-    },
-    {
-      key: 'disbursement',
-      label: 'Ký duyệt Giải ngân',
-      badge: 3,
-      iconPath: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z',
-    },
-    {
       key: 'kyc',
       label: 'Duyệt Hồ sơ KYC',
       badge: 5,
@@ -62,6 +50,11 @@ export function getNavigationItems(): NavigationItem[] {
       key: 'transferQueue',
       label: 'Hàng chờ chuyển khoản',
       iconPath: 'M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z',
+    },
+    {
+      key: 'committeeSeats',
+      label: 'Ghế Ủy ban',
+      iconPath: 'M12 12a4 4 0 100-8 4 4 0 000 8zm-7 9a7 7 0 0114 0H5z',
     },
     {
       key: 'feedbackFlagging',

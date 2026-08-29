@@ -9,12 +9,14 @@ import {
   updateAuditorPayoutAccountForUser,
   withdrawAuditorStake
 } from '../services/auditorOnboardingService';
-import { retryAuditorPayoutBurnAfterManualReview } from '../services/auditorPayoutService';
+import { createAuditorRewardWithdrawalPayout } from '../services/auditorPayoutCreationService';
+import { cancelAuditorRewardPayoutAfterManualReview, retryAuditorPayoutBurnAfterManualReview } from '../services/auditorPayoutService';
 import { auditorPayoutAccountSchema } from '../validators/auditorPayoutAccountValidator';
 import { sendErrorFromUnknown, sendSuccessResponse } from '../utils/apiResponse';
 import type { AuthenticatedRequest } from '../middleware/authenticationMiddleware';
 import { ApplicationError } from '../utils/applicationError';
 import { recordAdminAuditLog } from '../services/audit-log.service';
+import { getAuditorEarnings, getAuditorStakeOverview } from '../services/auditorPortalReadService';
 
 const registerSchema = z.object({
   identityToken: z.string().trim().min(20),
@@ -22,13 +24,17 @@ const registerSchema = z.object({
   payoutAccount: auditorPayoutAccountSchema
 });
 const resumeSchema = z.object({ identityToken: z.string().trim().min(20) });
+const stakeSchema = z.object({ amount: z.coerce.bigint().positive().optional() });
 const unstakeSchema = z.object({ amount: z.coerce.bigint().positive() });
+const rewardWithdrawSchema = z.object({ amountVnd: z.coerce.number().int().positive() });
 const intentParamsSchema = z.object({ intentId: z.string().uuid() });
 const retryPayoutBurnParamsSchema = z.object({ payoutId: z.string().uuid() });
 const retryPayoutBurnSchema = z.object({
   payosTransferId: z.string().trim().min(1).max(200),
   reason: z.string().trim().min(10).max(1_000)
 });
+const cancelRewardPayoutSchema = z.object({ reason: z.string().trim().min(10).max(1_000) });
+const stakeOverviewQuerySchema = z.object({ withExitEligibility: z.enum(['1']).optional() });
 
 function getCorrelationId(request: Request): string | undefined {
   return request.headers['x-request-id']?.toString();
@@ -78,8 +84,15 @@ export async function handleResumeAuditorIntent(request: Request, response: Resp
 export async function handleExecuteAuditorStake(request: Request, response: Response): Promise<void> {
   const userId = getAuthenticatedUserId(request);
   if (!userId) return;
+  const parsed = stakeSchema.safeParse(request.body ?? {});
+  if (!parsed.success) {
+    sendErrorFromUnknown(response, new ApplicationError('Số tiền đặt cọc không hợp lệ.', 400, 'VALIDATION_ERROR'), 'Số tiền đặt cọc không hợp lệ.', getCorrelationId(request));
+    return;
+  }
   try {
-    const result = await executeAuditorStake(userId);
+    const result = parsed.data.amount === undefined
+      ? await executeAuditorStake(userId)
+      : await executeAuditorStake(userId, parsed.data.amount);
     sendSuccessResponse(response, 202, 'Giao dịch đặt cọc đang được xác minh.', result, getCorrelationId(request));
   } catch (error) {
     sendErrorFromUnknown(response, error, 'Không thể gửi giao dịch đặt cọc.', getCorrelationId(request));
@@ -113,6 +126,27 @@ export async function handleWithdrawAuditorStake(request: Request, response: Res
   }
 }
 
+/** Tạo payout cho toàn bộ hoặc một phần DCT thưởng đã được credit vào ví Auditor. */
+export async function handleWithdrawAuditorReward(request: Request, response: Response): Promise<void> {
+  const authenticatedUser = (request as AuthenticatedRequest).authenticatedUser;
+  if (!authenticatedUser) return;
+  if (authenticatedUser.role !== 'auditor') {
+    sendErrorFromUnknown(response, new ApplicationError('Chỉ tài khoản Kiểm toán viên mới có thể rút tiền thưởng.', 403, 'FORBIDDEN'), 'Không thể rút tiền thưởng.', getCorrelationId(request));
+    return;
+  }
+  const parsed = rewardWithdrawSchema.safeParse(request.body);
+  if (!parsed.success) {
+    sendErrorFromUnknown(response, new ApplicationError('Số tiền thưởng rút không hợp lệ.', 400, 'VALIDATION_ERROR'), 'Số tiền thưởng rút không hợp lệ.', getCorrelationId(request));
+    return;
+  }
+  try {
+    const payout = await createAuditorRewardWithdrawalPayout({ auditorUserId: authenticatedUser.userId, amountVnd: parsed.data.amountVnd });
+    sendSuccessResponse(response, 202, 'Đã tạo lệnh chi trả tiền thưởng.', { payoutId: payout.payoutId }, getCorrelationId(request));
+  } catch (error) {
+    sendErrorFromUnknown(response, error, 'Không thể rút tiền thưởng.', getCorrelationId(request));
+  }
+}
+
 /** Cho phép admin retry burn chỉ sau khi đã đối chiếu thủ công giao dịch PayOS cùng lý do audit bắt buộc. */
 export async function handleRetryAuditorPayoutBurn(request: Request, response: Response): Promise<void> {
   const userId = getAuthenticatedUserId(request);
@@ -140,6 +174,36 @@ export async function handleRetryAuditorPayoutBurn(request: Request, response: R
     sendSuccessResponse(response, 200, 'Đã gửi lại lệnh burn DCT cho payout sau khi đối chiếu PayOS.', { payoutId: params.data.payoutId }, getCorrelationId(request));
   } catch (error) {
     sendErrorFromUnknown(response, error, 'Không thể retry burn DCT cho payout.', getCorrelationId(request));
+  }
+}
+
+/** Hủy payout thưởng kẹt trước PayOS sau audit admin bắt buộc để trả lại quyền rút cho Auditor. */
+export async function handleCancelAuditorRewardPayout(request: Request, response: Response): Promise<void> {
+  const userId = getAuthenticatedUserId(request);
+  if (!userId) return;
+  const params = retryPayoutBurnParamsSchema.safeParse(request.params);
+  const body = cancelRewardPayoutSchema.safeParse(request.body);
+  if (!params.success || !body.success) {
+    sendErrorFromUnknown(response, new ApplicationError('Dữ liệu hủy payout thưởng không hợp lệ.', 400, 'VALIDATION_ERROR'), 'Dữ liệu hủy payout thưởng không hợp lệ.', getCorrelationId(request));
+    return;
+  }
+  try {
+    await recordAdminAuditLog({
+      actorType: 'ADMIN',
+      adminId: userId,
+      adminRole: (request as AuthenticatedRequest).authenticatedUser?.role ?? 'admin',
+      actionType: 'AUDITOR_REWARD_PAYOUT_CANCEL_REQUESTED',
+      targetId: params.data.payoutId,
+      targetType: 'AUDITOR_PAYOUT',
+      reason: body.data.reason,
+      ipAddress: request.headers['x-client-ip']?.toString() || request.ip || null,
+      userAgent: request.headers['user-agent']?.toString() || null,
+      context: { payoutId: params.data.payoutId }
+    });
+    await cancelAuditorRewardPayoutAfterManualReview(params.data.payoutId, body.data.reason);
+    sendSuccessResponse(response, 200, 'Đã hủy payout thưởng chưa gửi PayOS và giải phóng khóa ví.', { payoutId: params.data.payoutId }, getCorrelationId(request));
+  } catch (error) {
+    sendErrorFromUnknown(response, error, 'Không thể hủy payout thưởng.', getCorrelationId(request));
   }
 }
 
@@ -173,5 +237,41 @@ export async function handleGetAuditorOnboardingStatus(request: Request, respons
     sendSuccessResponse(response, 200, 'Đã lấy trạng thái đăng ký Kiểm toán viên.', result, getCorrelationId(request));
   } catch (error) {
     sendErrorFromUnknown(response, error, 'Không thể lấy trạng thái đăng ký Kiểm toán viên.', getCorrelationId(request));
+  }
+}
+
+/** Trả tổng quan cọc cho chính Auditor, không dùng fresh-role guard để tài khoản bị suspend vẫn xem được tài sản. */
+export async function handleGetAuditorStakeOverview(request: Request, response: Response): Promise<void> {
+  const authenticatedUser = (request as AuthenticatedRequest).authenticatedUser;
+  if (!authenticatedUser) return;
+  if (authenticatedUser.role !== 'auditor') {
+    sendErrorFromUnknown(response, new ApplicationError('Chỉ tài khoản Kiểm toán viên mới xem được thông tin này.', 403, 'FORBIDDEN'), 'Không thể lấy tổng quan cọc.', getCorrelationId(request));
+    return;
+  }
+  const query = stakeOverviewQuerySchema.safeParse(request.query);
+  if (!query.success) {
+    sendErrorFromUnknown(response, new ApplicationError('Query tổng quan cọc không hợp lệ.', 400, 'VALIDATION_ERROR'), 'Không thể lấy tổng quan cọc.', getCorrelationId(request));
+    return;
+  }
+  try {
+    const withExitEligibility = query.data.withExitEligibility === '1';
+    sendSuccessResponse(response, 200, 'Đã lấy tổng quan cọc.', await getAuditorStakeOverview(authenticatedUser.userId, withExitEligibility), getCorrelationId(request));
+  } catch (error) {
+    sendErrorFromUnknown(response, error, 'Không thể lấy tổng quan cọc.', getCorrelationId(request));
+  }
+}
+
+/** Trả sổ tiền đã che PII cho chính Auditor với giới hạn đọc hữu hạn. */
+export async function handleGetAuditorEarnings(request: Request, response: Response): Promise<void> {
+  const authenticatedUser = (request as AuthenticatedRequest).authenticatedUser;
+  if (!authenticatedUser) return;
+  if (authenticatedUser.role !== 'auditor') {
+    sendErrorFromUnknown(response, new ApplicationError('Chỉ tài khoản Kiểm toán viên mới xem được thông tin này.', 403, 'FORBIDDEN'), 'Không thể lấy lịch sử tiền.', getCorrelationId(request));
+    return;
+  }
+  try {
+    sendSuccessResponse(response, 200, 'Đã lấy lịch sử tiền.', await getAuditorEarnings(authenticatedUser.userId, request.query.limit), getCorrelationId(request));
+  } catch (error) {
+    sendErrorFromUnknown(response, error, 'Không thể lấy lịch sử tiền.', getCorrelationId(request));
   }
 }

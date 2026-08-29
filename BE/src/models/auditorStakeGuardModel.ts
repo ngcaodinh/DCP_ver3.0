@@ -74,6 +74,49 @@ export async function acquireAuditorWithdrawalLock(auditorUserId: string, payout
   return updated ? updated.toObject() as AuditorStakeGuard : null;
 }
 
+/**
+ * Giành khóa unbonding cho lần rút một phần vẫn giữ số cọc trên ngưỡng tối thiểu.
+ * Khác acquireAuditorUnstakeLock: không đòi sạch vụ mở và nợ phạt, vì phần cọc giữ lại vẫn là tài sản
+ * bảo chứng và mọi khoản thiếu sau phán quyết đều được ghi nợ rồi thu qua auditorDebtSettlementWorker.
+ */
+export async function acquireAuditorPartialUnstakeLock(auditorUserId: string, lockRefId: string): Promise<AuditorStakeGuard | null> {
+  const updated = await AuditorStakeGuardModel.findOneAndUpdate(
+    { auditorUserId, walletLock: null },
+    { $set: { walletLock: 'UNSTAKING', lockRefId, lockedAt: new Date() } },
+    { returnDocument: 'after' }
+  ).exec();
+  return updated ? updated.toObject() as AuditorStakeGuard : null;
+}
+
+/**
+ * Giành khóa nhận lại khoản cọc một phần đã hết unbonding.
+ * Vẫn đòi penaltyDebtVnd = 0: khi còn nợ phạt, auditorDebtSettlementWorker mới là nơi được quyền tiêu
+ * khoản pending — nó thu nợ về treasury rồi tự tạo payout cho phần dư. Cho auditor tự claim ở đây
+ * sẽ đẩy tiền thẳng về ngân hàng và khoản nợ không bao giờ thu được.
+ */
+export async function acquireAuditorPartialWithdrawalLock(auditorUserId: string, payoutId: string): Promise<AuditorStakeGuard | null> {
+  const updated = await AuditorStakeGuardModel.findOneAndUpdate(
+    { auditorUserId, penaltyDebtVnd: 0, walletLock: null },
+    { $set: { walletLock: 'WITHDRAWING', lockRefId: payoutId, lockedAt: new Date() } },
+    { returnDocument: 'after' }
+  ).exec();
+  return updated ? updated.toObject() as AuditorStakeGuard : null;
+}
+
+/**
+ * Giành khóa cho payout tiền thưởng, vào thẳng PAYOUT_IN_FLIGHT vì DCT đã nằm sẵn trong ví auditor.
+ * Không có khóa này thì hai lần bấm rút đồng thời tạo hai payout, cả hai đều qua được
+ * hasAuditorPayoutBalance trước khi burn và hệ thống chi tiền mặt hai lần cho một khoản thưởng.
+ */
+export async function acquireAuditorRewardPayoutLock(auditorUserId: string, payoutId: string): Promise<AuditorStakeGuard | null> {
+  const updated = await AuditorStakeGuardModel.findOneAndUpdate(
+    { auditorUserId, walletLock: null },
+    { $set: { walletLock: 'PAYOUT_IN_FLIGHT', lockRefId: payoutId, lockedAt: new Date() } },
+    { returnDocument: 'after' }
+  ).exec();
+  return updated ? updated.toObject() as AuditorStakeGuard : null;
+}
+
 /** Khóa ngắn hạn trong lúc thay tài khoản ngân hàng để snapshot payout không thể lấy dữ liệu giữa hai phiên bản. */
 export async function acquireAuditorPayoutAccountUpdateLock(auditorUserId: string, lockRefId: string): Promise<AuditorStakeGuard | null> {
   const updated = await AuditorStakeGuardModel.findOneAndUpdate(

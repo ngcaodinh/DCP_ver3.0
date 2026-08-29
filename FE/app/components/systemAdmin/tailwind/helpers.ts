@@ -14,7 +14,6 @@ import type { PageKey, SybilRiskLevel } from './types';
 export function getPageTitle(key: PageKey): string {
   const titles: Record<PageKey, string> = {
     dashboard: 'Tổng quan hệ thống',
-    projectReview: 'Duyệt dự án mới',
     disbursement: 'Ký duyệt Giải ngân',
     kyc: 'Duyệt Hồ sơ KYC',
     bankAccountApproval: 'Duyệt tài khoản ngân hàng',
@@ -24,6 +23,7 @@ export function getPageTitle(key: PageKey): string {
     sybilManagement: 'Quản lý Sybil Attack',
     transferQueue: 'Hàng chờ chuyển khoản',
     feedbackFlagging: 'Feedback bị flag',
+    committeeSeats: 'Ghế Ủy ban',
   };
   return titles[key] ?? 'Không xác định';
 }

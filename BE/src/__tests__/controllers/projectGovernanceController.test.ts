@@ -2,30 +2,40 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Response } from 'express';
 import type { AuthenticatedRequest } from '../../middleware/authenticationMiddleware';
 
-const { mockFindFieldReport, mockFindFieldReports, mockFindProjectsByStatus, mockFindProjectsByIds, mockFindChallengeRounds, mockFindChallengeCounts, mockFindPendingArbitrations, mockFindUsersByIds } = vi.hoisted(() => ({
+const { mockFindFieldReport, mockFindFieldReports, mockFindProjectsByStatus, mockFindProjectsByIds, mockFindProjectById, mockFindChallengeRounds, mockFindChallenges, mockFindChallengeCounts, mockFindPendingArbitrations, mockFindArbitrationById, mockFindUsersByIds, mockFindListingVerifications, mockFindGeofence, mockAggregateDonationSummary, mockVoteOnArbitration } = vi.hoisted(() => ({
   mockFindFieldReport: vi.fn(),
   mockFindFieldReports: vi.fn(),
   mockFindProjectsByStatus: vi.fn(),
   mockFindProjectsByIds: vi.fn(),
+  mockFindProjectById: vi.fn(),
   mockFindChallengeRounds: vi.fn(),
+  mockFindChallenges: vi.fn(),
   mockFindChallengeCounts: vi.fn(),
   mockFindPendingArbitrations: vi.fn(),
-  mockFindUsersByIds: vi.fn()
+  mockFindArbitrationById: vi.fn(),
+  mockFindUsersByIds: vi.fn(),
+  mockFindListingVerifications: vi.fn(),
+  mockFindGeofence: vi.fn(),
+  mockAggregateDonationSummary: vi.fn(),
+  mockVoteOnArbitration: vi.fn()
 }));
 
 vi.mock('../../models/authModel', () => ({ findUserById: vi.fn(), findUsersByIds: mockFindUsersByIds }));
 vi.mock('../../services/projectService', () => ({ updateProjectMilestonePlanForOrganization: vi.fn() }));
 vi.mock('../../services/projectChallenge.service', () => ({ submitProjectChallenge: vi.fn() }));
 vi.mock('../../services/projectActivation.service', () => ({ retryFailedProjectActivation: vi.fn() }));
-vi.mock('../../services/projectArbitration.service', () => ({ voteOnArbitration: vi.fn() }));
+vi.mock('../../services/projectArbitration.service', () => ({ prepareArbitrationVoteSignature: vi.fn(), recoverDeadLetterProjectArbitrationOnChainDecision: vi.fn(), voteOnArbitration: mockVoteOnArbitration }));
 vi.mock('../../services/auditorFieldReport.service', () => ({ submitAuditorFieldReport: vi.fn() }));
 vi.mock('../../repositories/auditorFieldReportRepository', () => ({ findAuditorFieldReportByProjectIdFromRepository: mockFindFieldReport, findAuditorFieldReportsByProjectIdsFromRepository: mockFindFieldReports }));
-vi.mock('../../repositories/projectChallengeRepository', () => ({ countProjectChallengesByProjectRoundFromRepository: mockFindChallengeCounts, findProjectChallengesFromRepository: vi.fn(), findProjectChallengeProjectRoundsByUserFromRepository: mockFindChallengeRounds }));
-vi.mock('../../repositories/projectRepository', () => ({ findProjectById: vi.fn(), findProjectsByIdList: mockFindProjectsByIds, findProjectsByStatusFromRepository: mockFindProjectsByStatus }));
-vi.mock('../../repositories/projectArbitrationRepository', () => ({ findProjectArbitrationByIdFromRepository: vi.fn(), findPendingProjectArbitrationsFromRepository: mockFindPendingArbitrations }));
+vi.mock('../../repositories/projectChallengeRepository', () => ({ countProjectChallengesByProjectRoundFromRepository: mockFindChallengeCounts, findProjectChallengesFromRepository: mockFindChallenges, findProjectChallengeProjectRoundsByUserFromRepository: mockFindChallengeRounds }));
+vi.mock('../../repositories/projectRepository', () => ({ findProjectById: mockFindProjectById, findProjectsByIdList: mockFindProjectsByIds, findProjectsByStatusFromRepository: mockFindProjectsByStatus }));
+vi.mock('../../repositories/projectArbitrationRepository', () => ({ findProjectArbitrationByIdFromRepository: mockFindArbitrationById, findPendingProjectArbitrationsFromRepository: mockFindPendingArbitrations }));
 vi.mock('../../models/projectArbitrationModel', () => ({ ProjectArbitrationMongoModel: {} }));
+vi.mock('../../models/auditorListingVerificationModel', () => ({ findListingVerificationsByAuditorUserId: mockFindListingVerifications }));
+vi.mock('../../models/projectGeofenceModel', () => ({ findGeofenceByProjectId: mockFindGeofence }));
+vi.mock('../../models/donationModel', () => ({ aggregateDonationSummaryByProjectId: mockAggregateDonationSummary }));
 
-import { handleGetAuditorActiveProjects, handleGetAuditorFieldReport, handleGetAuditorPendingProjects, handleGetExecutiveCases } from '../../controllers/projectGovernanceController';
+import { handleGetAuditorActiveProjects, handleGetAuditorFieldReport, handleGetAuditorPendingProjects, handleGetExecutiveCaseDetail, handleGetExecutiveCases, handleVoteOnArbitration } from '../../controllers/projectGovernanceController';
 
 /** Tạo request Auditor tối thiểu để kiểm thử quyền sở hữu biên bản có GPS. */
 function createRequest(userId = 'auditor-owner'): AuthenticatedRequest {
@@ -46,6 +56,13 @@ describe('project governance controller', () => {
     mockFindChallengeCounts.mockResolvedValue([]);
     mockFindProjectsByIds.mockResolvedValue([]);
     mockFindPendingArbitrations.mockResolvedValue([]);
+    mockFindArbitrationById.mockResolvedValue(null);
+    mockFindProjectById.mockResolvedValue(null);
+    mockFindChallenges.mockResolvedValue([]);
+    mockFindListingVerifications.mockResolvedValue([]);
+    mockFindGeofence.mockResolvedValue(null);
+    mockAggregateDonationSummary.mockResolvedValue({ totalAmount: 0, donationCount: 0 });
+    mockVoteOnArbitration.mockResolvedValue({ arbitrationId: 'case-1' });
   });
 
   it('rejects a different auditor before returning report GPS and photo metadata', async () => {
@@ -110,5 +127,45 @@ describe('project governance controller', () => {
     expect(mockFindUsersByIds).toHaveBeenCalledWith(['org-1']);
     expect(mockFindChallengeCounts).toHaveBeenCalledWith(['project-1']);
     expect(response.json).toHaveBeenCalledWith(expect.objectContaining({ data: [expect.objectContaining({ challengeCount: 3 })] }));
+  });
+
+  it('chuyển xác nhận rủi ro khóa tiền đã validate vào service bỏ phiếu', async () => {
+    const response = createResponse();
+    const request = {
+      authenticatedUser: { userId: 'member-1', role: 'executive_member' },
+      body: {
+        arbitrationId: 'case-1', decision: 'REJECT_PROJECT', reason: 'Căn cứ xét xử đã được kiểm tra đầy đủ.',
+        donationLockRiskAcknowledged: true
+      }
+    } as unknown as AuthenticatedRequest;
+
+    await handleVoteOnArbitration(request, response);
+
+    expect(mockVoteOnArbitration).toHaveBeenCalledWith('member-1', expect.objectContaining({
+      decision: 'REJECT_PROJECT', markedAbusive: false, donationLockRiskAcknowledged: true
+    }));
+    expect(response.status).toHaveBeenCalledWith(200);
+  });
+
+  it('trả trạng thái và tổng tiền quyên góp chính xác cho dialog hủy dự án', async () => {
+    mockFindArbitrationById.mockResolvedValue({
+      arbitrationId: 'case-1', projectId: 'project-1', round: 1,
+      committeeSnapshot: [{ userId: 'member-1', role: 'executive_member' }], votes: []
+    });
+    mockFindProjectById.mockResolvedValue({
+      projectId: 'project-1', organizationId: 'organization-1', name: 'Dự án', description: 'Mô tả', status: 'ACTIVE',
+      milestonePlan: [], evidenceCids: [], evidenceFiles: []
+    });
+    mockFindUsersByIds.mockResolvedValue([{ id: 'organization-1', organizationName: 'Tổ chức' }]);
+    mockAggregateDonationSummary.mockResolvedValue({ totalAmount: 2_500_000, donationCount: 3 });
+    const response = createResponse();
+
+    await handleGetExecutiveCaseDetail({
+      authenticatedUser: { userId: 'member-1', role: 'executive_member' }, params: { arbitrationId: 'case-1' }
+    } as unknown as AuthenticatedRequest, response);
+
+    expect(response.json).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ project: expect.objectContaining({ status: 'ACTIVE', totalDonationAmount: 2_500_000 }) })
+    }));
   });
 });

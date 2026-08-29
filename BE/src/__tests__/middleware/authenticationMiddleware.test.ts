@@ -75,7 +75,7 @@ describe('createOptionalAuthenticationMiddleware', () => {
     const request = createRequest('Bearer valid');
     const next = vi.fn() as unknown as NextFunction;
 
-    createOptionalAuthenticationMiddleware()(request, createResponse(), next);
+    return createOptionalAuthenticationMiddleware()(request, createResponse(), next).then(() => {
 
     expect(next).toHaveBeenCalledOnce();
     expect((request as Request & { authenticatedUser?: unknown }).authenticatedUser).toEqual({
@@ -85,5 +85,6 @@ describe('createOptionalAuthenticationMiddleware', () => {
     });
     expect(mockSetRequestUser).toHaveBeenCalledWith('user-1');
     expect(mockSendErrorResponse).not.toHaveBeenCalled();
+    });
   });
 });

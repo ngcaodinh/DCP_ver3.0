@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fieldReportSchema, milestonePlanSchema, projectChallengeSchema } from '../../validators/projectGovernanceValidator';
+import { arbitrationVoteSchema, fieldReportSchema, milestonePlanSchema, projectChallengeSchema } from '../../validators/projectGovernanceValidator';
 
 /** Tạo plan chuẩn để từng test chỉ thay đổi đúng một luật nghiệp vụ. */
 function plan() {
@@ -19,5 +19,14 @@ describe('project governance validation', () => {
   it('rejects duplicate verified milestones and invalid challenge evidence CID', () => {
     expect(fieldReportSchema.safeParse({ projectId: 'p', note: 'Ghi chú hiện trường đủ dài và chi tiết.', verifiedMilestoneIndexes: [1, 1], photos: [{ fileName: 'a.jpg', mimeType: 'image/jpeg', contentBase64: 'YWJj' }] }).success).toBe(false);
     expect(projectChallengeSchema.safeParse({ projectId: 'p', reason: 'Lý do khiếu nại đủ dài hơn ba mươi ký tự.', evidenceCids: ['not-ipfs'] }).success).toBe(false);
+  });
+
+  it('chuẩn hóa xác nhận rủi ro khóa tiền về false và chỉ nhận boolean rõ ràng', () => {
+    const baseVote = { arbitrationId: 'ARB-1', decision: 'REJECT_PROJECT', reason: 'Căn cứ xét xử đã được kiểm tra đầy đủ.' };
+
+    expect(arbitrationVoteSchema.parse(baseVote)).toMatchObject({ markedAbusive: false, donationLockRiskAcknowledged: false });
+    expect(arbitrationVoteSchema.parse({ ...baseVote, donationLockRiskAcknowledged: true })).toMatchObject({ donationLockRiskAcknowledged: true });
+    expect(arbitrationVoteSchema.safeParse({ ...baseVote, donationLockRiskAcknowledged: 'true' }).success).toBe(false);
+    expect(arbitrationVoteSchema.parse({ ...baseVote, markedAbusive: true })).toMatchObject({ markedAbusive: true });
   });
 });

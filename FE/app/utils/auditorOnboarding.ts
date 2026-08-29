@@ -106,9 +106,9 @@ export async function resumeAuditorIntent(input: {
   return response.data;
 }
 
-export async function executeAuditorStake(accessToken: string): Promise<{ status: 'VERIFYING'; txHash: string }> {
+export async function executeAuditorStake(accessToken: string, amount?: string): Promise<{ status: 'VERIFYING'; txHash: string }> {
   const response = await fetchApi<{ status: 'VERIFYING'; txHash: string }>(buildApiUrl('/api/auditor-onboarding/stake'), {
-    method: 'POST', headers: authorizationHeaders(accessToken), body: '{}'
+    method: 'POST', headers: authorizationHeaders(accessToken), body: amount === undefined ? '{}' : JSON.stringify({ amount })
   });
   return response.data;
 }
@@ -123,6 +123,14 @@ export async function requestAuditorUnstake(accessToken: string, amount: string)
 export async function withdrawAuditorStake(accessToken: string): Promise<{ txHash: string; payoutId: string }> {
   const response = await fetchApi<{ txHash: string; payoutId: string }>(buildApiUrl('/api/auditor-onboarding/withdraw'), {
     method: 'POST', headers: authorizationHeaders(accessToken), body: '{}'
+  });
+  return response.data;
+}
+
+/** Tạo payout PayOS cho số DCT thưởng đã sẵn sàng rút trong ví Auditor. */
+export async function withdrawAuditorReward(accessToken: string, amountVnd: number): Promise<{ payoutId: string }> {
+  const response = await fetchApi<{ payoutId: string }>(buildApiUrl('/api/auditor-onboarding/reward/withdraw'), {
+    method: 'POST', headers: authorizationHeaders(accessToken), body: JSON.stringify({ amountVnd })
   });
   return response.data;
 }

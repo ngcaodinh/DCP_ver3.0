@@ -1,14 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ProjectRecord } from '../../models/projectModel';
 
-const { mockActivateOnChain, mockClaim, mockCountActive, mockFindProject, mockUpdate, mockClaimOrganizationLock, mockReleaseOrganizationLock } = vi.hoisted(() => ({
-  mockActivateOnChain: vi.fn(), mockClaim: vi.fn(), mockCountActive: vi.fn(), mockFindProject: vi.fn(), mockUpdate: vi.fn(), mockClaimOrganizationLock: vi.fn(), mockReleaseOrganizationLock: vi.fn()
+const { mockActivateOnChain, mockClaim, mockFindProject, mockUpdate, mockClaimOrganizationLock, mockReleaseOrganizationLock } = vi.hoisted(() => ({
+  mockActivateOnChain: vi.fn(), mockClaim: vi.fn(), mockFindProject: vi.fn(), mockUpdate: vi.fn(), mockClaimOrganizationLock: vi.fn(), mockReleaseOrganizationLock: vi.fn()
 }));
 
 vi.mock('../../services/projectService', () => ({ activateProjectOnBlockchain: mockActivateOnChain }));
 vi.mock('../../repositories/projectRepository', () => ({
   claimProjectForActivationFromRepository: mockClaim,
-  countActiveProjectsByOrganizationIdFromRepository: mockCountActive,
   findProjectById: mockFindProject,
   updateProject: mockUpdate
 }));
@@ -27,7 +26,7 @@ function project(overrides: Partial<ProjectRecord> = {}): ProjectRecord {
 
 describe('project activation service', () => {
   beforeEach(() => {
-    vi.clearAllMocks(); mockClaim.mockResolvedValue(project()); mockClaimOrganizationLock.mockResolvedValue(true); mockReleaseOrganizationLock.mockResolvedValue(undefined); mockCountActive.mockResolvedValue(0); mockUpdate.mockResolvedValue(project());
+    vi.clearAllMocks(); mockClaim.mockResolvedValue(project()); mockClaimOrganizationLock.mockResolvedValue(true); mockReleaseOrganizationLock.mockResolvedValue(undefined); mockUpdate.mockResolvedValue(project());
   });
 
   it('moves to ACTIVE and SYNCED only after blockchain activation succeeds', async () => {
@@ -61,11 +60,22 @@ describe('project activation service', () => {
     expect(mockReleaseOrganizationLock).not.toHaveBeenCalled();
   });
 
-  it('keeps a project recoverable when the organization has five active projects', async () => {
-    mockCountActive.mockResolvedValue(5);
-    await expect(activateApprovedProject('project-1', 'PENDING_ACTIVATION')).resolves.toBe('ACTIVE_PROJECT_LIMIT_REACHED');
-    expect(mockUpdate).toHaveBeenCalledWith('project-1', expect.objectContaining({ activationState: 'FAILED', activationClaimedAt: null }));
-    expect(mockActivateOnChain).not.toHaveBeenCalled();
+  it('activates a project without limiting the organization active-project count', async () => {
+    mockActivateOnChain.mockResolvedValue(undefined);
+
+    await expect(activateApprovedProject('project-1', 'PENDING_ACTIVATION')).resolves.toBe('ACTIVATED');
+
+    expect(mockActivateOnChain).toHaveBeenCalledWith('project-1');
+    expect(mockUpdate).toHaveBeenLastCalledWith('project-1', expect.objectContaining({ status: 'ACTIVE', activationState: 'SYNCED' }));
+  });
+
+  it('cho phép round ký lại phục hồi dự án REJECTED khi chưa có closure on-chain', async () => {
+    mockActivateOnChain.mockResolvedValue(undefined);
+
+    await expect(activateApprovedProject('project-1', 'REJECTED')).resolves.toBe('ACTIVATED');
+
+    expect(mockClaim).toHaveBeenCalledWith('project-1', 'REJECTED', expect.any(Date));
+    expect(mockUpdate).toHaveBeenLastCalledWith('project-1', expect.objectContaining({ status: 'ACTIVE', activationState: 'SYNCED' }));
   });
 
   it('applies a six-hour backoff after the fifth failed blockchain attempt', async () => {

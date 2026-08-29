@@ -2,6 +2,9 @@ import express from 'express';
 import jsonWebToken from 'jsonwebtoken';
 import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { getPrimaryAdminLoginWalletAddress } from '../../config/adminAccess';
+
+const ADMIN_LOGIN_WALLET_ADDRESS = getPrimaryAdminLoginWalletAddress();
 
 const serviceMocks = vi.hoisted(() => ({
   getAdminDashboardMetrics: vi.fn(),
@@ -13,6 +16,7 @@ const serviceMocks = vi.hoisted(() => ({
   invalidateAdminGuestSession: vi.fn(),
   updateAdminSystemErrorLogReadState: vi.fn()
 }));
+const authModelMocks = vi.hoisted(() => ({ findUserById: vi.fn() }));
 
 vi.mock('../../services/adminDashboardService', () => ({
   getAdminDashboardMetrics: serviceMocks.getAdminDashboardMetrics,
@@ -24,6 +28,7 @@ vi.mock('../../services/adminDashboardService', () => ({
   invalidateAdminGuestSession: serviceMocks.invalidateAdminGuestSession,
   updateAdminSystemErrorLogReadState: serviceMocks.updateAdminSystemErrorLogReadState
 }));
+vi.mock('../../models/authModel', () => authModelMocks);
 
 import { createAdminDashboardRoutes } from '../../routes/adminDashboardRoutes';
 
@@ -60,6 +65,7 @@ describe('admin dashboard metrics regression', () => {
 
   beforeEach(() => {
     serviceMocks.getAdminDashboardMetrics.mockResolvedValue({ totalProjects: 3 });
+    authModelMocks.findUserById.mockResolvedValue({ id: 'admin-1', role: 'admin', governanceWalletAddress: ADMIN_LOGIN_WALLET_ADDRESS, accountStatus: 'ACTIVE', isSybil: false, authVersion: 1 });
   });
 
   afterEach(() => {

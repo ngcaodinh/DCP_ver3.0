@@ -42,6 +42,8 @@ const auditorFieldReportSchema = new Schema<AuditorFieldReportRecord>({
   submittedAt: { type: Date, required: true }, createdAt: { type: Date, required: true }, updatedAt: { type: Date, required: true }
 }, { collection: 'auditor_field_reports', strict: 'throw' });
 
+auditorFieldReportSchema.index({ auditorUserId: 1 });
+
 export const AuditorFieldReportMongoModel = mongoose.models?.AuditorFieldReport
   || mongoose.model<AuditorFieldReportRecord>('AuditorFieldReport', auditorFieldReportSchema);
 
@@ -63,19 +65,34 @@ export async function findAuditorFieldReportByProjectId(projectId: string): Prom
 }
 
 /** Lấy batch biên bản theo projectId để portal Auditor không phát sinh N+1 query. */
-export async function findAuditorFieldReportsByProjectIds(projectIds: string[]): Promise<AuditorFieldReportRecord[]> {
-  if (!projectIds.length) return [];
-  return AuditorFieldReportMongoModel.find({ projectId: { $in: [...new Set(projectIds)] } }).lean<AuditorFieldReportRecord[]>().exec();
+export async function findAuditorFieldReportsByProjectIds(projectIds: string[], limitPerProject: number = 50): Promise<AuditorFieldReportRecord[]> {
+  const normalizedProjectIds = [...new Set(projectIds.map(projectId => String(projectId || '').trim()).filter(Boolean))];
+  if (!normalizedProjectIds.length) return [];
+  const normalizedLimit = Number.isFinite(limitPerProject) ? Math.max(1, Math.min(50, Math.floor(limitPerProject))) : 50;
+  return AuditorFieldReportMongoModel.aggregate<AuditorFieldReportRecord>([
+    { $match: { projectId: { $in: normalizedProjectIds } } },
+    { $sort: { projectId: 1, submittedAt: -1, reportId: -1 } },
+    { $group: { _id: '$projectId', items: { $push: '$$ROOT' } } },
+    { $project: { items: { $slice: ['$items', normalizedLimit] } } },
+    { $unwind: '$items' },
+    { $replaceRoot: { newRoot: '$items' } }
+  ]).exec();
 }
 
-/**
- * Liệt kê biên bản của chính auditor cho màn hình lịch sử.
- * Collection chưa có index theo auditorUserId nên luôn bắt buộc truyền trần bản ghi.
- */
+/** Liệt kê biên bản của chính auditor cho màn hình lịch sử, luôn có trần bản ghi. */
 export async function findAuditorFieldReportsByAuditorUserId(auditorUserId: string, limitCount: number): Promise<AuditorFieldReportRecord[]> {
   return AuditorFieldReportMongoModel.find({ auditorUserId })
     .sort({ submittedAt: -1 })
     .limit(limitCount)
     .lean<AuditorFieldReportRecord[]>()
     .exec();
+}
+
+/**
+ * Lấy toàn bộ biên bản của một auditor, không giới hạn.
+ * Khác hàm lịch sử ở trên: xét điều kiện thoát vai trò phải nhìn đủ mọi ràng buộc, một trần bản ghi
+ * sẽ âm thầm bỏ sót dự án đang mở và cho auditor rút hết cọc sai.
+ */
+export async function findAllAuditorFieldReportsByAuditorUserId(auditorUserId: string): Promise<AuditorFieldReportRecord[]> {
+  return AuditorFieldReportMongoModel.find({ auditorUserId }).lean<AuditorFieldReportRecord[]>().exec();
 }

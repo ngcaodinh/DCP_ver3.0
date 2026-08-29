@@ -7,10 +7,14 @@ const AUDITOR_PAYOUT_COLLECTION = 'auditorpayouts';
 const AUDITOR_STAKE_INTENT_COLLECTION = 'auditorstakeintents';
 const AUDITOR_STAKE_GUARD_COLLECTION = 'auditorstakeguards';
 const AUDITOR_STAKE_EVENT_DEAD_LETTER_COLLECTION = 'auditorstakeeventdeadletters';
+const AUDITOR_PENALTY_LEDGER_COLLECTION = 'auditorpenaltyledgers';
 const PAYOUT_ONCHAIN_TX_HASH_INDEX = 'onchainTxHash_1';
 const STAKE_INTENT_TX_HASH_INDEX = 'txHash_1';
 const STALE_GUARD_INDEX = 'walletLock_1_lockedAt_1';
 const DEAD_LETTER_INDEX = 'chainId_1_contractAddress_1_transactionHash_1_logIndex_1';
+const LEGACY_LEDGER_UNIQUE_INDEX = 'fieldReportId_1_entryType_1';
+const PENALTY_LEDGER_UNIQUE_INDEX = 'penalty_field_report_unique';
+const REWARD_LEDGER_UNIQUE_INDEX = 'reward_field_report_auditor_unique';
 
 /** Lấy biến môi trường bắt buộc để migration không chạy nhầm vào MongoDB chưa được cấu hình. */
 function getRequiredEnvironmentVariable(variableName) {
@@ -65,6 +69,19 @@ async function createDeadLetterIndex(collection) {
   console.log(`[DONE] Đã tạo index ${collection.collectionName}.${DEAD_LETTER_INDEX}.`);
 }
 
+/** Tách unique key ledger để một biên bản có thể thưởng nhiều Auditor nhưng vẫn chỉ phạt một Auditor. */
+async function createAuditorRewardLedgerIndexes(collection) {
+  await collection.createIndex(
+    { fieldReportId: 1, entryType: 1 },
+    { name: PENALTY_LEDGER_UNIQUE_INDEX, unique: true, partialFilterExpression: { entryType: 'PENALTY' } }
+  );
+  await collection.createIndex(
+    { fieldReportId: 1, entryType: 1, auditorUserId: 1 },
+    { name: REWARD_LEDGER_UNIQUE_INDEX, unique: true, partialFilterExpression: { entryType: 'REWARD' } }
+  );
+  console.log(`[DONE] Đã tạo các index unique tách biệt cho REWARD/PENALTY ở ${collection.collectionName}.`);
+}
+
 /** Đồng bộ các index AuditorStaking theo schema hiện tại một cách có thể chạy lặp lại an toàn. */
 async function runMigration() {
   await connectToMongoDatabase();
@@ -72,6 +89,7 @@ async function runMigration() {
   const stakeIntentCollection = mongoose.connection.collection(AUDITOR_STAKE_INTENT_COLLECTION);
   const stakeGuardCollection = mongoose.connection.collection(AUDITOR_STAKE_GUARD_COLLECTION);
   const deadLetterCollection = mongoose.connection.collection(AUDITOR_STAKE_EVENT_DEAD_LETTER_COLLECTION);
+  const ledgerCollection = mongoose.connection.collection(AUDITOR_PENALTY_LEDGER_COLLECTION);
 
   await dropIndexIfExists(payoutCollection, PAYOUT_ONCHAIN_TX_HASH_INDEX);
   await dropIndexIfExists(stakeIntentCollection, STAKE_INTENT_TX_HASH_INDEX);
@@ -79,6 +97,8 @@ async function runMigration() {
   await createUniqueStringIndex(stakeIntentCollection, 'txHash', STAKE_INTENT_TX_HASH_INDEX);
   await createStaleGuardIndex(stakeGuardCollection);
   await createDeadLetterIndex(deadLetterCollection);
+  await dropIndexIfExists(ledgerCollection, LEGACY_LEDGER_UNIQUE_INDEX);
+  await createAuditorRewardLedgerIndexes(ledgerCollection);
 }
 
 runMigration()

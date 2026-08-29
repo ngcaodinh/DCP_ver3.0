@@ -29,7 +29,9 @@ export async function handleCreateDeposit(request: Request, response: Response):
   const amountVnd = Number(request.body?.amountVnd);
   const paymentFlow = request.body?.paymentFlow === 'AUDITOR_ONBOARDING'
     ? 'AUDITOR_ONBOARDING'
-    : undefined;
+    : request.body?.paymentFlow === 'AUDITOR_PORTAL'
+      ? 'AUDITOR_PORTAL'
+      : undefined;
 
   try {
     const user = await findUserById(authenticatedRequest.authenticatedUser.userId);

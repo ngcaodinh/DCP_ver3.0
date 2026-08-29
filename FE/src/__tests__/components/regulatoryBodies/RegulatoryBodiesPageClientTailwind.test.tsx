@@ -86,26 +86,19 @@ describe('RegulatoryBodiesPageClientTailwind access guard', () => {
 
   it('does not mount the protected shell after rejecting a non-regulatory session', async () => {
     mockReadAuthSession.mockReturnValue({ accessToken: 'donor-token', userRole: 'donor' });
-    mockFetch.mockResolvedValue(createAuthResponse('donor'));
-
     render(<RegulatoryBodiesPageClientTailwind />);
 
-    await waitFor(() => expect(mockRouterReplace).toHaveBeenCalledWith('/'));
-    expect(mockClearAuthSession).toHaveBeenCalledOnce();
+    await waitFor(() => expect(mockRouterReplace).toHaveBeenCalledWith('/unauthorized'));
+    expect(mockClearAuthSession).not.toHaveBeenCalled();
     expect(screen.queryByRole('heading', { name: 'Tổng quan' })).not.toBeInTheDocument();
     expect(screen.queryByText('Panel nghiệp vụ')).not.toBeInTheDocument();
   });
 
   it('mounts the protected shell after the server confirms a regulatory role', async () => {
     mockReadAuthSession.mockReturnValue({ accessToken: 'regulatory-token', userRole: 'regulatory' });
-    mockFetch.mockResolvedValue(createAuthResponse('regulatory'));
-
     render(<RegulatoryBodiesPageClientTailwind />);
 
-    await waitFor(() => expect(mockFetch).toHaveBeenCalledWith(
-      'http://api.test/auth/me',
-      expect.objectContaining({ method: 'GET' })
-    ));
+    await waitFor(() => expect(mockFetch).not.toHaveBeenCalled());
     expect(mockRouterReplace).not.toHaveBeenCalled();
     expect(await screen.findByRole('heading', { name: 'Tổng quan Giám sát' })).toBeInTheDocument();
     expect(mockClearAuthSession).not.toHaveBeenCalled();
@@ -113,19 +106,10 @@ describe('RegulatoryBodiesPageClientTailwind access guard', () => {
 
   it('restores an expired access token before redirecting a regulatory user after F5', async () => {
     mockReadAuthSession.mockReturnValue({ accessToken: 'expired-token', userRole: 'regulatory' });
-    mockRefreshAuthSession.mockResolvedValue({ status: 'REFRESHED', accessToken: 'refreshed-token' });
-    mockFetch
-      .mockResolvedValueOnce(createUnauthorizedResponse())
-      .mockResolvedValueOnce(createAuthResponse('regulatory'));
-
     render(<RegulatoryBodiesPageClientTailwind />);
 
-    await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(2));
-    expect(mockRefreshAuthSession).toHaveBeenCalledOnce();
-    expect(mockFetch).toHaveBeenLastCalledWith(
-      'http://api.test/auth/me',
-      expect.objectContaining({ headers: { Authorization: 'Bearer refreshed-token' } })
-    );
+    await waitFor(() => expect(mockFetch).not.toHaveBeenCalled());
+    expect(mockRefreshAuthSession).not.toHaveBeenCalled();
     expect(mockRouterReplace).not.toHaveBeenCalled();
     expect(mockClearAuthSession).not.toHaveBeenCalled();
     expect(await screen.findByRole('heading', { name: 'Tổng quan Giám sát' })).toBeInTheDocument();

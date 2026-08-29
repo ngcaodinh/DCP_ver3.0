@@ -10,7 +10,6 @@ import { ProjectStatus } from '../models/projectModel';
 import type { ProjectEvidenceFileRecord, ProjectMilestonePlanItem } from '../models/projectModel';
 import { getChallengeWindowMs } from '../constants/projectListingPolicy';
 import {
-  countActiveProjectsByOrganizationIdFromRepository,
   createProject,
   CreateProjectDataAccessPayload,
   findProjectById,
@@ -111,6 +110,14 @@ export type PublicSupportProjectDetailResult = {
   evidenceCids: string[];
   evidenceFiles: ProjectEvidenceFileRecord[];
   creatorName: string | null;
+  location: PublicProjectLocation | null;
+};
+
+/** Ranh giới địa lý công khai, chỉ dùng để xem và đối chiếu dự án đã được duyệt. */
+export type PublicProjectLocation = {
+  polygon: { lat: number; lng: number }[];
+  centroid: { lat: number; lng: number };
+  radiusMeters: number;
 };
 
 type UploadedProjectEvidenceItem = ProjectEvidenceFileRecord;
@@ -428,6 +435,56 @@ export async function activateProjectOnBlockchain(projectId: string): Promise<vo
   }
 }
 
+/** Đồng bộ trạng thái Closed cho dự án đã bị 5/5 ghế hủy, chỉ chấp nhận transition Active/Completed một chiều. */
+export async function closeProjectOnBlockchain(projectId: string): Promise<void> {
+  const normalizedProjectId = projectId.trim();
+  if (!/^[0-9]+$/.test(normalizedProjectId)) {
+    throw new ApplicationError('Mã dự án phải là số để cập nhật trạng thái on-chain.', 400, 'VALIDATION_ERROR');
+  }
+
+  const closedProjectStatus = 3;
+  const { provider, walletSigner, donationRankingContract, donationRankingAdminContract, expectedChainId } = getDonationRankingContractForProjectSync();
+  let network: ethers.Network;
+  try {
+    network = await provider.getNetwork();
+  } catch {
+    throw new ApplicationError('Không thể kết nối blockchain để đóng dự án. Vui lòng thử lại sau.', 502, 'BLOCKCHAIN_UNAVAILABLE');
+  }
+  if (expectedChainId > 0 && Number(network.chainId) !== expectedChainId) {
+    throw new ApplicationError('Sai network blockchain của dịch vụ đồng bộ trạng thái dự án.', 400, 'CHAIN_MISMATCH');
+  }
+
+  try {
+    await ensureProjectManagerRolePermission(donationRankingContract, donationRankingAdminContract, walletSigner.address);
+  } catch (error) {
+    if (error instanceof ApplicationError) throw error;
+    throw new ApplicationError('Không thể xác minh quyền đóng dự án trên blockchain. Vui lòng thử lại sau.', 502, 'BLOCKCHAIN_UNAVAILABLE');
+  }
+
+  let projectSnapshot: { exists: boolean; projectStatus: bigint };
+  try {
+    projectSnapshot = await donationRankingContract.getProjectSnapshot(BigInt(normalizedProjectId));
+  } catch {
+    throw new ApplicationError('Không thể kiểm tra trạng thái dự án trên blockchain. Vui lòng thử lại sau.', 502, 'BLOCKCHAIN_UNAVAILABLE');
+  }
+  if (!projectSnapshot.exists) {
+    throw new ApplicationError('Dự án chưa tồn tại trên blockchain nên không thể đóng.', 409, 'INVALID_STATUS_TRANSITION');
+  }
+  if (Number(projectSnapshot.projectStatus) === closedProjectStatus) return;
+  // Contract chỉ cho phép Active/Completed -> Closed; không tự tạo project để tránh biến dữ liệu lệch thành giao dịch không thể đảo ngược.
+  if (Number(projectSnapshot.projectStatus) !== 1 && Number(projectSnapshot.projectStatus) !== 2) {
+    throw new ApplicationError('Trạng thái dự án trên blockchain không thể chuyển sang Closed.', 409, 'INVALID_STATUS_TRANSITION');
+  }
+
+  try {
+    const updateStatusTransaction = await donationRankingContract.setProjectStatus(BigInt(normalizedProjectId), closedProjectStatus);
+    await updateStatusTransaction.wait();
+    logger.info(`Project status closed on blockchain successfully. projectId=${normalizedProjectId} txHash=${updateStatusTransaction.hash}`);
+  } catch {
+    throw new ApplicationError('Không thể đóng dự án trên blockchain. Vui lòng thử lại sau.', 502, 'BLOCKCHAIN_UNAVAILABLE');
+  }
+}
+
 /** Hàm validate payload upload file minh chứng. Mục đích: chặn dữ liệu sai chuẩn trước khi upload Pinata. */
 function validateUploadProjectEvidencesPayload(payload: UploadProjectEvidencesPayload): void {
   if (!Array.isArray(payload.files) || payload.files.length < 1) {
@@ -530,7 +587,7 @@ async function unpinProjectEvidenceCidFromPinata(cid: string): Promise<void> {
 }
 
 /** Hàm gỡ pin CID với retry giới hạn. Mục đích: tăng độ tin cậy khi thao tác cleanup Pinata. */
-async function unpinProjectEvidenceCidFromPinataWithRetry(cid: string): Promise<void> {
+export async function unpinProjectEvidenceCidFromPinataWithRetry(cid: string): Promise<void> {
   let latestUnpinError: unknown = null;
 
   for (let retryAttempt = 1; retryAttempt <= pinataMaximumRetryCount; retryAttempt += 1) {
@@ -815,6 +872,20 @@ export async function getPublicSupportProjectDetail(projectId: string): Promise<
     return null;
   }
 
+  // Project public đã ACTIVE nên trả snapshot read-only để người dùng đối chiếu ranh giới.
+  const location = await findGeofenceByProjectId(sanitizedProjectId)
+    .then((geofence): PublicProjectLocation | null => geofence
+      ? {
+          polygon: geofence.polygon.map((point) => ({ lat: point.lat, lng: point.lng })),
+          centroid: { lat: geofence.centroid.lat, lng: geofence.centroid.lng },
+          radiusMeters: geofence.radiusMeters
+        }
+      : null)
+    .catch((): null => {
+      logger.warn(`Không tìm được vị trí địa lý dự án. projectId=${sanitizedProjectId}`);
+      return null;
+    });
+
   // Lookup tên người tạo dự án từ bảng AuthUser dựa trên organizationId.
   // Ưu tiên fullName, fallback về organizationName nếu fullName trống.
   let creatorName: string | null = null;
@@ -846,7 +917,8 @@ export async function getPublicSupportProjectDetail(projectId: string): Promise<
     lastDonationAt,
     evidenceCids: projectRecord.evidenceCids,
     evidenceFiles: projectRecord.evidenceFiles || [],
-    creatorName
+    creatorName,
+    location
   };
 }
 
@@ -986,13 +1058,6 @@ export async function reviewProjectByReviewer(
 
   if (existingProject.status !== 'PENDING_APPROVAL') {
     throw new ApplicationError('Dự án không ở trạng thái chờ duyệt.', 409, 'INVALID_STATUS_TRANSITION');
-  }
-
-  if (action === 'APPROVE') {
-    const activeProjectCount = await countActiveProjectsByOrganizationIdFromRepository(existingProject.organizationId);
-    if (activeProjectCount >= 5) {
-      throw new ApplicationError('Tổ chức đã đạt giới hạn 5 dự án ACTIVE.', 409, 'ACTIVE_PROJECT_LIMIT_EXCEEDED');
-    }
   }
 
   const now = new Date();

@@ -1,3 +1,5 @@
+import type { AuthUser } from '../models/authModel';
+
 /**
  * Định nghĩa các kiểu dữ liệu cho hệ thống Trust Score của donor.
  * Mục đích: cung cấp contract type an toàn dùng chung cho service, model, repository và cache layer.
@@ -97,7 +99,7 @@ export type TrustScoreComputationInput = {
   /** ID người dùng trong collection users. */
   donorUserId: string;
   /** Trạng thái tài khoản: 'ACTIVE' = đã KYC, 'INACTIVE_PENDING_KYC' = chưa KYC. */
-  accountStatus: 'ACTIVE' | 'INACTIVE_PENDING_KYC';
+  accountStatus: AuthUser['accountStatus'];
   /** Social account ID từ OAuth. Giá trị 'none' hoặc rỗng = chưa liên kết. */
   socialAccountId: string;
   /** FCM device token cho push notification. null = chưa bind. */

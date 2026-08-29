@@ -1,5 +1,6 @@
 import {
   createAuditorFieldReport,
+  findAllAuditorFieldReportsByAuditorUserId,
   findAuditorFieldReportByProjectId,
   findAuditorFieldReportsByProjectIds,
   type AuditorFieldReportRecord
@@ -22,4 +23,9 @@ export async function findAuditorFieldReportByProjectIdFromRepository(projectId:
 /** Lấy batch biên bản hiện trường theo dự án cho màn hình Auditor. */
 export async function findAuditorFieldReportsByProjectIdsFromRepository(projectIds: string[]): Promise<AuditorFieldReportRecord[]> {
   return findAuditorFieldReportsByProjectIds(projectIds);
+}
+
+/** Lấy toàn bộ biên bản của một auditor để xét ràng buộc thoát vai trò, không giới hạn bản ghi. */
+export async function findAllAuditorFieldReportsByAuditorUserIdFromRepository(auditorUserId: string): Promise<AuditorFieldReportRecord[]> {
+  return findAllAuditorFieldReportsByAuditorUserId(auditorUserId);
 }

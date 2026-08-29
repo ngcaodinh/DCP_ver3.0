@@ -14,6 +14,7 @@ import {
   isCampaignBeforeDeadline,
 } from '../components/DonationModal.helpers';
 import IpfsEvidencePreviewCard from '../../components/common/IpfsEvidencePreviewCard';
+import { GeofenceMapLazy } from '../../components/oracle/GeofenceMapLazy';
 import { buildIpfsGatewayUrl, getIpfsContentType, resolveIpfsPreviewKind } from '../../utils/ipfs';
 import {
   MIN_AMOUNT_PER_DONATION,
@@ -38,6 +39,7 @@ interface ProjectBasicInfo {
   creatorName: string | null;
   lastDonationAt: string | null;
   coverImageUrl?: string;
+  location?: ProjectLocation | null;
 }
 
 /** Thống kê donation của dự án — từ /donations/campaigns/{projectId}. */
@@ -64,6 +66,20 @@ interface ProjectDetail {
   createdAt: string;
   updatedAt: string;
   coverImageUrl?: string;
+  location: ProjectLocation | null;
+}
+
+/** Tọa độ GPS theo decimal degrees. */
+interface GpsCoordinate {
+  lat: number;
+  lng: number;
+}
+
+/** Ranh giới địa lý chỉ xem của dự án từ API public-support. */
+interface ProjectLocation {
+  polygon: GpsCoordinate[];
+  centroid: GpsCoordinate;
+  radiusMeters: number;
 }
 
 /** File đính kèm bằng chứng IPFS. */
@@ -154,6 +170,54 @@ function formatUpdatedTime(isoDate: string): string {
   return new Date(isoDate).toLocaleDateString('vi-VN');
 }
 
+/** Định dạng tọa độ dự án để người dùng dễ kiểm tra mà không làm mất độ chính xác hữu ích. */
+function formatProjectLocation(location: ProjectLocation): string {
+  return `${location.centroid.lat.toFixed(6)}, ${location.centroid.lng.toFixed(6)}`;
+}
+
+/** Kiểm tra một tọa độ GPS trước khi dùng cho liên kết hoặc Leaflet. */
+function isValidGpsCoordinate(coordinate: GpsCoordinate | undefined): boolean {
+  return Boolean(
+    coordinate
+    && Number.isFinite(coordinate.lat)
+    && Number.isFinite(coordinate.lng)
+    && coordinate.lat >= -90
+    && coordinate.lat <= 90
+    && coordinate.lng >= -180
+    && coordinate.lng <= 180
+  );
+}
+
+/** Chỉ cho phép render bản đồ khi snapshot chứa đủ ranh giới và tọa độ hợp lệ. */
+function isValidProjectLocation(location: ProjectLocation | null): location is ProjectLocation {
+  return Boolean(
+    location
+    && Array.isArray(location.polygon)
+    && location.polygon.length >= 3
+    && location.polygon.every(isValidGpsCoordinate)
+    && isValidGpsCoordinate(location.centroid)
+    && Number.isFinite(location.radiusMeters)
+    && location.radiusMeters > 0
+  );
+}
+
+/** Tạo liên kết Google Maps từ tâm vùng địa lý hợp lệ để người dùng mở bản đồ ngoài trang. */
+function buildGoogleMapsUrl(location: ProjectLocation): string {
+  if (
+    !Number.isFinite(location.centroid.lat)
+    || !Number.isFinite(location.centroid.lng)
+    || location.centroid.lat < -90
+    || location.centroid.lat > 90
+    || location.centroid.lng < -180
+    || location.centroid.lng > 180
+  ) {
+    return '';
+  }
+
+  const query = `${location.centroid.lat.toFixed(6)},${location.centroid.lng.toFixed(6)}`;
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
+}
+
 /** Hàm tìm CID ảnh đầu tiên từ metadata evidenceFiles — giống logic trang chủ. */
 const getFirstProjectImageCidFromMetadataForDetail = (basic: ProjectBasicInfo): string => {
   const evidenceFileList = basic.evidenceFiles || [];
@@ -240,6 +304,40 @@ function ProjectInfoSection({ project }: { project: ProjectDetail }) {
           <span>{project.donationCount} lượt</span>
         </div>
       </div>
+    </section>
+  );
+}
+
+/** Component vùng địa lý chỉ xem, dùng cùng bản đồ geofence với màn hình duyệt dự án. */
+function ProjectLocationSection({ project }: { project: ProjectDetail }) {
+  const location = isValidProjectLocation(project.location) ? project.location : null;
+  const googleMapsUrl = location ? buildGoogleMapsUrl(location) : '';
+
+  return (
+    <section className="project-detail-section mb-6" data-testid="project-geographic-location">
+      <h2 className="project-detail-section-title">Vùng địa lý dự án: {project.name}</h2>
+      {!location ? (
+        <p className="mt-3 text-sm text-slate-600">
+          {project.location ? 'Thông tin vị trí không hợp lệ.' : 'Chưa thiết lập thông tin vị trí.'}
+        </p>
+      ) : (
+        <div className="mt-4 space-y-3">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-slate-700">
+            <span>Tọa độ trung tâm: {formatProjectLocation(location)} · bán kính {location.radiusMeters} m</span>
+            {googleMapsUrl && (
+              <a
+                href={googleMapsUrl}
+                target="_blank"
+                rel="noreferrer noopener"
+                className="font-semibold text-[#0e7c6b] underline"
+              >
+                Mở trên Google Maps
+              </a>
+            )}
+          </div>
+          <GeofenceMapLazy projectId={project.projectId} snapshot={location} />
+        </div>
+      )}
     </section>
   );
 }
@@ -782,6 +880,7 @@ export default function DonationProjectDetailPage() {
         creatorName: basic.creatorName,
         lastDonationAt: basic.lastDonationAt,
         coverImageUrl: basic.coverImageUrl,
+        location: basic.location ?? null,
         donatedAmount: stats?.donatedAmount ?? 0,
         donationCount: stats?.donationCount ?? 0,
         createdAt: new Date().toISOString(),
@@ -1152,6 +1251,7 @@ export default function DonationProjectDetailPage() {
           <>
             <ProjectBanner project={projectDetail} coverImageUrl={bannerCoverUrl} />
             <ProjectInfoSection project={projectDetail} />
+            <ProjectLocationSection project={projectDetail} />
             <ProjectProgressSection project={projectDetail} />
             <EvidenceSection project={projectDetail} />
 

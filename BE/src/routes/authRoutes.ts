@@ -5,13 +5,15 @@ import {
   handleGetMyActiveSessions,
   handleGetMyOrganizationKycSubmissions,
   handleGetMyOrganizationProfile,
+  handleCreateWalletLoginNonce,
   handleGetPendingOrganizationKycSubmissions,
   handleGoogleLogin,
   handleLogoutAll,
   handleOrganizationKycSubmission,
   handleRefreshToken,
   handleReviewOrganizationKycSubmission,
-  handleSubmitBeneficiaryBankAccount
+  handleSubmitBeneficiaryBankAccount,
+  handleWalletLogin
 } from '../controllers/authController';
 import { createRateLimitMiddleware } from '../middleware/rateLimitMiddleware';
 import { createRefreshCsrfMiddleware } from '../middleware/csrfMiddleware';
@@ -27,7 +29,7 @@ export function createAuthRoutes(): Router {
   const router = Router();
 
   const refreshRateLimit = createRateLimitMiddleware(10, 60 * 1000, { bucketName: 'auth:refresh' });
-  const loginRateLimit = createRateLimitMiddleware(5, 60 * 1000, { bucketName: 'auth:google-login' });
+  const loginRateLimit = createRateLimitMiddleware(5, 60 * 1000, { bucketName: 'auth:login' });
   const organizationKycSubmissionRateLimit = createRateLimitMiddleware(5, 60 * 1000, { bucketName: 'auth:organization-kyc-submission' });
   const organizationKycGetMyRateLimit = createRateLimitMiddleware(120, 60 * 1000, { bucketName: 'auth:organization-kyc-get-my' });
   const organizationKycPendingRateLimit = createRateLimitMiddleware(20, 60 * 1000, { bucketName: 'auth:organization-kyc-pending' });
@@ -38,6 +40,8 @@ export function createAuthRoutes(): Router {
   const regulatoryKycReviewAuthorizationMiddleware = createFreshRoleAuthorizationMiddleware(['regulatory']);
 
   router.post('/google-login', attachRequestMetadata(), loginRateLimit, handleGoogleLogin);
+  router.post('/wallet/nonce', attachRequestMetadata(), loginRateLimit, handleCreateWalletLoginNonce);
+  router.post('/wallet/login', attachRequestMetadata(), loginRateLimit, handleWalletLogin);
   router.post(
     '/refresh',
     attachRequestMetadata(),

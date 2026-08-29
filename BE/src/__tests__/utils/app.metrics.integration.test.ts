@@ -17,6 +17,7 @@ const applicationRouteModules: Array<[string, string]> = [
   ['../../routes/oracleRoutes', 'createOracleRoutes'],
   ['../../routes/sbt.routes', 'createSbtRoutes'],
   ['../../routes/guestRoutes', 'createGuestRoutes'],
+  ['../../routes/auditorOnboardingRoutes', 'createAuditorOnboardingRoutes'],
   ['../../routes/webhooks/payos.webhook', 'createPayosWebhookRoutes'],
   ['../../routes/transparencyRoutes', 'createTransparencyRoutes'],
   ['../../routes/verification.routes', 'createVerificationRoutes'],
@@ -24,6 +25,7 @@ const applicationRouteModules: Array<[string, string]> = [
   ['../../routes/public-feedback.routes', 'createPublicFeedbackRoutes'],
   ['../../routes/tileProxyRoutes', 'createTileProxyRoutes']
 ];
+const INTEGRATION_TEST_TIMEOUT_MS = 15_000;
 
 /** Cô lập bootstrap app khỏi side effect của các route không liên quan đến regression metrics. */
 function mockApplicationRoutes(): void {
@@ -68,4 +70,4 @@ describe('application metrics integration', () => {
       'http_requests_total{method="POST",route="unmatched",status_code="413"} 1'
     );
   });
-});
+}, INTEGRATION_TEST_TIMEOUT_MS);

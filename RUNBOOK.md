@@ -146,3 +146,66 @@ db.sbt_status_projection_events.dropIndex(
   { chainId: 1, contractAddress: 1, projectionStatus: 1, blockNumber: 1, logIndex: 1 }
 )
 ```
+
+## 10) F2 — Campaign approval, Kiểm toán viên và Ủy ban Điều hành
+
+Trước khi mở luồng tạo dự án, phải có ít nhất một tài khoản `regulatory` và ít nhất một tài khoản `auditor` đang hoạt động (khuyến nghị ba auditor). Tạo đúng một `executive_chair` và tối đa bốn `executive_member` bằng quy trình phân quyền quản trị hiện có; không thêm các role này vào commissioner/GPS override.
+
+Người được chỉ định phải đăng nhập Google một lần trước, sau đó cấp role qua script (script tăng `authVersion`, giới hạn ghế và in cảnh báo auditor):
+
+```bash
+cd BE
+npm run assign:governance-role -- --email=person@example.com --role=auditor
+```
+
+Trước khi deploy code, tạo index idempotent từ container backend chưa nhận traffic:
+
+```bash
+```
+
+Sau deploy, kiểm tra `RUN_WORKERS=true` trên đúng một process worker. Các API-only instance đặt `RUN_WORKERS=false`. Theo dõi dự án `PENDING_ACTIVATION`: worker chỉ kích hoạt sau `PROJECT_CHALLENGE_WINDOW_HOURS` (mặc định 48 giờ). Nếu RPC lỗi, đọc `activationState` và `activationLastError`, rồi dùng endpoint retry chỉ sau khi xác nhận lỗi hạ tầng; retry không phải quyền duyệt dự án.
+
+Vụ `DISPUTED` phải được Ủy ban xử lý trước `ARBITRATION_TIMEOUT_DAYS` (mặc định bảy ngày). Thiếu Chủ tịch hoặc không đủ hai ủy viên đồng thuận sẽ tự động `REJECTED`; không sửa trực tiếp MongoDB để lách fail-closed. Biên bản hiện trường chỉ một bản/dự án và không liên quan đến giải ngân.
+
+## 11) AuditorStaking follow-up — index, projector và payout manual review
+
+Trước khi đưa backend mới nhận traffic, backup MongoDB và chạy migration idempotent từ container/backend mới:
+
+```bash
+cd BE
+npm run migrate:auditor-staking-indexes
+```
+
+Migration thay index unique legacy của `onchainTxHash` và `txHash` bằng unique partial index chỉ áp dụng cho string; vì vậy nhiều payout/intent chưa có hash có thể cùng tồn tại an toàn. Nó cũng tạo index stale-lock và dead-letter cần cho worker.
+
+Chỉ chạy `RUN_WORKERS=true` trên một instance. Khi projector không xử lý được cùng một event ba lần liên tiếp, event sẽ được ghi vào `auditorstakeeventdeadletters` và checkpoint tiếp tục. Vận hành phải:
+
+1. Đối chiếu `chainId`, `contractAddress`, `transactionHash`, `logIndex` với explorer và log ứng dụng.
+2. Sửa nguyên nhân dữ liệu/cấu hình hoặc triển khai bản vá trước khi replay.
+3. Không tự xóa hoặc tua checkpoint để bỏ qua event; dùng bản ghi dead-letter làm bằng chứng và mở incident nếu event liên quan `Withdrawn` hoặc `Slashed`.
+
+Payout `MANUAL_REVIEW` không được mở khóa ví bằng tay. Chỉ admin có session mới, sau khi đối chiếu độc lập PayOS xác nhận **SUCCESS** và transfer ID đúng với snapshot payout, mới được retry burn:
+
+```bash
+curl -X POST "$API_BASE_URL/api/auditor-onboarding/payouts/$PAYOUT_ID/retry-burn" \
+  -H "Authorization: Bearer $ADMIN_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"payosTransferId":"<transfer-id-da-doi-chieu>","reason":"Đã đối chiếu PayOS SUCCESS với chứng từ vận hành."}'
+```
+
+Endpoint ghi audit bắt buộc, chỉ chấp nhận payout `MANUAL_REVIEW` đã có hash on-chain và đúng PayOS transfer ID. Payout chỉ giải phóng wallet lock khi burn DCT xác nhận `BURNED`; nếu retry vẫn lỗi, payout quay lại `MANUAL_REVIEW` để tiếp tục điều tra.
+
+## 12) T3 — Ủy ban Điều hành và `CommitteeGovernance`
+
+Profile API đặt `RUN_WORKERS=false`. Chỉ đúng một profile worker đặt `RUN_WORKERS=true`; chỉ bật
+`ENABLE_COMMITTEE_DECISION_RELAYER_WORKER=true` và `ENABLE_DISBURSEMENT_ONCHAIN_SIGNER_WORKER=true` sau smoke test.
+Trước startup production phải provision đủ `BLOCKCHAIN_RPC_URL`, hai deployment block, hai contract address và relayer key
+trong secret store; backend sẽ fail-fast và liệt kê biến thiếu nếu cấu hình không hoàn chỉnh.
+
+1. **Thứ tự rollout:** backup MongoDB; deploy BE/FE với `RUN_WORKERS=false`; trong thư mục `BE`, chạy `npm run migrate:committee-governance-indexes` **trước khi khởi động backend** và dừng rollout nếu script báo dữ liệu trùng hoặc index sai cấu hình; khởi động BE để gate index và reconciliation admin kiểm tra allowlist; cho ví admin hợp lệ và từng ghế đăng nhập MetaMask thành công; deploy `CommitteeGovernance`; đối chiếu đủ năm ghế rồi mới bootstrap; sau đó bật đúng một worker instance và mở traffic.
+2. **Trust root:** admin chỉ đăng nhập bằng MetaMask tại `/governance/login`; không có đường đăng nhập Google cho quyền admin. Ví được phép nằm ở biến môi trường `ADMIN_LOGIN_WALLET_ADDRESSES` trong secret store, **không** hard-code trong source. Ví production hiện tại: `0x902130CeaF01D52523C38166fBdbAF31BD40f302`. Biến nhận danh sách cách nhau bằng dấu phẩy để xoay khóa không gián đoạn: thêm ví mới, cho ví mới đăng nhập thành công, rồi mới gỡ ví cũ. Đổi ví chỉ cần cập nhật secret và restart backend, không cần deploy code — nhưng vẫn phải qua phê duyệt hai người và audit ngoài hệ thống. Backend fail-fast lúc khởi động nếu biến thiếu hoặc chứa địa chỉ EVM sai checksum (`validateAdminLoginWalletConfiguration`). Không ghi private key vào repository.
+3. **Lập ghế:** thu địa chỉ trực tiếp từ từng người, admin nhập và người thứ hai đối chiếu từng ký tự; từng chủ ví phải đăng nhập `/governance/login` trước bootstrap. Chỉ khi DB có đúng 1 Chair + 4 Members `ACTIVE` mới được nạp lên chain.
+4. **Bootstrap một lần:** cấu hình đồng thời `COMMITTEE_GOVERNANCE_ADDRESS`, `BLOCKCHAIN_RPC_URL` và biến FE tương ứng; dùng MetaMask của `bootstrapAdmin`; lưu tx hash/deployment block; đọc lại `getSeats()` trên chain và đối chiếu DB. Từ lúc đó API backend phải bị khóa sửa roster.
+5. **Đổi ghế hoặc mất ví:** không sửa MongoDB trực tiếp. Ủy ban tạo đề xuất, thu đủ 3/5 chữ ký, chờ ba ngày và gọi `executeSeatChange`; chỉ sau event xác nhận mới đồng bộ DB. Nếu mất từ ba ví trở lên trước khi đổi ghế, contract bị kẹt và phải triển khai contract mới theo incident process.
+6. **Ba signer kỹ thuật giải ngân:** `DISBURSEMENT_SERVICE_SIGNER_{ADMIN,ORG,REGULATORY}_KEY` phải là ba ví khác nhau, đặt trong secret store độc lập và có lịch xoay khóa. Nếu nghi lộ khóa: tắt worker trước, thu hồi/cấp lại role on-chain theo quy trình khẩn cấp, kiểm tra request pending rồi mới bật lại.
+7. **Gate quyết định tiền:** không bật `disbursementOnChainSignerWorker` cho production đến khi mỗi quyết định 3/5 có signatures EIP-712 đã lưu, receipt `CommitteeGovernance.DecisionRecorded` và audit G6 đối chiếu với `MultisigDisbursement`. Kiểm tra dashboard/log RPC, `DecisionRecorded`, `ThresholdSignaturesReached` và PayOS sau mỗi rollout.

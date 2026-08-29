@@ -1,6 +1,6 @@
 import mongoose, { type ClientSession, Schema } from 'mongoose';
 
-export type EvidencePhotoModule = 'PROJECT_CHALLENGE' | 'AUDITOR_FIELD_REPORT';
+export type EvidencePhotoModule = 'PROJECT_CHALLENGE' | 'AUDITOR_FIELD_REPORT' | 'LISTING_VERIFICATION' | 'DISBURSEMENT';
 
 export interface EvidencePhotoRegistryRecord {
   contentSha256: string;
@@ -14,7 +14,7 @@ export interface EvidencePhotoRegistryRecord {
 const evidencePhotoRegistrySchema = new Schema<EvidencePhotoRegistryRecord>({
   contentSha256: { type: String, required: true, unique: true },
   cid: { type: String, required: true, unique: true },
-  module: { type: String, enum: ['PROJECT_CHALLENGE', 'AUDITOR_FIELD_REPORT'], required: true },
+  module: { type: String, enum: ['PROJECT_CHALLENGE', 'AUDITOR_FIELD_REPORT', 'LISTING_VERIFICATION', 'DISBURSEMENT'], required: true },
   ownerUserId: { type: String, required: true },
   refId: { type: String, required: true },
   createdAt: { type: Date, required: true }

@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ProjectRecord } from '../../models/projectModel';
 
 const {
-  mockCountActiveProjects,
   mockCreateProjectOnChain,
   mockFindProjectById,
   mockFindUserById,
@@ -17,7 +16,6 @@ const {
   mockSetProjectStatus,
   mockUpdateProject
 } = vi.hoisted(() => ({
-  mockCountActiveProjects: vi.fn(),
   mockCreateProjectOnChain: vi.fn(),
   mockFindProjectById: vi.fn(),
   mockFindUserById: vi.fn(),
@@ -59,7 +57,6 @@ vi.mock('../../models/organizationKycModel', () => ({
 vi.mock('../../services/notificationService', () => ({ createUserNotification: mockCreateUserNotification }));
 
 vi.mock('../../repositories/projectRepository', () => ({
-  countActiveProjectsByOrganizationIdFromRepository: mockCountActiveProjects,
   createProject: vi.fn(),
   findProjectById: mockFindProjectById,
   findProjectByOrganizationAndName: vi.fn(),
@@ -87,10 +84,11 @@ vi.mock('ethers', () => ({
   }
 }));
 
-import { reviewProjectByReviewer } from '../../services/projectService';
+import { closeProjectOnBlockchain, reviewProjectByReviewer } from '../../services/projectService';
 
 const blockchainEnvironmentVariableNames = [
   'BLOCKCHAIN_RPC_URL',
+  'BLOCKCHAIN_CHAIN_ID',
   'DONATION_RANKING_CONTRACT_ADDRESS',
   'PROJECT_MANAGER_PRIVATE_KEY'
 ] as const;
@@ -128,6 +126,7 @@ describe('project service review on-chain synchronization', () => {
       blockchainEnvironmentVariableNames.map(variableName => [variableName, process.env[variableName]])
     ) as Record<BlockchainEnvironmentVariableName, string | undefined>;
     process.env.BLOCKCHAIN_RPC_URL = 'http://rpc.test';
+    delete process.env.BLOCKCHAIN_CHAIN_ID;
     process.env.DONATION_RANKING_CONTRACT_ADDRESS = '0x1234567890123456789012345678901234567890';
     process.env.PROJECT_MANAGER_PRIVATE_KEY = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 
@@ -136,7 +135,6 @@ describe('project service review on-chain synchronization', () => {
     mockCountActiveAuditors.mockResolvedValue(1);
     mockCreateUserNotification.mockResolvedValue(null);
     mockFindProjectById.mockResolvedValue(createPendingProjectFixture());
-    mockCountActiveProjects.mockResolvedValue(0);
     mockGetNetwork.mockResolvedValue({ chainId: 80002n });
     mockProjectManagerRole.mockResolvedValue('PROJECT_MANAGER_ROLE');
     mockHasRole.mockResolvedValue(true);
@@ -213,5 +211,83 @@ describe('project service review on-chain synchronization', () => {
     });
 
     expect(mockUpdateProject).not.toHaveBeenCalled();
+  });
+});
+
+describe('project service close on-chain synchronization', () => {
+  let originalBlockchainEnvironment: Record<BlockchainEnvironmentVariableName, string | undefined>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    originalBlockchainEnvironment = Object.fromEntries(
+      blockchainEnvironmentVariableNames.map(variableName => [variableName, process.env[variableName]])
+    ) as Record<BlockchainEnvironmentVariableName, string | undefined>;
+    process.env.BLOCKCHAIN_RPC_URL = 'http://rpc.test';
+    process.env.DONATION_RANKING_CONTRACT_ADDRESS = '0x1234567890123456789012345678901234567890';
+    process.env.PROJECT_MANAGER_PRIVATE_KEY = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    mockGetNetwork.mockResolvedValue({ chainId: 80002n });
+    mockProjectManagerRole.mockResolvedValue('PROJECT_MANAGER_ROLE');
+    mockHasRole.mockResolvedValue(true);
+    mockSetProjectStatus.mockResolvedValue({ hash: '0xclose', wait: vi.fn().mockResolvedValue(undefined) });
+  });
+
+  afterEach(() => {
+    blockchainEnvironmentVariableNames.forEach(variableName => {
+      const originalValue = originalBlockchainEnvironment[variableName];
+      if (originalValue === undefined) delete process.env[variableName];
+      else process.env[variableName] = originalValue;
+    });
+  });
+
+  it('đóng duy nhất dự án Active/Completed bằng transition Closed trên chain', async () => {
+    mockGetProjectSnapshot.mockResolvedValue({ exists: true, projectStatus: 1n });
+
+    await expect(closeProjectOnBlockchain('202608180000000001')).resolves.toBeUndefined();
+
+    expect(mockSetProjectStatus).toHaveBeenCalledWith(202608180000000001n, 3);
+  });
+
+  it('idempotent khi dự án đã Closed, không gửi giao dịch mới', async () => {
+    mockGetProjectSnapshot.mockResolvedValue({ exists: true, projectStatus: 3n });
+
+    await expect(closeProjectOnBlockchain('202608180000000001')).resolves.toBeUndefined();
+
+    expect(mockSetProjectStatus).not.toHaveBeenCalled();
+  });
+
+  it('từ chối draft hoặc project chưa tồn tại thay vì tự tạo và khóa dữ liệu sai', async () => {
+    mockGetProjectSnapshot.mockResolvedValueOnce({ exists: true, projectStatus: 0n }).mockResolvedValueOnce({ exists: false, projectStatus: 0n });
+
+    await expect(closeProjectOnBlockchain('202608180000000001')).rejects.toMatchObject({ errorCode: 'INVALID_STATUS_TRANSITION', statusCode: 409 });
+    await expect(closeProjectOnBlockchain('202608180000000002')).rejects.toMatchObject({ errorCode: 'INVALID_STATUS_TRANSITION', statusCode: 409 });
+
+    expect(mockCreateProjectOnChain).not.toHaveBeenCalled();
+    expect(mockSetProjectStatus).not.toHaveBeenCalled();
+  });
+
+  it('fail-closed trước RPC khi projectId không phải số hoặc không đọc được snapshot', async () => {
+    await expect(closeProjectOnBlockchain('project-id')).rejects.toMatchObject({ errorCode: 'VALIDATION_ERROR', statusCode: 400 });
+    expect(mockGetNetwork).not.toHaveBeenCalled();
+
+    mockGetProjectSnapshot.mockRejectedValue(new Error('RPC unavailable'));
+    await expect(closeProjectOnBlockchain('202608180000000001')).rejects.toMatchObject({ errorCode: 'BLOCKCHAIN_UNAVAILABLE', statusCode: 502 });
+    expect(mockSetProjectStatus).not.toHaveBeenCalled();
+  });
+
+  it('không gửi giao dịch khi RPC network lỗi, sai chain hoặc giao dịch đóng revert', async () => {
+    mockGetNetwork.mockRejectedValueOnce(new Error('network unavailable'));
+
+    await expect(closeProjectOnBlockchain('202608180000000001')).rejects.toMatchObject({ errorCode: 'BLOCKCHAIN_UNAVAILABLE', statusCode: 502 });
+    expect(mockGetProjectSnapshot).not.toHaveBeenCalled();
+
+    process.env.BLOCKCHAIN_CHAIN_ID = '1';
+    mockGetNetwork.mockResolvedValueOnce({ chainId: 80002n });
+    await expect(closeProjectOnBlockchain('202608180000000001')).rejects.toMatchObject({ errorCode: 'CHAIN_MISMATCH', statusCode: 400 });
+    expect(mockGetProjectSnapshot).not.toHaveBeenCalled();
+
+    delete process.env.BLOCKCHAIN_CHAIN_ID;
+    mockGetProjectSnapshot.mockResolvedValueOnce({ exists: true, projectStatus: 2n });
+    mockSetProjectStatus.mockRejectedValueOnce(new Error('transaction reverted'));
+    await expect(closeProjectOnBlockchain('202608180000000001')).rejects.toMatchObject({ errorCode: 'BLOCKCHAIN_UNAVAILABLE', statusCode: 502 });
   });
 });

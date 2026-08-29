@@ -1,32 +1,14 @@
 import { Router } from 'express';
-import multer from 'multer';
 import { createAuthenticationMiddleware } from '../middleware/authenticationMiddleware';
 import {
-  createFreshRoleAuthorizationMiddleware,
   createRoleAuthorizationMiddleware
 } from '../middleware/roleAuthorizationMiddleware';
 import { createRateLimitMiddleware } from '../middleware/rateLimitMiddleware';
-import { createUploadValidationMiddleware, createBatchUploadValidationMiddleware } from '../middleware/upload-validation.middleware';
 import {
-  handleVerifyImage,
-  handleVerifyImageBatch,
   handleGetGeofence,
-  handleUpsertGeofence,
-  handleGetOverrideRequestById,
-  handleGetPendingOverrides,
-  handleVoteOverrideRequest
+  handleUpsertGeofence
 } from '../controllers/oracleController';
 import { createSbtTriggerRoutes } from './sbt-trigger.routes';
-
-/**
- * Multer memory storage: giữ file trong RAM để oracle service đọc EXIF buffer.
- * Không lưu disk vì ảnh chỉ cần để parse EXIF, không cần persist.
- * Giới hạn 10MB per file — fileSize thực sự được validate trong controller.
- */
-const memoryUpload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024, files: 10 }
-});
 
 /** Hàm khởi tạo route oracle — xác minh EXIF GPS + quản lý geofence. */
 export function createOracleRoutes(): Router {
@@ -34,39 +16,11 @@ export function createOracleRoutes(): Router {
 
   const authMiddleware = createAuthenticationMiddleware();
   const orgMiddleware = createRoleAuthorizationMiddleware(['organizations']);
-  const freshCommissionerMiddleware = createFreshRoleAuthorizationMiddleware(['admin', 'regulatory']);
   const orgOrAdminMiddleware = createRoleAuthorizationMiddleware(['organizations', 'admin', 'regulatory']);
 
-  // Rate limit tách riêng: verify (write) vs geofence read vs geofence write
-  const verifyRateLimit = createRateLimitMiddleware(30, 60 * 1000, { bucketName: 'oracle:verify' });
-  const batchVerifyRateLimit = createRateLimitMiddleware(5, 60 * 1000, { bucketName: 'oracle:batch-verify' });
+  // Chỉ còn geofence vì xác minh/ghi đè GPS đã ngừng sử dụng từ 2026-08-27.
   const geofenceReadRateLimit = createRateLimitMiddleware(120, 60 * 1000, { bucketName: 'oracle:geofence-read' });
   const geofenceWriteRateLimit = createRateLimitMiddleware(20, 60 * 1000, { bucketName: 'oracle:geofence-write' });
-  const overrideReadRateLimit = createRateLimitMiddleware(60, 60 * 1000, { bucketName: 'oracle:override-read' });
-  // Vote rate limit thấp: mỗi commissioner chỉ vote 1 lần/request, rate limit để chống spam
-  const voteRateLimit = createRateLimitMiddleware(20, 60 * 1000, { bucketName: 'oracle:override-vote' });
-
-  // Xác minh ảnh minh chứng — tổ chức upload
-  router.post(
-    '/verify-image',
-    authMiddleware,
-    orgMiddleware,
-    verifyRateLimit,
-    memoryUpload.single('image'),
-    createUploadValidationMiddleware('image'),
-    handleVerifyImage
-  );
-
-  // Batch xác minh — tổ chức upload nhiều ảnh qua queue
-  router.post(
-    '/verify-image/batch',
-    authMiddleware,
-    orgMiddleware,
-    batchVerifyRateLimit,
-    memoryUpload.array('images', 10),
-    createBatchUploadValidationMiddleware('image'),
-    handleVerifyImageBatch
-  );
 
   // Geofence read — org + admin + regulatory đều có thể xem
   router.get(
@@ -84,33 +38,6 @@ export function createOracleRoutes(): Router {
     orgMiddleware,
     geofenceWriteRateLimit,
     handleUpsertGeofence
-  );
-
-  // Danh sách override request PENDING — admin + regulatory review (B4)
-  router.get(
-    '/pending-overrides',
-    authMiddleware,
-    freshCommissionerMiddleware,
-    overrideReadRateLimit,
-    handleGetPendingOverrides
-  );
-
-  // [B2-fix #6] Chi tiết một override request — B4 OverrideVoteDrawer cần để render vote panel
-  router.get(
-    '/override-requests/:overrideRequestId',
-    authMiddleware,
-    freshCommissionerMiddleware,
-    overrideReadRateLimit,
-    handleGetOverrideRequestById
-  );
-
-  // Vote override request — chỉ admin + regulatory trong commissionerSnapshot (B2)
-  router.post(
-    '/override-requests/:overrideRequestId/vote',
-    authMiddleware,
-    freshCommissionerMiddleware,
-    voteRateLimit,
-    handleVoteOverrideRequest
   );
 
   // SBT trigger — Oracle trigger mint SBT sau khi verify thành công (C3)

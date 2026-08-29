@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import mongoose, { Schema } from 'mongoose';
 
 export type AuthUser = {
@@ -6,6 +7,12 @@ export type AuthUser = {
   fullName: string;
   role: string;
   walletAddress: string;
+  /** Địa chỉ MetaMask tự quản dùng riêng cho cổng quản trị, luôn lưu chữ thường. */
+  governanceWalletAddress?: string | null;
+  /** Slot 1-based bảo vệ quota Chair/Member bằng unique index ở MongoDB. */
+  governanceSeatSlot?: number | null;
+  /** Đánh dấu ví admin được đồng bộ từ allowlist hệ thống để reconciliation không chạm admin thường. */
+  isRootAdminWallet?: boolean;
   smartAccountOwnerAddress: string | null;
   smartAccountOwnerEncryptedPrivateKey: string | null;
   socialProvider: string;
@@ -16,7 +23,7 @@ export type AuthUser = {
   organizationName: string | null;
   legalRegistrationNumber: string | null;
   isSybil: boolean;
-  lastLoginAt: Date;
+  lastLoginAt: Date | null;
   lastLoginIp: string | null;
   lastLoginUserAgent: string | null;
   correlationId: string;
@@ -47,6 +54,15 @@ export type RefreshSession = {
   updatedAt: Date;
 };
 
+/** Nonce SIWE ngắn hạn để chống phát lại chữ ký đăng nhập cổng quản trị. */
+export type WalletLoginNonce = {
+  id: string;
+  walletAddress: string;
+  nonce: string;
+  expiresAt: Date;
+  createdAt: Date;
+};
+
 export type AuditLogEntry = {
   id: string;
   userId: string | null;
@@ -64,6 +80,9 @@ const authUserSchema = new Schema<AuthUser>({
   fullName: { type: String, required: true },
   role: { type: String, required: true },
   walletAddress: { type: String, required: true },
+  governanceWalletAddress: { type: String, default: null },
+  governanceSeatSlot: { type: Number, default: null },
+  isRootAdminWallet: { type: Boolean, required: true, default: false },
   smartAccountOwnerAddress: { type: String, default: null },
   smartAccountOwnerEncryptedPrivateKey: { type: String, default: null },
   socialProvider: { type: String, required: true },
@@ -74,7 +93,7 @@ const authUserSchema = new Schema<AuthUser>({
   organizationName: { type: String, default: null },
   legalRegistrationNumber: { type: String, default: null },
   isSybil: { type: Boolean, required: true, default: false },
-  lastLoginAt: { type: Date, required: true },
+  lastLoginAt: { type: Date, default: null },
   lastLoginIp: { type: String, default: null },
   lastLoginUserAgent: { type: String, default: null },
   correlationId: { type: String, required: true },
@@ -91,6 +110,30 @@ authUserSchema.index(
     unique: true,
     partialFilterExpression: {
       legalRegistrationNumber: { $exists: true, $gt: '' }
+    }
+  }
+);
+
+// Chỉ địa chỉ ví quản trị thực sự mới phải duy nhất; các tài khoản Google cũ có giá trị null không xung đột.
+authUserSchema.index(
+  { governanceWalletAddress: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      governanceWalletAddress: { $exists: true, $gt: '' }
+    }
+  }
+);
+
+// Slot được giữ duy nhất khi ghế còn ACTIVE, do đó nhiều request đồng thời không thể vượt quota 1 Chair hoặc 4 Member.
+authUserSchema.index(
+  { role: 1, governanceSeatSlot: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      role: { $in: ['executive_chair', 'executive_member'] },
+      accountStatus: 'ACTIVE',
+      governanceSeatSlot: { $gte: 1 }
     }
   }
 );
@@ -121,12 +164,22 @@ const auditLogSchema = new Schema<AuditLogEntry>({
   createdAt: { type: Date, required: true }
 });
 
+const walletLoginNonceSchema = new Schema<WalletLoginNonce>({
+  id: { type: String, required: true, unique: true },
+  walletAddress: { type: String, required: true, index: true },
+  nonce: { type: String, required: true, unique: true },
+  expiresAt: { type: Date, required: true, index: { expires: 0 } },
+  createdAt: { type: Date, required: true }
+});
+
 export const AuthUserModel = mongoose.models?.AuthUser
   || mongoose.model<AuthUser>('AuthUser', authUserSchema);
 const RefreshSessionModel = mongoose.models?.RefreshSession
   || mongoose.model<RefreshSession>('RefreshSession', refreshSessionSchema);
 const AuditLogModel = mongoose.models?.AuditLog
   || mongoose.model<AuditLogEntry>('AuditLog', auditLogSchema);
+const WalletLoginNonceModel = mongoose.models?.WalletLoginNonce
+  || mongoose.model<WalletLoginNonce>('WalletLoginNonce', walletLoginNonceSchema);
 
 /**
  * Hàm tìm người dùng theo mã số đăng ký pháp lý.
@@ -150,6 +203,147 @@ export async function findUserByEmail(email: string): Promise<AuthUser | null> {
  */
 export async function findUserByWalletAddress(walletAddress: string): Promise<AuthUser | null> {
   return AuthUserModel.findOne({ walletAddress: walletAddress.toLowerCase() }).lean<AuthUser>().exec();
+}
+
+/** Tìm tài khoản quản trị theo địa chỉ MetaMask chuẩn hóa chữ thường. */
+export async function findUserByGovernanceWalletAddress(walletAddress: string): Promise<AuthUser | null> {
+  return AuthUserModel.findOne({ governanceWalletAddress: walletAddress.toLowerCase() })
+    .lean<AuthUser>()
+    .exec();
+}
+
+/** Liệt kê các ví root admin đã được đồng bộ trước đó để reconciliation tập cấu hình có thể thu hồi ví bị loại. */
+export async function findRootAdminWalletUsers(): Promise<AuthUser[]> {
+  return AuthUserModel.find({ role: 'admin', isRootAdminWallet: true })
+    .lean<AuthUser[]>()
+    .exec();
+}
+
+/** Liệt kê ghế Ủy ban và chỉ trả trường tối thiểu cần cho màn quản trị. */
+export async function findGovernanceSeats(): Promise<AuthUser[]> {
+  return AuthUserModel.find({ role: { $in: ['executive_chair', 'executive_member'] } })
+    .select('id fullName role governanceWalletAddress walletAddress governanceSeatSlot accountStatus lastLoginAt updatedAt authVersion')
+    .sort({ role: 1, createdAt: 1 })
+    .lean<AuthUser[]>()
+    .exec();
+}
+
+/** Tạo ghế với slot đã chọn để MongoDB thực thi quota ngay cả khi request chạy đồng thời. */
+export async function createGovernanceSeatUser(user: AuthUser, governanceSeatSlot: number): Promise<AuthUser> {
+  const createdUser = await AuthUserModel.create({ ...user, governanceSeatSlot });
+  return createdUser.toObject() as AuthUser;
+}
+
+/** Đếm ghế đang hoạt động theo vai trò để giới hạn đúng cấu hình 1 Chủ tịch và 4 Ủy viên. */
+export async function countActiveGovernanceSeats(role: 'executive_chair' | 'executive_member'): Promise<number> {
+  return AuthUserModel.countDocuments({ role, accountStatus: 'ACTIVE' }).exec();
+}
+
+/** Đếm ghế ACTIVE legacy chưa có slot để service khóa mutation cho tới khi migration hoàn tất. */
+export async function countActiveGovernanceSeatsMissingSlot(): Promise<number> {
+  return AuthUserModel.countDocuments({
+    role: { $in: ['executive_chair', 'executive_member'] },
+    accountStatus: 'ACTIVE',
+    $or: [
+      { governanceSeatSlot: null },
+      { governanceSeatSlot: { $exists: false } }
+    ]
+  }).exec();
+}
+
+/** Thu ghế theo ví, tăng authVersion trong cùng một ghi để thu hồi JWT đang mở. */
+export async function suspendGovernanceSeatByWalletAddress(walletAddress: string): Promise<AuthUser | null> {
+  return AuthUserModel.findOneAndUpdate(
+    {
+      governanceWalletAddress: walletAddress.toLowerCase(),
+      role: { $in: ['executive_chair', 'executive_member'] },
+      accountStatus: 'ACTIVE'
+    },
+    {
+      $set: { accountStatus: 'SUSPENDED' },
+      $inc: { authVersion: 1 }
+    },
+    { returnDocument: 'after' }
+  ).lean<AuthUser>().exec();
+}
+
+/** Đồng bộ một ghế hiện hữu từ chain, chỉ dùng bởi projector sau khi event SeatChangeExecuted đã được xác nhận. */
+export async function upsertGovernanceSeatFromChain(input: {
+  walletAddress: string;
+  role: 'executive_chair' | 'executive_member';
+  governanceSeatSlot: number;
+}): Promise<AuthUser> {
+  const walletAddress = input.walletAddress.toLowerCase();
+  const existing = await findUserByGovernanceWalletAddress(walletAddress);
+  const roleOrStatusChanged = Boolean(existing && (existing.role !== input.role || existing.accountStatus !== 'ACTIVE'));
+  const setOnInsert: Record<string, unknown> = {
+    id: crypto.randomUUID(),
+    email: `${walletAddress}@wallet.dcp.local`,
+    fullName: `On-chain committee seat ${walletAddress.slice(0, 10)}`,
+    smartAccountOwnerAddress: null,
+    smartAccountOwnerEncryptedPrivateKey: null,
+    socialProvider: 'metamask',
+    socialAccountId: walletAddress,
+    isEmailVerified: false,
+    organizationName: null,
+    legalRegistrationNumber: null,
+    isSybil: false,
+    lastLoginAt: null,
+    lastLoginIp: null,
+    lastLoginUserAgent: null,
+    correlationId: crypto.randomUUID(),
+    fcmDeviceToken: null,
+    phoneNumber: null,
+    isRootAdminWallet: false
+  };
+  // $inc và $setOnInsert cùng một field bị Mongo từ chối, nên chỉ gán default cho nhánh insert thực sự.
+  if (!roleOrStatusChanged) setOnInsert.authVersion = 1;
+  const updated = await AuthUserModel.findOneAndUpdate(
+    { governanceWalletAddress: walletAddress },
+    {
+      $set: {
+        role: input.role,
+        walletAddress,
+        governanceWalletAddress: walletAddress,
+        governanceSeatSlot: input.governanceSeatSlot,
+        accountStatus: 'ACTIVE',
+        suspendedReasonCode: null
+      },
+      ...(roleOrStatusChanged ? { $inc: { authVersion: 1 } } : {}),
+      $setOnInsert: setOnInsert
+    },
+    { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true }
+  ).lean<AuthUser>().exec();
+  if (!updated) throw new Error('Không thể đồng bộ ghế ủy ban từ blockchain.');
+  return updated;
+}
+
+/** Lưu nonce đăng nhập ví với TTL ngắn để người dùng ký một thông điệp chỉ dùng một lần. */
+export async function createWalletLoginNonce(walletAddress: string, expiresAt: Date): Promise<WalletLoginNonce> {
+  const record: WalletLoginNonce = {
+    id: crypto.randomUUID(),
+    walletAddress: walletAddress.toLowerCase(),
+    nonce: crypto.randomBytes(32).toString('hex'),
+    expiresAt,
+    createdAt: new Date()
+  };
+  const createdRecord = await WalletLoginNonceModel.create(record);
+  return createdRecord.toObject() as WalletLoginNonce;
+}
+
+/** Đọc nonce còn hạn mà không tiêu thụ trước khi chữ ký được xác minh thành công. */
+export async function findWalletLoginNonce(walletAddress: string, nonce: string): Promise<WalletLoginNonce | null> {
+  return WalletLoginNonceModel.findOne({
+    walletAddress: walletAddress.toLowerCase(),
+    nonce,
+    expiresAt: { $gt: new Date() }
+  }).lean<WalletLoginNonce>().exec();
+}
+
+/** Xóa nguyên tử nonce sau khi đã xác minh chữ ký để chặn phát lại và race đăng nhập song song. */
+export async function consumeWalletLoginNonce(nonceId: string): Promise<boolean> {
+  const deleted = await WalletLoginNonceModel.deleteOne({ id: nonceId, expiresAt: { $gt: new Date() } }).exec();
+  return deleted.deletedCount === 1;
 }
 
 /**

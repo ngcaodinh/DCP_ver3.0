@@ -48,11 +48,35 @@ vi.mock('../../config/logger', () => ({
 }));
 
 // Import các function cần test sau khi mock
-import { encryptOwnerPrivateKey, decryptOwnerPrivateKey } from '../../services/zeroDevService';
+import { createKernelAccountClient, createZeroDevPaymasterClient } from '@zerodev/sdk';
+import {
+  createKernelClientFromEncryptedOwnerKey,
+  decryptOwnerPrivateKey,
+  encryptOwnerPrivateKey
+} from '../../services/zeroDevService';
 
 describe('zeroDevService - encrypt/decrypt Owner Private Key', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('gắn public client, chain và fee estimator khi dựng Kernel client có Paymaster', async () => {
+    vi.mocked(createZeroDevPaymasterClient).mockReturnValue({} as never);
+    const encryptedOwnerPrivateKey = encryptOwnerPrivateKey(
+      '0xabcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789'
+    );
+
+    await createKernelClientFromEncryptedOwnerKey(encryptedOwnerPrivateKey);
+
+    expect(createZeroDevPaymasterClient).toHaveBeenCalledWith(expect.objectContaining({
+      chain: expect.objectContaining({ id: 80002 })
+    }));
+    expect(createKernelAccountClient).toHaveBeenCalledWith(expect.objectContaining({
+      chain: expect.objectContaining({ id: 80002 }),
+      client: expect.any(Object),
+      paymaster: expect.anything(),
+      userOperation: expect.objectContaining({ estimateFeesPerGas: expect.any(Function) })
+    }));
   });
 
   describe('encryptOwnerPrivateKey', () => {
@@ -147,7 +171,8 @@ describe('zeroDevService - encrypt/decrypt Owner Private Key', () => {
 
       // Thay đổi một ký tự trong phần encrypted
       const parts = encrypted.split(':');
-      const tamperedEncrypted = `${parts[0]}:${parts[1].replace(parts[1][0], '0')}:${parts[2]}`;
+      const replacement = parts[1][0] === '0' ? '1' : '0';
+      const tamperedEncrypted = `${parts[0]}:${replacement}${parts[1].slice(1)}:${parts[2]}`;
 
       expect(() => decryptOwnerPrivateKey(tamperedEncrypted)).toThrow();
     });

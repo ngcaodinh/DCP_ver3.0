@@ -1,6 +1,7 @@
 import { ethers } from 'ethers';
 import { getLogger } from '../config/logger';
 import {
+  cancelUnsubmittedAuditorRewardPayout,
   claimAuditorPayoutForBurn,
   findAuditorPayoutById,
   findAuditorPayoutByPayosTransferId,
@@ -46,11 +47,33 @@ function getPayoutRequestCode(payout: AuditorPayout): string {
 
 /** Kiểm tra DCT còn nguyên trong ví Auditor ngay trước khi gọi PayOS để không chuyển tiền mặt không có bảo chứng. */
 export async function hasAuditorPayoutBalance(payout: AuditorPayout): Promise<boolean> {
-  const user = await findUserById(payout.auditorUserId);
+  return hasAuditorWalletBalance(payout.auditorUserId, payout.amountVnd);
+}
+
+/** Kiểm tra DCT còn trong ví Auditor trước một payout để không khóa yêu cầu chắc chắn không thể chi trả. */
+export async function hasAuditorWalletBalance(auditorUserId: string, amountVnd: number): Promise<boolean> {
+  const user = await findUserById(auditorUserId);
   if (!user?.walletAddress) throw new Error('Không tìm thấy ví của Kiểm toán viên để kiểm tra số dư DCT.');
   const contract = getCharityTokenReadContract();
   const balance = await contract.balanceOf(user.walletAddress) as bigint;
-  return balance >= BigInt(payout.amountVnd);
+  return balance >= BigInt(amountVnd);
+}
+
+/** Hủy payout thưởng chưa qua PayOS và cho phép admin retry nhả lock nếu lần hủy trước đã commit nhưng lock chưa nhả. */
+export async function cancelAuditorRewardPayoutAfterManualReview(payoutId: string, reason: string): Promise<void> {
+  const cancelledPayout = await cancelUnsubmittedAuditorRewardPayout(payoutId, reason)
+    ?? await findAuditorPayoutById(payoutId);
+  if (
+    !cancelledPayout
+    || cancelledPayout.payoutType !== 'REWARD'
+    || cancelledPayout.status !== 'CANCELLED'
+    || cancelledPayout.onchainTxHash !== null
+    || cancelledPayout.payosTransferId !== null
+    || cancelledPayout.burnTxHash !== null
+  ) {
+    throw new ApplicationError('Payout thưởng không ở trạng thái có thể hủy an toàn.', 409, 'CONFLICT');
+  }
+  await releaseAuditorWalletLock(cancelledPayout.auditorUserId, payoutId, 'PAYOUT_IN_FLIGHT');
 }
 
 /**

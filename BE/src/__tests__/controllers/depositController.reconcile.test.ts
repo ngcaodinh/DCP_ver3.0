@@ -193,6 +193,14 @@ describe('handleCreateDeposit - payment flow', () => {
     }));
     expect(auditorResponse.status).toHaveBeenCalledWith(201);
 
+    const auditorPortalResponse = createResponse();
+    await handleCreateDeposit(createDepositRequestWithFlow('AUDITOR_PORTAL'), auditorPortalResponse);
+
+    expect(mocks.createDepositRequest).toHaveBeenLastCalledWith(expect.objectContaining({
+      paymentFlow: 'AUDITOR_PORTAL'
+    }));
+    expect(auditorPortalResponse.status).toHaveBeenCalledWith(201);
+
     const standardResponse = createResponse();
     await handleCreateDeposit(createDepositRequestWithFlow('https://attacker.example/register'), standardResponse);
 

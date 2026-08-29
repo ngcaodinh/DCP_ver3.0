@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { createAuthenticationMiddleware } from '../middleware/authenticationMiddleware';
-import { createRoleAuthorizationMiddleware } from '../middleware/roleAuthorizationMiddleware';
+import { createFreshRoleAuthorizationMiddleware, createRoleAuthorizationMiddleware } from '../middleware/roleAuthorizationMiddleware';
 import { attachRequestMetadata } from '../middleware/ipMetadataMiddleware';
 import { createRateLimitMiddleware } from '../middleware/rateLimitMiddleware';
 import {
@@ -8,15 +8,12 @@ import {
   handleDisbursementTransferWebhookHealth,
   handleCreateDisbursementRequest,
   handleGetMyDisbursements,
-  handleGetPendingDisbursements,
-  handleGetDisbursementRequestSummaries,
-  handleGetDisbursementApprovalLogs,
   handleGetDisbursementDetail,
   handleGetDisbursementsByProject,
-  handleGetMaxWithdrawable,
-  handleSignDisbursementRequest,
-  handleRejectDisbursementRequest
+  handleGetMaxWithdrawable
 } from '../controllers/disbursementController';
+import { handleGetExecutivePendingDisbursements, handlePrepareDisbursementVoteSignature, handleRecoverDeadLetterDisbursementExecution, handleVoteOnDisbursement } from '../controllers/disbursementCommitteeController';
+import { ADMIN_ROLE, EXECUTIVE_VOTER_ROLES } from '../constants/governanceRoles';
 
 /**
  * Hàm khởi tạo router cho module disbursement.
@@ -28,6 +25,10 @@ export function createDisbursementRoutes(): Router {
   const transferWebhookRateLimit = createRateLimitMiddleware(60, 60 * 1000, {
     bucketName: 'disbursement-transfer-webhook'
   });
+  const executivePendingRateLimit = createRateLimitMiddleware(120, 60 * 1000, { bucketName: 'executive-disbursement-pending' });
+  const executiveSigningPayloadRateLimit = createRateLimitMiddleware(30, 60 * 1000, { bucketName: 'executive-disbursement-signing-payload' });
+  const executiveVoteRateLimit = createRateLimitMiddleware(30, 60 * 1000, { bucketName: 'executive-disbursement-vote' });
+  const executiveRecoveryRateLimit = createRateLimitMiddleware(10, 60 * 1000, { bucketName: 'executive-disbursement-recovery' });
 
   /**
    * GET/POST /api/disbursement/webhook
@@ -61,35 +62,18 @@ export function createDisbursementRoutes(): Router {
     handleGetMyDisbursements
   );
 
-  /**
-   * GET /api/disbursement/pending
-   * Lay danh sach yeu cau cho ky duyet.
-   * Quyen: admin, regulatory.
-   */
-  router.get(
-    '/requests',
-    authenticationMiddleware,
-    createRoleAuthorizationMiddleware(['admin', 'regulatory']),
-    handleGetDisbursementRequestSummaries
-  );
+  /** Các route vote phải đứng trước /:requestId để Express không hiểu executive là requestId. */
+  router.get('/executive/pending', authenticationMiddleware, createFreshRoleAuthorizationMiddleware([...EXECUTIVE_VOTER_ROLES]), executivePendingRateLimit, handleGetExecutivePendingDisbursements);
+  router.post('/executive/:requestId/signing-payload', authenticationMiddleware, createFreshRoleAuthorizationMiddleware([...EXECUTIVE_VOTER_ROLES]), executiveSigningPayloadRateLimit, handlePrepareDisbursementVoteSignature);
+  router.post('/executive/:requestId/vote', authenticationMiddleware, createFreshRoleAuthorizationMiddleware([...EXECUTIVE_VOTER_ROLES]), executiveVoteRateLimit, handleVoteOnDisbursement);
+  router.post('/admin/executive/:requestId/recover-execution', authenticationMiddleware, createFreshRoleAuthorizationMiddleware([ADMIN_ROLE]), executiveRecoveryRateLimit, handleRecoverDeadLetterDisbursementExecution);
 
+  /** GET số dư khả dụng phải đứng trước dynamic :requestId. */
   router.get(
-    '/pending',
+    '/max-withdrawable/:projectId',
     authenticationMiddleware,
-    createRoleAuthorizationMiddleware(['admin', 'regulatory']),
-    handleGetPendingDisbursements
-  );
-
-  /**
-   * GET /api/disbursement/approval-logs
-   * Lấy nhật ký ký duyệt gần nhất cho dashboard.
-   * Quyền: admin, regulatory.
-   */
-  router.get(
-    '/approval-logs',
-    authenticationMiddleware,
-    createRoleAuthorizationMiddleware(['admin', 'regulatory']),
-    handleGetDisbursementApprovalLogs
+    createRoleAuthorizationMiddleware(['organizations']),
+    handleGetMaxWithdrawable
   );
 
   /**
@@ -104,52 +88,13 @@ export function createDisbursementRoutes(): Router {
   /**
    * GET /api/disbursement/:requestId
    * Lay chi tiet yeu cau.
-   * Quyen: admin, regulatory, organizations.
+   * Quyen: organizations hoặc Ủy ban trong snapshot.
    */
   router.get(
     '/:requestId',
     authenticationMiddleware,
-    createRoleAuthorizationMiddleware(['admin', 'regulatory', 'organizations']),
+    createFreshRoleAuthorizationMiddleware(['organizations', ...EXECUTIVE_VOTER_ROLES]),
     handleGetDisbursementDetail
   );
-
-  /**
-   * POST /api/disbursement/:requestId/sign
-   * Ky duyet yeu cau rut tien (UC7.2).
-   * Quyen: admin, regulatory, organizations.
-   */
-  router.post(
-    '/:requestId/sign',
-    authenticationMiddleware,
-    createRoleAuthorizationMiddleware(['admin', 'regulatory', 'organizations']),
-    handleSignDisbursementRequest
-  );
-
-  /**
-   * POST /api/disbursement/:requestId/reject
-   * Tu choi yeu cau rut tien.
-   * Quyen: admin, regulatory (organizations chi duoc reject request khong phai cua minh).
-   */
-  router.post(
-    '/:requestId/reject',
-    authenticationMiddleware,
-    createRoleAuthorizationMiddleware(['admin', 'regulatory', 'organizations']),
-    handleRejectDisbursementRequest
-  );
-
-
-  /**
-   * GET /api/disbursement/max-withdrawable/:projectId
-   * Lay so du kha dung toi da.
-   * Quyen: organizations.
-   */
-  router.get(
-    '/max-withdrawable/:projectId',
-    authenticationMiddleware,
-    createRoleAuthorizationMiddleware(['organizations']),
-    handleGetMaxWithdrawable
-  );
-
   return router;
 }
-

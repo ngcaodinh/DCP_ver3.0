@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { getLogger } from '../config/logger';
-import { findUserByWalletAddress } from '../models/authModel';
+import { findUserByWalletAddress, type AuthUser } from '../models/authModel';
 import { findDonationsByDonorAddress } from '../models/donationModel';
 import { getTrustScoreByDonorAddress, saveTrustScore } from '../repositories/donorTrustScoreRepository';
 import {
@@ -54,7 +54,7 @@ function clamp(value: number, min: number, max: number): number {
  * @param accountStatus - Trạng thái tài khoản của donor.
  * @returns 1.0 nếu ACTIVE, 0.0 nếu chưa KYC.
  */
-function computeKycScore(accountStatus: 'ACTIVE' | 'INACTIVE_PENDING_KYC'): number {
+function computeKycScore(accountStatus: AuthUser['accountStatus']): number {
   return accountStatus === 'ACTIVE' ? 1.0 : 0.0;
 }
 
@@ -273,7 +273,7 @@ async function doRecalculateTrustScoreForDonor(
         )
       : null;
 
-  const accountAgeProxyDate = oldestDonationDate ?? user.lastLoginAt;
+  const accountAgeProxyDate = oldestDonationDate ?? user.lastLoginAt ?? new Date(0);
 
   // Lấy bản ghi hiện có trước khi tính toán — tránh query thứ 2 sau khi đã compute.
   const existingRecord = await getTrustScoreByDonorAddress(normalizedAddress);

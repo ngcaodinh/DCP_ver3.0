@@ -18,7 +18,7 @@ type CreateDepositInput = {
   walletAddress: string;
   amountVnd: number;
   correlationId: string;
-  paymentFlow?: 'STANDARD' | 'AUDITOR_ONBOARDING';
+  paymentFlow?: 'STANDARD' | 'AUDITOR_ONBOARDING' | 'AUDITOR_PORTAL';
 };
 
 type CreateDepositResult = {
@@ -235,6 +235,11 @@ function buildDepositPaymentRedirectUrl(
     redirectUrl.pathname = '/register';
     redirectUrl.searchParams.set('role', 'auditor');
     redirectUrl.searchParams.set('paymentFlow', 'auditor_onboarding');
+  }
+
+  if (paymentFlow === 'AUDITOR_PORTAL') {
+    redirectUrl.pathname = '/auditor';
+    redirectUrl.searchParams.set('paymentFlow', 'auditor_portal');
   }
 
   redirectUrl.searchParams.set('orderCode', orderCode);

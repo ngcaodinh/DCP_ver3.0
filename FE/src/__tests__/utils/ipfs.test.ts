@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildIpfsGatewayUrlList, isAllowedIpfsGatewayUrl, normalizeIpfsCid } from '@/app/utils/ipfs';
+import { buildIpfsGatewayUrl, buildIpfsGatewayUrlList, isAllowedIpfsGatewayUrl, normalizeIpfsCid } from '@/app/utils/ipfs';
 
 const VALID_CID = `Qm${'a'.repeat(44)}`;
 
@@ -9,13 +9,15 @@ describe('IPFS gallery helpers', () => {
     expect(normalizeIpfsCid(VALID_CID)).toBe(VALID_CID);
   });
 
-  it('builds public-first gateway URLs for a valid CID', () => {
+  it('uses the Pinata gateway first to avoid ipfs.io anti-bot responses', () => {
+    expect(buildIpfsGatewayUrl(VALID_CID)).toBe(`https://gateway.pinata.cloud/ipfs/${VALID_CID}`);
+
     const urls = buildIpfsGatewayUrlList(VALID_CID);
 
     expect(urls).toHaveLength(3);
-    expect(urls[0]).toContain('ipfs.io');
+    expect(urls[0]).toContain('gateway.pinata.cloud');
     expect(urls[1]).toContain('cloudflare-ipfs.com');
-    expect(urls[2]).toContain('gateway.pinata.cloud');
+    expect(urls[2]).toContain('ipfs.io');
     expect(new URL(urls[0]).host).not.toBe(new URL(urls[1]).host);
   });
 

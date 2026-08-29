@@ -52,7 +52,7 @@ describe('LoginPage redirect behavior', () => {
    * @param returnToValue - Giá trị returnTo cần gắn vào URL login
    * @returns Hàm push để kiểm tra đích điều hướng cuối cùng
    */
-  async function renderPageAndCompleteLogin(returnToValue: string | null) {
+  async function renderPageAndCompleteLogin(returnToValue: string | null, role = 'donor') {
     const routerPush = vi.fn();
     vi.mocked(useRouter).mockReturnValue({ push: routerPush } as never);
     vi.mocked(useSearchParams).mockReturnValue(new URLSearchParams(returnToValue ? `returnTo=${encodeURIComponent(returnToValue)}` : '') as never);
@@ -70,7 +70,7 @@ describe('LoginPage redirect behavior', () => {
           fullName: 'Người dùng thử',
           email: 'test@example.com',
           walletAddress: '0x123',
-          role: 'donor',
+          role,
         },
         correlationId: 'correlation-id',
       }),
@@ -139,5 +139,15 @@ describe('LoginPage redirect behavior', () => {
         }),
       );
     });
+  });
+
+  it.each([
+    ['auditor', '/auditor'],
+    ['executive_chair', '/executive'],
+    ['executive_member', '/executive'],
+  ])('điều hướng role %s vào cổng F2 đúng', async (role, expectedPath) => {
+    const routerPush = await renderPageAndCompleteLogin(null, role);
+
+    await waitFor(() => expect(routerPush).toHaveBeenCalledWith(expectedPath));
   });
 });

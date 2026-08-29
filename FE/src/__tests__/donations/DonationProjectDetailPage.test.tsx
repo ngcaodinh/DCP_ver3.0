@@ -23,13 +23,19 @@ vi.mock('@/app/components/GuestWalletProvider', () => ({
 }));
 
 vi.mock('@/app/utils/ipfs', () => ({
-  buildIpfsGatewayUrl: vi.fn((cid: string) => `https://ipfs.io/ipfs/${cid}`),
+  buildIpfsGatewayUrl: vi.fn((cid: string) => `https://gateway.pinata.cloud/ipfs/${cid}`),
   getIpfsContentType: vi.fn().mockResolvedValue('image/png'),
   resolveIpfsPreviewKind: vi.fn(() => 'image'),
 }));
 
 vi.mock('@/app/components/common/IpfsEvidencePreviewCard', () => ({
   default: ({ fileName }: { fileName: string }) => <div>{fileName}</div>,
+}));
+
+vi.mock('@/app/components/oracle/GeofenceMapLazy', () => ({
+  GeofenceMapLazy: ({ snapshot }: { snapshot: { polygon: unknown[] } }) => (
+    <div data-testid="project-geofence-map">{snapshot.polygon.length} điểm ranh giới</div>
+  ),
 }));
 
 vi.mock('@/app/donations/components/DonationModal.services', () => ({
@@ -83,7 +89,15 @@ function makeGuestWalletState() {
  * Hàm tạo dữ liệu fetch dự án cho trang chi tiết.
  * @returns Danh sách response tuần tự cho 3 request loadProjectData
  */
-function makeProjectFetchResponses() {
+function makeProjectFetchResponses(location: unknown = {
+  polygon: [
+    { lat: 21.028511, lng: 105.804817 },
+    { lat: 21.029511, lng: 105.804817 },
+    { lat: 21.028511, lng: 105.805817 },
+  ],
+  centroid: { lat: 21.028844, lng: 105.805150 },
+  radiusMeters: 500,
+}) {
   return [
     {
       data: {
@@ -98,6 +112,7 @@ function makeProjectFetchResponses() {
         creatorName: 'DCP Team',
         lastDonationAt: null,
         coverImageUrl: '',
+        location,
       },
     },
     {
@@ -156,6 +171,72 @@ describe('DonationProjectDetailPage', () => {
     await waitFor(() => {
       expect(container.querySelector('a[href="/feedback/project-001"]')).toBeInTheDocument();
     });
+  });
+
+  it('hiển thị tên vùng, Google Maps và bản đồ ranh giới từ dữ liệu public', async () => {
+    render(<DonationProjectDetailPage />);
+
+    const location = await screen.findByTestId('project-geographic-location');
+    expect(location).toHaveTextContent('Vùng địa lý dự án: Quỹ hỗ trợ khẩn cấp');
+    expect(location).not.toHaveTextContent('Bản đồ chỉ xem để đối chiếu ranh giới trước khi duyệt.');
+    expect(location).toHaveTextContent('21.028844, 105.805150 · bán kính 500 m');
+    expect(screen.getByRole('link', { name: /mở trên google maps/i })).toHaveAttribute(
+      'href',
+      'https://www.google.com/maps/search/?api=1&query=21.028844%2C105.805150',
+    );
+    expect(screen.getByTestId('project-geofence-map')).toHaveTextContent('3 điểm ranh giới');
+  });
+
+  it('hiển thị trạng thái chưa có vị trí khi dự án cũ chưa có dữ liệu geofence', async () => {
+    const responses = makeProjectFetchResponses(null);
+    vi.mocked(fetchApi)
+      .mockReset()
+      .mockResolvedValueOnce(responses[0] as never)
+      .mockResolvedValueOnce(responses[1] as never)
+      .mockResolvedValueOnce(responses[2] as never);
+
+    render(<DonationProjectDetailPage />);
+
+    await screen.findByText('Quỹ hỗ trợ khẩn cấp');
+    expect(screen.getByTestId('project-geographic-location')).toHaveTextContent('Chưa thiết lập thông tin vị trí.');
+    expect(screen.queryByRole('link', { name: /mở trên google maps/i })).not.toBeInTheDocument();
+    expect(screen.queryByTestId('project-geofence-map')).not.toBeInTheDocument();
+  });
+
+  it('tương thích payload public-support cũ không có trường location', async () => {
+    const responses = makeProjectFetchResponses();
+    delete (responses[0].data as { location?: unknown }).location;
+    vi.mocked(fetchApi)
+      .mockReset()
+      .mockResolvedValueOnce(responses[0] as never)
+      .mockResolvedValueOnce(responses[1] as never)
+      .mockResolvedValueOnce(responses[2] as never);
+
+    render(<DonationProjectDetailPage />);
+
+    await screen.findByText('Quỹ hỗ trợ khẩn cấp');
+    expect(screen.getByTestId('project-geographic-location')).toHaveTextContent('Chưa thiết lập thông tin vị trí.');
+    expect(screen.queryByRole('link', { name: /mở trên google maps/i })).not.toBeInTheDocument();
+  });
+
+  it('chặn Google Maps và Leaflet khi snapshot geofence không hợp lệ', async () => {
+    const responses = makeProjectFetchResponses({
+      polygon: [{ lat: 21.028511, lng: 105.804817 }],
+      centroid: { lat: 95, lng: 105.804817 },
+      radiusMeters: 0,
+    });
+    vi.mocked(fetchApi)
+      .mockReset()
+      .mockResolvedValueOnce(responses[0] as never)
+      .mockResolvedValueOnce(responses[1] as never)
+      .mockResolvedValueOnce(responses[2] as never);
+
+    render(<DonationProjectDetailPage />);
+
+    await screen.findByText('Quỹ hỗ trợ khẩn cấp');
+    expect(screen.getByTestId('project-geographic-location')).toHaveTextContent('Thông tin vị trí không hợp lệ.');
+    expect(screen.queryByRole('link', { name: /mở trên google maps/i })).not.toBeInTheDocument();
+    expect(screen.queryByTestId('project-geofence-map')).not.toBeInTheDocument();
   });
 
   it('khởi tạo PayOS cho quyên góp ẩn danh ở mức tối đa', async () => {

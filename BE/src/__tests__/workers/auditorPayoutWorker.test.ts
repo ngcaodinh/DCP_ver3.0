@@ -69,4 +69,16 @@ describe('auditor payout stale-lock recovery', () => {
     expect(mocks.updatePayout).not.toHaveBeenCalled();
     expect(mocks.releaseLock).toHaveBeenCalledWith('auditor-1', 'missing-payout', 'WITHDRAWING');
   });
+
+  it('keeps a reward payout eligible for retry instead of moving it to manual review', async () => {
+    mocks.findStaleGuards.mockResolvedValue([{
+      auditorUserId: 'auditor-1', lockRefId: 'reward-payout-1', walletLock: 'PAYOUT_IN_FLIGHT'
+    }]);
+    mocks.findPayout.mockResolvedValue({ payoutId: 'reward-payout-1', payoutType: 'REWARD', status: 'PENDING', onchainTxHash: null });
+
+    await __auditorPayoutWorkerTestHooks.sweepOrphanedAuditorWalletLocks();
+
+    expect(mocks.updatePayout).not.toHaveBeenCalled();
+    expect(mocks.releaseLock).not.toHaveBeenCalled();
+  });
 });

@@ -1,7 +1,7 @@
 'use client';
 
 import { type FormEvent, type ReactElement, useEffect, useRef, useState } from 'react';
-import { buildApiUrl, fetchApi } from '@/app/utils/apiClient';
+import { buildSameOriginApiUrl, fetchApi } from '@/app/utils/apiClient';
 import { readAuthSession } from '@/app/utils/authSession';
 import { EvidenceCameraCapture } from '../common/evidenceCamera/EvidenceCameraCapture';
 import type { CapturedEvidencePhoto } from '../common/evidenceCamera/types';
@@ -41,7 +41,7 @@ export default function AuditorFieldReportForm({ projects, onSubmitted }: { proj
     }
     setIsSubmitting(true);
     try {
-      await fetchApi(buildApiUrl('/api/project-governance/auditor/field-report'), {
+      await fetchApi(buildSameOriginApiUrl('/api/project-governance/auditor/field-report'), {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
         body: JSON.stringify({
@@ -65,7 +65,7 @@ export default function AuditorFieldReportForm({ projects, onSubmitted }: { proj
     }
   }
 
-  return <form onSubmit={event => void submit(event)} className="mt-5 overflow-hidden rounded-2xl border border-emerald-100 bg-white shadow-[0_12px_28px_rgba(14,124,107,0.07)]">
+  return <form onSubmit={event => void submit(event)} className="mt-5 min-w-0 overflow-hidden rounded-2xl border border-emerald-100 bg-white shadow-[0_12px_28px_rgba(14,124,107,0.07)]">
     <div className="border-b border-emerald-100 bg-emerald-50/70 px-5 py-4 sm:px-6">
       <h3 className="text-lg font-bold text-slate-900">Nộp biên bản kiểm tra thực địa</h3>
       <p className="mt-1 text-sm leading-6 text-slate-600">Chọn dự án, các mốc đã kiểm tra và chụp ảnh minh chứng trực tiếp tại hiện trường.</p>
@@ -81,7 +81,7 @@ export default function AuditorFieldReportForm({ projects, onSubmitted }: { proj
         <>
           <div>
             <label htmlFor="auditor-field-report-project" className="mb-2 block text-sm font-bold text-slate-800">Dự án cần kiểm tra</label>
-            <select id="auditor-field-report-project" className="min-h-11 w-full cursor-pointer rounded-xl border border-emerald-200 bg-white px-3 text-sm text-slate-800 outline-none transition focus:border-emerald-600 focus:ring-4 focus:ring-emerald-100" value={projectId} onChange={event => { setProjectId(event.target.value); setIndexes([]); clearPhotos(); }} required>
+            <select id="auditor-field-report-project" className="min-h-11 w-full min-w-0 cursor-pointer rounded-xl border border-emerald-200 bg-white px-3 text-base text-slate-800 outline-none transition focus:border-emerald-600 focus:ring-4 focus:ring-emerald-100 sm:text-sm" value={projectId} onChange={event => { setProjectId(event.target.value); setIndexes([]); clearPhotos(); }} required>
               <option value="">Chọn dự án chưa có biên bản</option>
               {eligibleProjects.map(item => <option key={item.projectId} value={item.projectId}>{item.name}</option>)}
             </select>
@@ -96,7 +96,7 @@ export default function AuditorFieldReportForm({ projects, onSubmitted }: { proj
 
           <div>
             <label htmlFor="auditor-field-report-note" className="mb-2 block text-sm font-bold text-slate-800">Ghi chú hiện trường</label>
-            <textarea id="auditor-field-report-note" rows={5} className="w-full resize-y rounded-xl border border-emerald-200 bg-white px-3 py-2.5 text-sm leading-6 text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-emerald-600 focus:ring-4 focus:ring-emerald-100" minLength={20} value={note} onChange={event => setNote(event.target.value)} placeholder="Mô tả các quan sát thực tế (tối thiểu 20 ký tự)" required />
+            <textarea id="auditor-field-report-note" rows={5} className="w-full resize-y rounded-xl border border-emerald-200 bg-white px-3 py-2.5 text-base leading-6 text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-emerald-600 focus:ring-4 focus:ring-emerald-100 sm:text-sm" minLength={20} value={note} onChange={event => setNote(event.target.value)} placeholder="Mô tả các quan sát thực tế (tối thiểu 20 ký tự)" required />
           </div>
 
           {project && <div className="rounded-xl border border-emerald-100 bg-emerald-50/40 p-3 sm:p-4"><EvidenceCameraCapture maxPhotos={5} photos={photos} onChange={setPhotos} moduleLabel="biên bản hiện trường" disabled={isSubmitting} /></div>}
@@ -110,7 +110,7 @@ export default function AuditorFieldReportForm({ projects, onSubmitted }: { proj
 
       {ineligibleProjects.length > 0 && <section className="rounded-xl border border-amber-200 bg-amber-50/70 p-4" aria-labelledby="auditor-ineligible-projects-heading">
         <div>
-          <h4 id="auditor-ineligible-projects-heading" className="text-sm font-bold text-amber-950">Dự án ACTIVE chưa thể lập biên bản</h4>
+          <h4 id="auditor-ineligible-projects-heading" className="text-sm font-bold text-amber-950">Dự án đang hoạt động chưa thể lập biên bản</h4>
           <p className="mt-1 text-xs leading-5 text-amber-900">Các dự án này vẫn được hiển thị để Auditor biết trạng thái dữ liệu, nhưng không thể nộp biên bản khi thiếu mốc đối chiếu hoặc đã có biên bản.</p>
         </div>
         <div className="mt-3 space-y-2">

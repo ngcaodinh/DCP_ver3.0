@@ -121,7 +121,7 @@ export async function handleDisbursementTransferWebhook(request: Request, respon
  * POST /api/disbursement/create
  * Tạo yêu cầu rút tiền mới.
  * Actor: Tổ chức từ thiện (organizations).
- * Body: { projectId, amount, usagePurpose, evidenceCid, requestMode, emergencyReason?, beneficiaryBankAccount }
+ * Body: { projectId, amount, usagePurpose, evidencePhotos, clientSubmittedAt, requestMode, emergencyReason?, beneficiaryBankAccount }
  */
 export async function handleCreateDisbursementRequest(req: Request, res: Response): Promise<void> {
   try {
@@ -135,7 +135,8 @@ export async function handleCreateDisbursementRequest(req: Request, res: Respons
       projectId: req.body.projectId,
       amount: Number(req.body.amount),
       usagePurpose: req.body.usagePurpose,
-      evidenceCid: req.body.evidenceCid,
+      evidencePhotos: req.body.evidencePhotos,
+      clientSubmittedAt: req.body.clientSubmittedAt,
       requestMode: req.body.requestMode,
       emergencyReason: req.body.emergencyReason,
       beneficiaryBankAccount: req.body.beneficiaryBankAccount

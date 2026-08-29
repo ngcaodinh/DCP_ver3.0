@@ -28,6 +28,7 @@ import { createLocationSearchRoutes } from './routes/locationSearchRoutes';
 import { createAuditLogRoutes } from './routes/audit-log.routes';
 import { createTrustScoreRoutes } from './routes/trustScoreRoutes';
 import { createProjectGovernanceRoutes } from './routes/projectGovernanceRoutes';
+import { createGovernanceSeatRoutes } from './routes/governanceSeatRoutes';
 import { createAuditorOnboardingRoutes } from './routes/auditorOnboardingRoutes';
 import { validateGuestJwtConfig } from './config/guestJsonWebToken';
 import { applySeoAndCacheHeaders } from './middleware/seoCacheMiddleware';
@@ -141,6 +142,7 @@ function configureMiddlewares(): void {
   const governanceBodyAuthentication = createAuthenticationMiddleware();
   application.use('/api/project-governance/auditor/field-report', governanceBodyAuthentication, express.json({ limit: FIELD_REPORT_BODY_LIMIT }));
   application.use('/api/project-governance/challenges', governanceBodyAuthentication, express.json({ limit: process.env.CHALLENGE_BODY_LIMIT || '12mb' }));
+  application.use('/api/project-governance/auditor/listing-verification', governanceBodyAuthentication, express.json({ limit: process.env.CHALLENGE_BODY_LIMIT || '12mb' }));
 
   // Giữ giới hạn body nhất quán giữa local và production để tránh cạn bộ nhớ trên VPS ít RAM.
   application.use(express.json({ limit: requestBodyLimit }));
@@ -188,6 +190,7 @@ function registerRoutes(): void {
   application.use('/api/webhooks/payos', createPayosWebhookRoutes());
   application.use('/api/transparency', createTransparencyRoutes());
   application.use('/api/project-governance', createProjectGovernanceRoutes());
+  application.use('/api/governance', createGovernanceSeatRoutes());
   application.use('/api/transparency', createVerificationRoutes());
   application.use('/api/feedback', createFeedbackRoutes());
   application.use('/api/feedback', createPublicFeedbackRoutes());

@@ -2,7 +2,12 @@ import crypto from 'crypto';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { createPublicClient, http } from 'viem';
 import { polygonAmoy } from 'viem/chains';
-import { createKernelAccount, createKernelAccountClient, createZeroDevPaymasterClient } from '@zerodev/sdk';
+import {
+  createKernelAccount,
+  createKernelAccountClient,
+  createZeroDevPaymasterClient,
+  getUserOperationGasPrice
+} from '@zerodev/sdk';
 import { getZeroDevConfig } from '../config/zeroDev';
 import { getLogger } from '../config/logger';
 import { AppError } from '../utils/appError';
@@ -113,7 +118,11 @@ function getPublicClient() {
  */
 function getPaymasterClient() {
   if (!cachedPaymasterClient) {
-    cachedPaymasterClient = createZeroDevPaymasterClient({ transport: http(zeroDevConfig.paymasterUrl) });
+    // SDK v5 gắn chain vào paymaster để tạo đúng payload ERC-7677 cho EntryPoint v0.7.
+    cachedPaymasterClient = createZeroDevPaymasterClient({
+      chain: polygonAmoy,
+      transport: http(zeroDevConfig.paymasterUrl)
+    } as never);
   }
   return cachedPaymasterClient;
 }
@@ -145,16 +154,26 @@ async function createKernelClientFromOwnerPrivateKey(ownerPrivateKey: `0x${strin
   if (!usePaymaster) {
     return createKernelAccountClient({
       account: kernelAccount,
-      chain: publicClient.chain,
-      bundlerTransport: http(zeroDevConfig.bundlerUrl)
+      chain: polygonAmoy,
+      // SDK >= 5.4 cần public client để chuẩn bị gas và UserOperation trước khi gửi bundler.
+      client: publicClient,
+      bundlerTransport: http(zeroDevConfig.bundlerUrl),
+      userOperation: {
+        estimateFeesPerGas: async ({ bundlerClient }: { bundlerClient: unknown }) => getUserOperationGasPrice(bundlerClient as never)
+      }
     } as never);
   }
 
   return createKernelAccountClient({
     account: kernelAccount,
-    chain: publicClient.chain,
+    chain: polygonAmoy,
+    // SDK >= 5.4 cần public client để chuẩn bị gas và UserOperation trước khi gửi bundler.
+    client: publicClient,
     bundlerTransport: http(zeroDevConfig.bundlerUrl),
-    paymaster: getPaymasterClient()
+    paymaster: getPaymasterClient(),
+    userOperation: {
+      estimateFeesPerGas: async ({ bundlerClient }: { bundlerClient: unknown }) => getUserOperationGasPrice(bundlerClient as never)
+    }
   } as never);
 }
 

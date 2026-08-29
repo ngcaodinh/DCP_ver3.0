@@ -1,13 +1,14 @@
 import { AUDITOR_ROLE } from '../constants/governanceRoles';
 import { PROJECT_CHALLENGE_DAILY_LIMIT } from '../constants/projectListingPolicy';
 import { ProjectArbitrationMongoModel } from '../models/projectArbitrationModel';
+import { acquireAuditorOpenCase, initializeAuditorStakeGuard, releaseAuditorOpenCase } from '../models/auditorStakeGuardModel';
 import { countProjectChallengesByUserSinceFromRepository, createProjectChallengeFromRepository, findChallengeByProjectRoundAndUser } from '../repositories/projectChallengeRepository';
 import { createEvidencePhotoRegistryRecordsFromRepository } from '../repositories/evidencePhotoRegistryRepository';
 import { findProjectById, updateProjectIfStatus } from '../repositories/projectRepository';
 import { ApplicationError } from '../utils/applicationError';
 import { openArbitrationCase } from './projectArbitration.service';
 import { runMongoTransaction } from '../utils/mongoTransaction';
-import { processCapturedEvidencePhotos, type CapturedEvidencePhotoInput } from './evidencePhotoCapture.service';
+import { cleanupCapturedEvidencePhotos, processCapturedEvidencePhotos, type CapturedEvidencePhotoInput, type StoredEvidencePhoto } from './evidencePhotoCapture.service';
 
 interface MongoDuplicateKeyError {
   code?: number;
@@ -46,17 +47,24 @@ export async function submitProjectChallenge(
   if (await countProjectChallengesByUserSinceFromRepository(auditorUserId, getUtcDayStart(serverReceivedAt)) >= PROJECT_CHALLENGE_DAILY_LIMIT) {
     throw new ApplicationError('Bạn đã đạt hạn mức khiếu nại trong ngày.', 429, 'RATE_LIMIT_EXCEEDED');
   }
-  const evidencePhotos = await processCapturedEvidencePhotos({
-    photos: payload.photos || [],
-    module: 'PROJECT_CHALLENGE',
-    ownerUserId: auditorUserId,
-    clientSubmittedAt: payload.clientSubmittedAt || serverReceivedAt.toISOString(),
-    serverReceivedAt
-  });
-  const challengeEvidence = evidencePhotos.map(({ lowAccuracyOverride, ...photo }) => ({ ...photo, isLowAccuracyOverride: lowAccuracyOverride }));
+  const guardCaseId = `PROJECT_CHALLENGE:${project.projectId}:${round}`;
+  await initializeAuditorStakeGuard(auditorUserId);
+  if (!await acquireAuditorOpenCase(auditorUserId, guardCaseId)) {
+    throw new ApplicationError('Ví đang có thao tác cọc hoặc chi trả; chưa thể mở thêm vụ khiếu nại.', 409, 'CONFLICT');
+  }
 
+  let challengeOpened = false;
+  let evidencePhotos: StoredEvidencePhoto[] = [];
   try {
-    return await runMongoTransaction(async session => {
+    evidencePhotos = await processCapturedEvidencePhotos({
+      photos: payload.photos || [],
+      module: 'PROJECT_CHALLENGE',
+      ownerUserId: auditorUserId,
+      clientSubmittedAt: payload.clientSubmittedAt || serverReceivedAt.toISOString(),
+      serverReceivedAt
+    });
+    const challengeEvidence = evidencePhotos.map(({ lowAccuracyOverride, ...photo }) => ({ ...photo, isLowAccuracyOverride: lowAccuracyOverride }));
+    const result = await runMongoTransaction(async session => {
       if (project.status === 'DISPUTED') {
         const caseRecord = await ProjectArbitrationMongoModel.findOne({ projectId: project.projectId, round, status: 'PENDING' }).session(session || null).lean().exec();
         if (!caseRecord) throw new ApplicationError('Vụ xét xử của vòng niêm yết này đã đóng.', 409, 'INVALID_STATUS_TRANSITION');
@@ -88,7 +96,10 @@ export async function submitProjectChallenge(
       const arbitration = await openArbitrationCase(project.projectId, round, challenge.challengeId, session);
       return { challengeId: challenge.challengeId, arbitrationId: arbitration.arbitrationId, projectStatus: 'DISPUTED' };
     });
+    challengeOpened = true;
+    return result;
   } catch (error) {
+    await cleanupCapturedEvidencePhotos(evidencePhotos);
     const duplicateKeyError = error as MongoDuplicateKeyError;
     const nestedDuplicateError = duplicateKeyError.writeErrors?.[0]?.err;
     const keyPattern = duplicateKeyError.keyPattern || nestedDuplicateError?.keyPattern;
@@ -100,5 +111,9 @@ export async function submitProjectChallenge(
       throw new ApplicationError('Bạn đã khiếu nại dự án này trong vòng niêm yết hiện tại.', 409, 'DUPLICATE_SUBMISSION');
     }
     throw error;
+  } finally {
+    if (!challengeOpened) {
+      await releaseAuditorOpenCase(auditorUserId, guardCaseId);
+    }
   }
 }

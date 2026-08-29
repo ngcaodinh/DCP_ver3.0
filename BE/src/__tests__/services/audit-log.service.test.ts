@@ -202,4 +202,31 @@ describe('audit-log.service', () => {
       $or: [{ actionType: 'MANUAL_REJECT' }, { action: 'MANUAL_REJECT' }]
     });
   });
+
+  it('sanitize whitelist context cho audit recovery arbitration on-chain', async () => {
+    await recordAdminAuditLog({
+      actorType: 'ADMIN',
+      adminId: 'admin-1',
+      adminRole: 'admin',
+      actionType: 'ARBITRATION_ON_CHAIN_DECISION_RECOVERED',
+      targetId: 'arbitration-1',
+      targetType: 'PROJECT_ARBITRATION',
+      context: {
+        arbitrationId: 'arbitration-1',
+        onChainDecisionStatus: 'PENDING',
+        walletAddress: '0x0000000000000000000000000000000000000001',
+        unexpectedField: 'must-not-persist'
+      }
+    });
+
+    expect(mocks.createAdminAuditLog).toHaveBeenCalledWith(expect.objectContaining({
+      actionType: 'ARBITRATION_ON_CHAIN_DECISION_RECOVERED',
+      targetType: 'PROJECT_ARBITRATION',
+      targetId: 'arbitration-1',
+      context: {
+        arbitrationId: 'arbitration-1',
+        onChainDecisionStatus: 'PENDING'
+      }
+    }));
+  });
 });

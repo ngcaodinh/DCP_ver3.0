@@ -4,8 +4,13 @@ import { Router, type Request, type Response } from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createAuthenticationMiddleware } from '../../middleware/authenticationMiddleware';
 import { getRequestContext, getRequestId } from '../../config/requestContext';
+import { getPrimaryAdminLoginWalletAddress } from '../../config/adminAccess';
 
+const ADMIN_LOGIN_WALLET_ADDRESS = getPrimaryAdminLoginWalletAddress();
 const INTEGRATION_TEST_TIMEOUT_MS = 15_000;
+
+const authModelMocks = vi.hoisted(() => ({ findUserById: vi.fn() }));
+vi.mock('../../models/authModel', () => authModelMocks);
 
 const applicationRouteModules: ReadonlyArray<readonly [string, string]> = [
   ['../../routes/healthRoutes', 'createHealthRoutes'],
@@ -21,6 +26,7 @@ const applicationRouteModules: ReadonlyArray<readonly [string, string]> = [
   ['../../routes/oracleRoutes', 'createOracleRoutes'],
   ['../../routes/sbt.routes', 'createSbtRoutes'],
   ['../../routes/guestRoutes', 'createGuestRoutes'],
+  ['../../routes/auditorOnboardingRoutes', 'createAuditorOnboardingRoutes'],
   ['../../routes/webhooks/payos.webhook', 'createPayosWebhookRoutes'],
   ['../../routes/transparencyRoutes', 'createTransparencyRoutes'],
   ['../../routes/verification.routes', 'createVerificationRoutes'],
@@ -37,13 +43,15 @@ const authControllerHandlerNames = [
   'handleGetMyActiveSessions',
   'handleGetMyOrganizationKycSubmissions',
   'handleGetMyOrganizationProfile',
+  'handleCreateWalletLoginNonce',
   'handleGetPendingOrganizationKycSubmissions',
   'handleGoogleLogin',
   'handleLogoutAll',
   'handleOrganizationKycSubmission',
   'handleRefreshToken',
   'handleReviewOrganizationKycSubmission',
-  'handleSubmitBeneficiaryBankAccount'
+  'handleSubmitBeneficiaryBankAccount',
+  'handleWalletLogin'
 ] as const;
 
 /** Mock route factory không liên quan để import app.ts mà vẫn giữ auth middleware thật. */
@@ -78,6 +86,7 @@ describe('app.ts request context integration', () => {
     vi.stubEnv('METRICS_AUTH_TOKEN', '');
     mockApplicationRoutes();
     mockAuthController();
+    authModelMocks.findUserById.mockResolvedValue({ id: 'user-e6', role: 'admin', governanceWalletAddress: ADMIN_LOGIN_WALLET_ADDRESS, accountStatus: 'ACTIVE', isSybil: false, authVersion: 1 });
 
     const { default: application } = await import('../../app');
     const observedUsers = new Map<string, string | null | undefined>();

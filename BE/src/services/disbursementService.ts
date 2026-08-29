@@ -16,6 +16,7 @@ import {
   findDisbursementsByStatus,
   findLatestDisbursements,
   findPendingDisbursementByBeneficiary,
+  upsertDisbursementRecordByOnChainRequestId,
   updateDisbursementByRequestId,
   updateDisbursementByRequestIdWithCondition
 } from '../models/disbursementModel';
@@ -32,7 +33,22 @@ import {
 import { removePendingJobsByRequestId } from '../queues/disbursementTransferQueue';
 import { triggerPayosTransferForApprovedDisbursement } from '../workers/payosTransferWorker';
 import { openManualReviewQueueForDisbursement } from './manualReviewService';
+import { ensureExecutiveCommitteeRosterReady, openDisbursementCommitteeCase } from './disbursementCommitteeVoting.service';
+import { findDisbursementCommitteeVoteByRequestId } from '../models/disbursementCommitteeVoteModel';
 import { recordBlockchainTransaction } from '../utils/blockchainMetrics';
+import { createEvidencePhotoRegistryRecordsFromRepository } from '../repositories/evidencePhotoRegistryRepository';
+import { runMongoTransaction } from '../utils/mongoTransaction';
+import { cleanupCapturedEvidencePhotos, processCapturedEvidencePhotos, type CapturedEvidencePhotoInput, type StoredEvidencePhoto } from './evidencePhotoCapture.service';
+import {
+  createDisbursementCreationIntent,
+  findDisbursementCreationIntentById,
+  markDisbursementCreationIntentBroadcast,
+  markDisbursementCreationIntentConfirmed,
+  markDisbursementCreationIntentError,
+  markDisbursementCreationIntentMaterialized,
+  type DisbursementCreationIntent,
+  type DisbursementCreationIntentPayload
+} from '../models/disbursementCreationIntentModel';
 
 // ============ ABI ============
 
@@ -105,7 +121,9 @@ export type CreateDisbursementPayload = {
   projectId: string;
   amount: number;
   usagePurpose: string;
-  evidenceCid: string;
+  /** Chỉ nhận ảnh JPEG chụp trực tiếp cùng GPS; CID do server tạo sau khi kiểm tra ảnh. */
+  evidencePhotos: CapturedEvidencePhotoInput[];
+  clientSubmittedAt: string;
   requestMode: 'NORMAL' | 'EMERGENCY';
   emergencyReason?: string;
   beneficiaryBankAccount: {
@@ -193,8 +211,9 @@ type KernelClientContext = {
 
 type ManagedDisbursementSignerRole = 'admin' | 'organizations' | 'regulatory';
 
-type RequestCreatedEventData = {
+export type RequestCreatedEventData = {
   onChainRequestId: number;
+  createdAt: Date;
   timeoutDeadline: Date;
   requiredApprovals: number;
   requestMode: 'NORMAL' | 'EMERGENCY';
@@ -691,7 +710,7 @@ function getAdminWritableMultisigContract() {
 }
 
 /** Hàm parse event RequestCreated từ receipt. Mục đích: lấy requestId và policy động trả về bởi contract. */
-function parseRequestCreatedEvent(receiptLogs: readonly ethers.Log[]): RequestCreatedEventData {
+export function parseRequestCreatedEvent(receiptLogs: readonly ethers.Log[]): RequestCreatedEventData {
   for (const eventLog of receiptLogs) {
     try {
       const parsedEventLog = requestCreatedEventInterface.parseLog(eventLog);
@@ -702,6 +721,7 @@ function parseRequestCreatedEvent(receiptLogs: readonly ethers.Log[]): RequestCr
       const parsedRequestMode = Number(parsedEventLog.args[7]);
       return {
         onChainRequestId: Number(parsedEventLog.args[0]),
+        createdAt: new Date(Number(parsedEventLog.args[5]) * 1000),
         timeoutDeadline: new Date(Number(parsedEventLog.args[6]) * 1000),
         requestMode: parsedRequestMode === 1 ? 'EMERGENCY' : 'NORMAL',
         requiredApprovals: Number(parsedEventLog.args[8]),
@@ -713,6 +733,70 @@ function parseRequestCreatedEvent(receiptLogs: readonly ethers.Log[]): RequestCr
   }
 
   throw new ApplicationError('Không thể đọc RequestCreated event từ receipt.', 502, 'INTERNAL_ERROR');
+}
+
+/** Dựng record/case từ event đã xác nhận; id request cố định theo id contract để replay không nhân bản đường tiền. */
+export async function materializeDisbursementCreationIntent(
+  intent: DisbursementCreationIntent,
+  requestCreatedEventData: RequestCreatedEventData
+): Promise<DisbursementRecord> {
+  const payload = intent.payload;
+  if (payload.onChainProjectId <= 0 || requestCreatedEventData.onChainRequestId <= 0) {
+    throw new Error('RequestCreated event hoặc intent có định danh on-chain không hợp lệ.');
+  }
+  if (payload.requestMode !== requestCreatedEventData.requestMode) {
+    throw new Error('Request mode của RequestCreated không khớp intent đã lưu trước transaction.');
+  }
+  const recordTimestamp = requestCreatedEventData.createdAt;
+  const record: DisbursementRecord = {
+    requestId: `DS-CHAIN-${requestCreatedEventData.onChainRequestId}`,
+    onChainRequestId: requestCreatedEventData.onChainRequestId,
+    projectId: payload.projectId,
+    onChainProjectId: payload.onChainProjectId,
+    organizationId: payload.organizationId,
+    requestMode: requestCreatedEventData.requestMode,
+    emergencyReason: requestCreatedEventData.requestMode === 'EMERGENCY' ? payload.emergencyReason : null,
+    requiredApprovals: requestCreatedEventData.requiredApprovals,
+    raisedRatioBpsAtCreation: requestCreatedEventData.raisedRatioBpsAtCreation,
+    beneficiaryWalletAddress: payload.beneficiaryWalletAddress,
+    beneficiaryBankAccount: payload.beneficiaryBankAccount,
+    amount: payload.amount,
+    usagePurpose: payload.usagePurpose,
+    evidenceCid: payload.evidenceCid,
+    evidencePhotos: payload.evidencePhotos,
+    status: 'PENDING',
+    approvals: [],
+    rejection: null,
+    timeoutDeadline: requestCreatedEventData.timeoutDeadline,
+    payosTransferId: null,
+    payosTransferStatus: null,
+    payosTransferAttemptCount: 0,
+    payosTransferLastError: null,
+    transferIdempotencyKey: null,
+    creationTransactionHash: intent.transactionHash,
+    transactionHash: null,
+    finalizeTransactionHash: null,
+    createdAt: recordTimestamp,
+    updatedAt: recordTimestamp,
+    expiredAt: requestCreatedEventData.timeoutDeadline,
+    completedAt: null
+  };
+  return runMongoTransaction(async session => {
+    const persisted = await upsertDisbursementRecordByOnChainRequestId(record, session);
+    if (persisted.created) {
+      await createEvidencePhotoRegistryRecordsFromRepository(payload.evidencePhotos.map(photo => ({
+        contentSha256: photo.contentSha256,
+        cid: photo.cid,
+        module: 'DISBURSEMENT',
+        ownerUserId: payload.organizationId,
+        refId: persisted.record.requestId,
+        createdAt: recordTimestamp
+      })), session);
+    }
+    await openDisbursementCommitteeCase(persisted.record.requestId, requestCreatedEventData.timeoutDeadline, session);
+    await markDisbursementCreationIntentMaterialized(intent.intentId, session);
+    return persisted.record;
+  });
 }
 
 /** Hàm validate payload tạo request. Mục đích: chặn dữ liệu sai trước khi gọi blockchain. */
@@ -745,8 +829,12 @@ function validateCreateDisbursementPayload(payload: CreateDisbursementPayload): 
     throw new ApplicationError('Mục đích sử dụng tiền phải tối thiểu 10 ký tự.', 400, 'VALIDATION_ERROR');
   }
 
-  if (!payload.evidenceCid?.trim()) {
-    throw new ApplicationError('CID minh chứng sử dụng tiền không được trống.', 400, 'VALIDATION_ERROR');
+  if (!Array.isArray(payload.evidencePhotos) || payload.evidencePhotos.length === 0) {
+    throw new ApplicationError('Cần ít nhất một ảnh camera/GPS minh chứng sử dụng tiền.', 400, 'VALIDATION_ERROR');
+  }
+
+  if (!payload.clientSubmittedAt?.trim()) {
+    throw new ApplicationError('Thiếu thời điểm gửi ảnh minh chứng.', 400, 'VALIDATION_ERROR');
   }
 
   if (payload.requestMode !== 'NORMAL' && payload.requestMode !== 'EMERGENCY') {
@@ -1474,6 +1562,9 @@ export async function createDisbursementRequest(
     throw new ApplicationError('Dự án phải ở trạng thái ACTIVE mới được rút tiền.', 409, 'INVALID_STATUS_TRANSITION');
   }
 
+  // Phải xác minh roster trước mọi side effect chain để không tạo request không thể đạt ngưỡng 3/5.
+  await ensureExecutiveCommitteeRosterReady();
+
   const { contractAddress, contract: readOnlyContract } = getReadOnlyMultisigContract();
   const onChainProjectId = Number(project.projectId);
 
@@ -1503,8 +1594,35 @@ export async function createDisbursementRequest(
 
   await ensureDisbursementSignerRoleOnChain(effectiveUser.role, organizationSmartAccountAddress);
 
-  let requestCreatedEventData: RequestCreatedEventData;
+  const serverReceivedAt = new Date();
+  let evidencePhotos: StoredEvidencePhoto[] = [];
+  let creationIntent: DisbursementCreationIntent | null = null;
+  let transactionBroadcasted = false;
+  let requestCreatedEventData: RequestCreatedEventData | null = null;
+  let creationTransactionHash: string | null = null;
   try {
+    evidencePhotos = await processCapturedEvidencePhotos({
+      photos: payload.evidencePhotos,
+      module: 'DISBURSEMENT',
+      ownerUserId: effectiveUser.id,
+      clientSubmittedAt: payload.clientSubmittedAt,
+      serverReceivedAt
+    });
+    const evidenceCid = evidencePhotos.map(photo => photo.cid).join(',');
+    const intentPayload: DisbursementCreationIntentPayload = {
+      projectId: payload.projectId,
+      onChainProjectId,
+      organizationId: effectiveUser.id,
+      beneficiaryWalletAddress: organizationSmartAccountAddress,
+      beneficiaryBankAccount: payload.beneficiaryBankAccount,
+      amount: payload.amount,
+      usagePurpose: payload.usagePurpose.trim(),
+      evidenceCid,
+      evidencePhotos,
+      requestMode: payload.requestMode,
+      emergencyReason: payload.requestMode === 'EMERGENCY' ? (payload.emergencyReason || '').trim() || null : null
+    };
+    creationIntent = await createDisbursementCreationIntent(intentPayload);
     const encodedCallData = encodeFunctionData({
       abi: multisigContractAbiViem,
       functionName: 'createDisbursementRequest',
@@ -1513,7 +1631,7 @@ export async function createDisbursementRequest(
         organizationSmartAccountAddress,
         BigInt(payload.amount),
         BigInt(project.goalAmount),
-        payload.evidenceCid,
+        evidenceCid,
         mapRequestModeToContractValue(payload.requestMode),
         (payload.emergencyReason || '').trim()
       ]
@@ -1525,6 +1643,17 @@ export async function createDisbursementRequest(
       data: encodedCallData,
       value: BigInt(0)
     }) as `0x${string}`;
+    transactionBroadcasted = true;
+    creationTransactionHash = transactionHash;
+    try {
+      await markDisbursementCreationIntentBroadcast(creationIntent.intentId, transactionHash);
+    } catch (intentError) {
+      // Intent PREPARED vẫn chứa CID để scanner ghép event; không phát transaction lần hai.
+      logger.error('Không thể ghi transaction hash vào intent giải ngân; sẽ recovery từ event.', {
+        intentId: creationIntent.intentId,
+        errorMessage: intentError instanceof Error ? intentError.message : 'Unknown error'
+      });
+    }
 
     const rpcUrl = process.env.BLOCKCHAIN_RPC_URL?.trim() || '';
     const provider = new ethers.JsonRpcProvider(rpcUrl);
@@ -1536,6 +1665,10 @@ export async function createDisbursementRequest(
 
     requestCreatedEventData = parseRequestCreatedEvent(receipt.logs);
   } catch (error) {
+    if (!transactionBroadcasted) await cleanupCapturedEvidencePhotos(evidencePhotos);
+    if (creationIntent) {
+      await markDisbursementCreationIntentError(creationIntent.intentId, error instanceof Error ? error.message : String(error));
+    }
     const mappedError = mapBlockchainErrorToApplicationError(error);
     if (mappedError) {
       throw mappedError;
@@ -1545,42 +1678,29 @@ export async function createDisbursementRequest(
     throw new ApplicationError('Không thể tạo yêu cầu rút tiền trên blockchain.', 502, 'INTERNAL_ERROR');
   }
 
-  const currentTimestamp = new Date();
-  const newRecord: DisbursementRecord = {
-    requestId: `DS-${Date.now()}-${randomUUID().replace(/-/g, '').slice(0, 5).toUpperCase()}`,
-    onChainRequestId: requestCreatedEventData.onChainRequestId,
-    projectId: payload.projectId,
-    onChainProjectId,
-    organizationId: effectiveUser.id,
-    requestMode: requestCreatedEventData.requestMode,
-    emergencyReason: requestCreatedEventData.requestMode === 'EMERGENCY' ? (payload.emergencyReason || '').trim() || null : null,
-    requiredApprovals: requestCreatedEventData.requiredApprovals,
-    raisedRatioBpsAtCreation: requestCreatedEventData.raisedRatioBpsAtCreation,
-    beneficiaryWalletAddress: organizationSmartAccountAddress,
-    beneficiaryBankAccount: payload.beneficiaryBankAccount,
-    amount: payload.amount,
-    usagePurpose: payload.usagePurpose.trim(),
-    evidenceCid: payload.evidenceCid,
-    status: 'PENDING',
-    approvals: [],
-    rejection: null,
-    timeoutDeadline: requestCreatedEventData.timeoutDeadline,
-    payosTransferId: null,
-    payosTransferStatus: null,
-    payosTransferAttemptCount: 0,
-    payosTransferLastError: null,
-    transferIdempotencyKey: null,
-    transactionHash: null,
-    finalizeTransactionHash: null,
-    createdAt: currentTimestamp,
-    updatedAt: currentTimestamp,
-    expiredAt: requestCreatedEventData.timeoutDeadline,
-    completedAt: null
-  };
-
-  const createdRecord = await createDisbursementRecord(newRecord);
-  logger.info(`Đã tạo disbursement record. requestId=${createdRecord.requestId} onChainRequestId=${createdRecord.onChainRequestId}`);
-  return mapDisbursementRecordToResult(createdRecord);
+  if (!requestCreatedEventData) {
+    throw new ApplicationError('Không thể đọc dữ liệu request vừa tạo trên blockchain.', 502, 'INTERNAL_ERROR');
+  }
+  if (!creationIntent) throw new ApplicationError('Không thể lưu intent giải ngân trước transaction.', 502, 'INTERNAL_ERROR');
+  try {
+    await markDisbursementCreationIntentConfirmed(
+      creationIntent.intentId,
+      requestCreatedEventData.onChainRequestId,
+      creationTransactionHash
+    );
+    const latestIntent = await findDisbursementCreationIntentById(creationIntent.intentId) || creationIntent;
+    const createdRecord = await materializeDisbursementCreationIntent(latestIntent, requestCreatedEventData);
+    logger.info(`Đã tạo disbursement record. requestId=${createdRecord.requestId} onChainRequestId=${createdRecord.onChainRequestId}`);
+    return mapDisbursementRecordToResult(createdRecord);
+  } catch (error) {
+    await markDisbursementCreationIntentError(creationIntent.intentId, error instanceof Error ? error.message : String(error));
+    // Event chain đã tham chiếu CID nên không unpin; reconciler sẽ dựng lại record/case idempotent.
+    logger.error('Không thể persist request giải ngân sau khi đã tạo on-chain.', {
+      onChainRequestId: requestCreatedEventData.onChainRequestId,
+      errorMessage: error instanceof Error ? error.message : 'Unknown error'
+    });
+    throw new ApplicationError('Yêu cầu đã được ghi blockchain nhưng đang chờ đối soát dữ liệu nội bộ.', 502, 'INTERNAL_ERROR');
+  }
 }
 
 // ============ UC7.2: SIGN REQUEST ============
@@ -1933,16 +2053,30 @@ export async function getLatestDisbursementApprovalLogs(
     });
 }
 
-/** Hàm lấy chi tiết request. Mục đích: cấp dữ liệu thật cho drawer chi tiết ký duyệt. */
+/** Hàm lấy chi tiết request cho tổ chức sở hữu hoặc ủy viên nằm trong snapshot của chính request đó. */
 export async function getDisbursementDetail(userId: string, requestId: string): Promise<DisbursementResult> {
-  await ensureDisbursementSigner(userId);
-  const record = await findDisbursementByRequestId(requestId);
+  const [user, record] = await Promise.all([
+    findUserById(userId),
+    findDisbursementByRequestId(requestId)
+  ]);
 
   if (!record) {
     throw new ApplicationError('Không tìm thấy yêu cầu rút tiền.', 404, 'NOT_FOUND');
   }
+  if (!user) {
+    throw new ApplicationError('Tài khoản không còn tồn tại.', 401, 'UNAUTHENTICATED');
+  }
+  if (user.role === 'organizations' && user.id === record.organizationId) {
+    return mapDisbursementRecordToResult(record);
+  }
+  if (user.role === 'executive_chair' || user.role === 'executive_member') {
+    const committeeCase = await findDisbursementCommitteeVoteByRequestId(requestId);
+    if (committeeCase?.committeeSnapshot.some(member => member.userId === user.id)) {
+      return mapDisbursementRecordToResult(record);
+    }
+  }
+  throw new ApplicationError('Bạn không có quyền xem yêu cầu giải ngân này.', 403, 'FORBIDDEN');
 
-  return mapDisbursementRecordToResult(record);
 }
 
 /** Hàm lấy lịch sử theo project. Mục đích: hỗ trợ trang chi tiết dự án hiển thị các lần giải ngân thật. */

@@ -2,7 +2,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import mongoose from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import {
+  findAllProjectsByProjectIdList,
   findProjectNamesByProjectIdList,
+  findProjectStatusesByProjectIdList,
   type ProjectStatus
 } from '../../models/projectModel';
 
@@ -59,5 +61,16 @@ describe('projectModel gallery name lookup', () => {
     expect(result).toEqual([
       { projectId: 'project-closed-long-ago', name: 'Dự án đã hoàn thành lâu' }
     ]);
+  });
+
+  it('keeps an active project with an old deadline visible to Auditor exit eligibility', async () => {
+    const oldDeadline = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000);
+    await mongoose.connection.collection('projects').insertOne(
+      buildProjectRecord('project-active-long-ago', 'ACTIVE', oldDeadline)
+    );
+
+    await expect(findAllProjectsByProjectIdList(['project-active-long-ago'])).resolves.toEqual([]);
+    await expect(findProjectStatusesByProjectIdList(['project-active-long-ago'], ['ACTIVE']))
+      .resolves.toEqual([{ projectId: 'project-active-long-ago', name: 'Dự án đã hoàn thành lâu', status: 'ACTIVE' }]);
   });
 });

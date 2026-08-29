@@ -1,7 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import mongoose from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
-import { createAuditorPayout } from '../../models/auditorPayoutModel';
+import { createAuditorPayout, findPendingAuditorPayouts } from '../../models/auditorPayoutModel';
+import '../../models/auditorFieldReportModel';
+import '../../models/auditorPenaltyLedgerModel';
+import { appendAuditorLedgerEntry } from '../../models/auditorPenaltyLedgerModel';
 import { createAuditorStakeIntent } from '../../models/auditorStakeIntentModel';
 import {
   createAuditorDebtSettlement,
@@ -17,12 +20,17 @@ import {
 let mongoServer: MongoMemoryServer;
 
 /** Tạo payout tối thiểu hợp lệ để kiểm tra index MongoDB thay vì mock Mongoose. */
-function createPayoutInput(payoutId: string, sourceRefId: string, onchainTxHash: string | null) {
+function createPayoutInput(
+  payoutId: string,
+  sourceRefId: string,
+  onchainTxHash: string | null,
+  payoutType: 'REWARD' | 'STAKE_WITHDRAWAL' = 'STAKE_WITHDRAWAL'
+) {
   const now = new Date();
   return {
     payoutId,
     auditorUserId: `auditor-${payoutId}`,
-    payoutType: 'STAKE_WITHDRAWAL' as const,
+    payoutType,
     sourceRefId,
     amountVnd: 100_000,
     feeVnd: 5_000,
@@ -42,6 +50,24 @@ function createPayoutInput(payoutId: string, sourceRefId: string, onchainTxHash:
     errorMessage: null,
     createdAt: now,
     updatedAt: now
+  };
+}
+
+/** Tạo ledger thưởng tối thiểu để kiểm chứng unique index cho từng Auditor thắng cùng một biên bản. */
+function createRewardLedgerInput(ledgerId: string, auditorUserId: string) {
+  return {
+    ledgerId,
+    auditorUserId,
+    fieldReportId: 'shared-report',
+    fieldCaseId: 'case-1',
+    milestoneIndex: 0,
+    entryType: 'REWARD' as const,
+    amount: '100000',
+    txHash: null,
+    reasonCode: `REWARD:shared-report:${auditorUserId}`,
+    status: 'PENDING' as const,
+    payableAt: new Date(),
+    createdAt: new Date()
   };
 }
 
@@ -70,7 +96,9 @@ describe('AuditorStaking MongoDB indexes', () => {
       mongoose.model('AuditorPayout').syncIndexes(),
       mongoose.model('AuditorStakeIntent').syncIndexes(),
       mongoose.model('AuditorDebtSettlement').syncIndexes(),
-      mongoose.model('AuditorStakeGuard').syncIndexes()
+      mongoose.model('AuditorStakeGuard').syncIndexes(),
+      mongoose.model('AuditorFieldReport').syncIndexes(),
+      mongoose.model('AuditorPenaltyLedger').syncIndexes()
     ]);
   }, 60_000);
 
@@ -85,6 +113,23 @@ describe('AuditorStaking MongoDB indexes', () => {
     await createAuditorPayout(createPayoutInput('payout-3', 'source-3', '0xconfirmed'));
 
     await expect(createAuditorPayout(createPayoutInput('payout-4', 'source-4', '0xconfirmed')))
+      .rejects.toMatchObject({ code: 11_000 });
+  });
+
+  it('recovers pending REWARD payouts without accidentally recovering pending stake withdrawals', async () => {
+    await createAuditorPayout(createPayoutInput('reward-payout', 'reward-source', null, 'REWARD'));
+    await createAuditorPayout(createPayoutInput('stake-payout', 'stake-source', null));
+
+    const recoveredPayouts = await findPendingAuditorPayouts(10);
+    expect(recoveredPayouts.map(payout => payout.payoutId)).toContain('reward-payout');
+    expect(recoveredPayouts.map(payout => payout.payoutId)).not.toContain('stake-payout');
+  });
+
+  it('allows multiple REWARD entries for different winning Auditors on one field report', async () => {
+    await appendAuditorLedgerEntry(createRewardLedgerInput('reward-ledger-1', 'auditor-1'));
+    await appendAuditorLedgerEntry(createRewardLedgerInput('reward-ledger-2', 'auditor-2'));
+
+    await expect(appendAuditorLedgerEntry(createRewardLedgerInput('reward-ledger-3', 'auditor-1')))
       .rejects.toMatchObject({ code: 11_000 });
   });
 

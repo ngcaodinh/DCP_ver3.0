@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import TransparencyDashboardClient from '../components/transparency/TransparencyDashboardClient';
+import { PublicCommitteeDecisionFeed } from '../components/governance/PublicCommitteeGovernanceFeed';
 
 export const metadata: Metadata = {
   title: 'Minh bạch dòng tiền',
@@ -21,5 +22,5 @@ export const metadata: Metadata = {
  * Mục đích: render bảng minh bạch (timeline + donut) qua component client cô lập.
  */
 export default function TransparencyPage() {
-  return <TransparencyDashboardClient />;
+  return <><TransparencyDashboardClient /><PublicCommitteeDecisionFeed /></>;
 }

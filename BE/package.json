@@ -20,6 +20,13 @@
     "migrate:foundation-kyc-index": "node scripts/migrateFoundationKycIndexes.js",
     "migrate:manual-review-queue-request-mode": "node scripts/migrateManualReviewQueueRequestMode.js",
     "migrate:auditor-staking-indexes": "node scripts/migrateAuditorStakingIndexes.js",
+    "retire:gps-override": "node scripts/closeGpsOverrideFeature.js",
+    "provision:disbursement-signers": "node scripts/provisionDisbursementServiceSigners.js",
+    "migrate:governance-seat-slots": "node scripts/migrateGovernanceSeatSlots.js",
+    "migrate:project-status-project-id-index": "node scripts/migrateProjectStatusProjectIdIndex.js",
+    "migrate:disbursement-onchain-request-id-index": "node scripts/migrateDisbursementOnChainRequestIdIndex.js",
+    "migrate:committee-governance-indexes": "node scripts/migrateCommitteeGovernanceIndexes.js",
+    "audit:disbursement-decisions": "node scripts/auditDisbursementDecisions.js",
     "migrate:admin-audit-log-schema": "node dist/scripts/migrateAdminAuditLogSchema.js",
     "grant:project-manager-role": "node scripts/grantProjectManagerRole.js",
     "assign:governance-role": "node scripts/assignGovernanceRole.js"

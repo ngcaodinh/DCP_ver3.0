@@ -2,6 +2,9 @@ import express from 'express';
 import jwt from 'jsonwebtoken';
 import request from 'supertest';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { getPrimaryAdminLoginWalletAddress } from '../../config/adminAccess';
+
+const ADMIN_LOGIN_WALLET_ADDRESS = getPrimaryAdminLoginWalletAddress();
 
 vi.mock('../../controllers/feedbackBatchController', () => ({
   batchUploadFeedbackController: vi.fn((_request, response) => response.status(200).json({ success: true })),
@@ -22,6 +25,7 @@ vi.mock('../../models/authModel', () => ({
   findUserById: vi.fn((userId: string) => Promise.resolve({
     userId,
     role: userId.startsWith('organizations-') ? 'organizations' : userId.startsWith('admin-') ? 'admin' : 'donor',
+    governanceWalletAddress: userId.startsWith('admin-') ? ADMIN_LOGIN_WALLET_ADDRESS : null,
     accountStatus: 'ACTIVE',
     authVersion: 1
   }))

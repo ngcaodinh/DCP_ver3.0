@@ -1,12 +1,12 @@
-import { getProjectActivationBackoffMs, PROJECT_ACTIVATION_BACKOFF_MS, PROJECT_ACTIVATION_CLAIM_TIMEOUT_MS, PROJECT_ACTIVATION_LOCK_RETRY_MS } from '../constants/projectListingPolicy';
+import { getProjectActivationBackoffMs, PROJECT_ACTIVATION_CLAIM_TIMEOUT_MS, PROJECT_ACTIVATION_LOCK_RETRY_MS } from '../constants/projectListingPolicy';
 import { claimOrganizationActivationLockFromRepository, releaseOrganizationActivationLockFromRepository } from '../repositories/organizationActivationLockRepository';
-import { countActiveProjectsByOrganizationIdFromRepository, claimProjectForActivationFromRepository, findProjectById, updateProject } from '../repositories/projectRepository';
+import { claimProjectForActivationFromRepository, findProjectById, updateProject } from '../repositories/projectRepository';
 import { activateProjectOnBlockchain } from './projectService';
 
-export type ActivationOutcome = 'ACTIVATED' | 'ALREADY_CLAIMED' | 'ORGANIZATION_LOCKED' | 'FAILED' | 'ACTIVE_PROJECT_LIMIT_REACHED' | 'INVALID_STATUS';
+export type ActivationOutcome = 'ACTIVATED' | 'ALREADY_CLAIMED' | 'ORGANIZATION_LOCKED' | 'FAILED' | 'INVALID_STATUS';
 
 /** Kích hoạt dự án đã được chấp thuận; idempotent và chỉ service này được gọi blockchain. */
-export async function activateApprovedProject(projectId: string, fromStatus: 'PENDING_ACTIVATION' | 'DISPUTED'): Promise<ActivationOutcome> {
+export async function activateApprovedProject(projectId: string, fromStatus: 'PENDING_ACTIVATION' | 'DISPUTED' | 'REJECTED'): Promise<ActivationOutcome> {
   const claimed = await claimProjectForActivationFromRepository(projectId, fromStatus, new Date(Date.now() - PROJECT_ACTIVATION_CLAIM_TIMEOUT_MS));
   if (!claimed) return 'ALREADY_CLAIMED';
 
@@ -24,38 +24,25 @@ export async function activateApprovedProject(projectId: string, fromStatus: 'PE
   }
 
   try {
-  const activeProjectCount = await countActiveProjectsByOrganizationIdFromRepository(claimed.organizationId);
-  if (activeProjectCount >= 5) {
-    const failureTime = new Date();
-    await updateProject(projectId, {
-      activationClaimedAt: null,
-      activationState: 'FAILED',
-      activationLastError: 'Tổ chức đã đạt giới hạn 5 dự án ACTIVE.',
-      activationEligibleAt: new Date(failureTime.getTime() + PROJECT_ACTIVATION_BACKOFF_MS),
-      updatedAt: failureTime
-    });
-    return 'ACTIVE_PROJECT_LIMIT_REACHED';
-  }
-
-  const attemptedAt = new Date();
-  const attemptCount = (claimed.activationAttemptCount || 0) + 1;
-  await updateProject(projectId, { activationAttemptCount: attemptCount, activationLastAttemptAt: attemptedAt, updatedAt: attemptedAt });
-  try {
-    await activateProjectOnBlockchain(projectId);
-    await updateProject(projectId, { status: 'ACTIVE', activationClaimedAt: null, activationState: 'SYNCED', activationLastError: null, updatedAt: new Date() });
-    return 'ACTIVATED';
-  } catch (error) {
-    const message = error instanceof Error ? error.message.slice(0, 500) : 'Không thể đồng bộ blockchain.';
-    const failureTime = new Date();
-    await updateProject(projectId, {
-      activationClaimedAt: null,
-      activationState: 'FAILED',
-      activationLastError: message,
-      activationEligibleAt: new Date(failureTime.getTime() + getProjectActivationBackoffMs(attemptCount)),
-      updatedAt: failureTime
-    });
-    return 'FAILED';
-  }
+    const attemptedAt = new Date();
+    const attemptCount = (claimed.activationAttemptCount || 0) + 1;
+    await updateProject(projectId, { activationAttemptCount: attemptCount, activationLastAttemptAt: attemptedAt, updatedAt: attemptedAt });
+    try {
+      await activateProjectOnBlockchain(projectId);
+      await updateProject(projectId, { status: 'ACTIVE', activationClaimedAt: null, activationState: 'SYNCED', activationLastError: null, updatedAt: new Date() });
+      return 'ACTIVATED';
+    } catch (error) {
+      const message = error instanceof Error ? error.message.slice(0, 500) : 'Không thể đồng bộ blockchain.';
+      const failureTime = new Date();
+      await updateProject(projectId, {
+        activationClaimedAt: null,
+        activationState: 'FAILED',
+        activationLastError: message,
+        activationEligibleAt: new Date(failureTime.getTime() + getProjectActivationBackoffMs(attemptCount)),
+        updatedAt: failureTime
+      });
+      return 'FAILED';
+    }
   } finally {
     await releaseOrganizationActivationLockFromRepository(claimed.organizationId, projectId);
   }
