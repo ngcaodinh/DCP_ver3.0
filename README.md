@@ -147,6 +147,14 @@ NEXT_PUBLIC_DONATION_RANKING_ADDRESS=0x...
 NEXT_PUBLIC_DONATION_RANKING_CONTRACT_ADDRESS=0x...
 ```
 
+#### Google OAuth Configuration
+
+Create or select a **Web application** OAuth client in Google Cloud Console, then add every exact frontend origin to **Authorized JavaScript origins**. For local development, add `http://localhost:3000`; for production, add the HTTPS frontend origin (for example `https://tuthienminhbach.online`). Do not add a path such as `/login` or a trailing slash.
+
+Set `GOOGLE_CLIENT_ID` in the backend to that Web client ID. The `/login` page reads this public client ID from the backend at runtime so Google Identity Services and backend ID-token verification always use the same audience. `NEXT_PUBLIC_GOOGLE_CLIENT_ID` must remain the same value for other Google login entry points that still use the build-time frontend configuration.
+
+The frontend origin must also be included in `CORS_ALLOWED_ORIGINS` on the backend. This does not replace the Google Cloud Console configuration: the browser origin must be approved in both places.
+
 #### Blockchain Environment
 
 ```env

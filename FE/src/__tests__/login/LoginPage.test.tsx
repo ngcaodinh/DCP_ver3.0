@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, waitFor } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
 
 vi.mock('next/navigation', () => ({
@@ -57,7 +57,12 @@ describe('LoginPage redirect behavior', () => {
     vi.mocked(useRouter).mockReturnValue({ push: routerPush } as never);
     vi.mocked(useSearchParams).mockReturnValue(new URLSearchParams(returnToValue ? `returnTo=${encodeURIComponent(returnToValue)}` : '') as never);
 
-    vi.mocked(global.fetch).mockResolvedValue({
+    vi.mocked(global.fetch)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ clientId: 'google-client.apps.googleusercontent.com' }),
+      } as Response)
+      .mockResolvedValueOnce({
       ok: true,
       json: async () => ({
         accessToken: 'access-token',
@@ -74,7 +79,7 @@ describe('LoginPage redirect behavior', () => {
         },
         correlationId: 'correlation-id',
       }),
-    } as Response);
+      } as Response);
 
     render(<LoginPage />);
 
@@ -139,6 +144,27 @@ describe('LoginPage redirect behavior', () => {
         }),
       );
     });
+  });
+
+  it('khởi tạo GSI bằng client ID do backend cung cấp để khớp audience xác minh', async () => {
+    await renderPageAndCompleteLogin('/');
+
+    expect(mockGoogleAccounts.initialize).toHaveBeenCalledWith(expect.objectContaining({
+      client_id: 'google-client.apps.googleusercontent.com',
+    }));
+    expect(global.fetch).toHaveBeenCalledWith('http://localhost:4000/auth/google-client-config');
+  });
+
+  it('không khởi tạo GSI khi backend trả cấu hình Google client ID không hợp lệ', async () => {
+    vi.mocked(global.fetch).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ clientId: 'invalid-client-id' }),
+    } as Response);
+
+    render(<LoginPage />);
+
+    expect(await screen.findByText('Không thể tải cấu hình đăng nhập Google. Vui lòng thử lại sau.')).toBeInTheDocument();
+    expect(mockGoogleAccounts.initialize).not.toHaveBeenCalled();
   });
 
   it.each([

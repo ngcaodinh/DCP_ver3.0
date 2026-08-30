@@ -246,6 +246,10 @@ describe('authService admin wallet allowlist', () => {
 
     await expect(loginWithGoogle('google-id-token', 'donor', ipAddress, userAgent))
       .resolves.toMatchObject({ user: { role } });
+    expect(mocks.verifyGoogleIdToken).toHaveBeenCalledWith({
+      idToken: 'google-id-token',
+      audience: 'google-client'
+    });
     expect(mocks.createRefreshSession).toHaveBeenCalledOnce();
   });
 });

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import {
   handleGetCurrentUserProfile,
+  handleGetGoogleClientConfiguration,
   handleGetFoundationOrganizationKycSubmissions,
   handleGetMyActiveSessions,
   handleGetMyOrganizationKycSubmissions,
@@ -39,6 +40,7 @@ export function createAuthRoutes(): Router {
   const authenticationMiddleware = createAuthenticationMiddleware();
   const regulatoryKycReviewAuthorizationMiddleware = createFreshRoleAuthorizationMiddleware(['regulatory']);
 
+  router.get('/google-client-config', handleGetGoogleClientConfiguration);
   router.post('/google-login', attachRequestMetadata(), loginRateLimit, handleGoogleLogin);
   router.post('/wallet/nonce', attachRequestMetadata(), loginRateLimit, handleCreateWalletLoginNonce);
   router.post('/wallet/login', attachRequestMetadata(), loginRateLimit, handleWalletLogin);

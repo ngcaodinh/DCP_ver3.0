@@ -9,6 +9,9 @@ const mocks = vi.hoisted(() => ({
 vi.mock('../../config/logger', () => ({
   getLogger: vi.fn(() => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn() }))
 }));
+vi.mock('../../config/googleAuth', () => ({
+  getGoogleAuthConfig: vi.fn(() => ({ clientId: 'google-client.apps.googleusercontent.com' }))
+}));
 vi.mock('../../services/authService', () => ({
   getMyActiveSessions: vi.fn(),
   loginWithGoogle: mocks.loginWithGoogle,
@@ -29,7 +32,7 @@ vi.mock('../../services/organizationKycService', () => ({
 }));
 vi.mock('../../models/authModel', () => ({ findUserById: vi.fn(), createWalletLoginNonce: vi.fn() }));
 
-import { handleGoogleLogin } from '../../controllers/authController';
+import { handleGetGoogleClientConfiguration, handleGoogleLogin } from '../../controllers/authController';
 
 /** Tạo request Google hợp lệ để tập trung kiểm tra guard role từ service. */
 function createRequest(): Request {
@@ -59,6 +62,15 @@ function createLoginResult(role: string) {
 
 describe('Google login governance guard', () => {
   beforeEach(() => vi.clearAllMocks());
+
+  it('trả về client ID công khai mà backend dùng để xác minh Google ID token', () => {
+    const response = createResponse();
+
+    handleGetGoogleClientConfiguration({} as Request, response);
+
+    expect(response.status).toHaveBeenCalledWith(200);
+    expect(response.json).toHaveBeenCalledWith({ clientId: 'google-client.apps.googleusercontent.com' });
+  });
 
   it.each(['admin', 'executive_chair', 'executive_member'])('trả 403 cho tài khoản %s dù client gửi role donor', async (role) => {
     mocks.loginWithGoogle.mockRejectedValue(Object.assign(new Error('governance account'), { statusCode: 403 }));

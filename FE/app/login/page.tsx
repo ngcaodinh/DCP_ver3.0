@@ -131,6 +131,32 @@ function resolveSafeReturnToPath(returnToValue: string | null): string | null {
 }
 
 // useSearchParams() phải nằm trong Suspense boundary — Next.js 14 yêu cầu khi dùng App Router
+/**
+ * Kiểm tra Google OAuth Client ID nhận từ cấu hình public của backend.
+ * Mục đích: chỉ cho phép Google Identity Services dùng đúng định dạng Web client ID.
+ */
+function isGoogleClientIdValid(googleClientIdValue: string): boolean {
+  return googleClientIdValue.length > 0 && googleClientIdValue.includes('.apps.googleusercontent.com');
+}
+
+/**
+ * Trích xuất Google OAuth Client ID từ phản hồi cấu hình không tin cậy.
+ * Mục đích: tránh khởi tạo Google Identity Services bằng dữ liệu API sai cấu trúc.
+ */
+function extractGoogleClientId(responseData: unknown): string | null {
+  if (!responseData || typeof responseData !== 'object') {
+    return null;
+  }
+
+  const clientId = (responseData as { clientId?: unknown }).clientId;
+  if (typeof clientId !== 'string') {
+    return null;
+  }
+
+  const normalizedClientId = clientId.trim();
+  return isGoogleClientIdValid(normalizedClientId) ? normalizedClientId : null;
+}
+
 function LoginContent() {
   const [isInfoCollapsed, setIsInfoCollapsed] = useState(false);
   const [isProgressLoading, setIsProgressLoading] = useState(false);
@@ -181,21 +207,20 @@ function LoginContent() {
 
 
   /**
-   * Hàm chuẩn hóa Google Client ID từ biến môi trường.
-   * Mục đích: loại bỏ khoảng trắng thừa gây lỗi thiếu client_id khi khởi tạo GSI.
+   * Tải Google OAuth Client ID từ backend.
+   * Mục đích: frontend luôn dùng cùng client ID với audience mà backend xác minh ID token.
    */
-  const normalizeGoogleClientId = (rawGoogleClientId: string) => rawGoogleClientId.trim();
+  const fetchGoogleClientId = useCallback(async (): Promise<string> => {
+    const response = await fetch(`${backendBaseUrl}/auth/google-client-config`);
+    const responseData: unknown = await response.json();
+    const googleClientId = extractGoogleClientId(responseData);
 
-  /**
-   * Hàm kiểm tra định dạng Google Client ID.
-   * Mục đích: đảm bảo FE chỉ khởi tạo GSI khi client ID hợp lệ.
-   */
-  const isGoogleClientIdValid = (googleClientIdValue: string) =>
-    googleClientIdValue.length > 0 && googleClientIdValue.includes('.apps.googleusercontent.com');
+    if (!response.ok || !googleClientId) {
+      throw new Error('Google OAuth client configuration is unavailable.');
+    }
 
-  const googleClientId = normalizeGoogleClientId(
-    process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || ''
-  );
+    return googleClientId;
+  }, [backendBaseUrl]);
 
   /**
    * Hàm tạo dữ liệu thống kê minh bạch cho khối nội dung bên trái.
@@ -310,12 +335,7 @@ function LoginContent() {
    * Hàm khởi tạo Google Identity Services.
    * Mục đích: đăng ký callback nhận credential và render nút Google chính thức.
    */
-  const initializeGoogleLogin = useCallback(() => {
-    if (!isGoogleClientIdValid(googleClientId)) {
-      setAuthErrorMessage('Thiếu hoặc sai cấu hình Google Client ID.');
-      return false;
-    }
-
+  const initializeGoogleLogin = useCallback((googleClientId: string) => {
     const googleAccounts = getGoogleAccountsId();
     if (!googleAccounts) {
       return false;
@@ -329,33 +349,46 @@ function LoginContent() {
 
     renderGoogleRedirectButton();
     return true;
-  }, [getGoogleAccountsId, googleClientId, handleGoogleCredential, renderGoogleRedirectButton]);
+  }, [getGoogleAccountsId, handleGoogleCredential, renderGoogleRedirectButton]);
 
   /**
    * Hàm chuẩn bị Google Identity khi script sẵn sàng.
    */
   useEffect(() => {
-    // Ghi chú logic phức tạp: script GSI có thể tải sau khi component mount,
-    // nên cần polling ngắn hạn để tránh bấm prompt khi initialize chưa chạy.
-    const initializeWhenScriptReady = () => {
-      return initializeGoogleLogin();
+    let isMounted = true;
+    let initializationTimer: number | null = null;
+
+    const loadConfigurationAndInitialize = async (): Promise<void> => {
+      try {
+        const googleClientId = await fetchGoogleClientId();
+        if (!isMounted || initializeGoogleLogin(googleClientId)) {
+          return;
+        }
+
+        // Ghi chú logic phức tạp: script GSI có thể tải sau phản hồi cấu hình,
+        // nên polling ngắn hạn chỉ bắt đầu khi đã có client ID được backend xác nhận.
+        initializationTimer = window.setInterval(() => {
+          if (initializeGoogleLogin(googleClientId) && initializationTimer !== null) {
+            window.clearInterval(initializationTimer);
+            initializationTimer = null;
+          }
+        }, 300);
+      } catch {
+        if (isMounted) {
+          setAuthErrorMessage('Không thể tải cấu hình đăng nhập Google. Vui lòng thử lại sau.');
+        }
+      }
     };
 
-    if (initializeWhenScriptReady()) {
-      return;
-    }
-
-    const initializationTimer = window.setInterval(() => {
-      const isInitialized = initializeWhenScriptReady();
-      if (isInitialized) {
-        window.clearInterval(initializationTimer);
-      }
-    }, 300);
+    void loadConfigurationAndInitialize();
 
     return () => {
-      window.clearInterval(initializationTimer);
+      isMounted = false;
+      if (initializationTimer !== null) {
+        window.clearInterval(initializationTimer);
+      }
     };
-  }, [initializeGoogleLogin]);
+  }, [fetchGoogleClientId, initializeGoogleLogin]);
 
 
   return (

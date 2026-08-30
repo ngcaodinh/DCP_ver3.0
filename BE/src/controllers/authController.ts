@@ -20,6 +20,7 @@ import {
 import { createWalletLoginNonce, findUserById } from '../models/authModel';
 import { isAddress } from 'ethers';
 import { getLogger } from '../config/logger';
+import { getGoogleAuthConfig } from '../config/googleAuth';
 import { sendErrorFromUnknown, sendErrorResponse, sendSuccessResponse } from '../utils/apiResponse';
 
 const logger = getLogger();
@@ -55,6 +56,15 @@ function extractGoogleLoginPayload(request: Request): GoogleLoginPayload | null 
     identityToken: identityToken.trim(),
     role
   };
+}
+
+/**
+ * Trả về Google OAuth Client ID mà backend dùng để xác minh ID token.
+ * Mục đích: bảo đảm trang đăng nhập khởi tạo Google Identity Services với cùng audience,
+ * tránh frontend và backend lệch cấu hình client ID sau một lần triển khai.
+ */
+export function handleGetGoogleClientConfiguration(_request: Request, response: Response): void {
+  response.status(200).json({ clientId: getGoogleAuthConfig().clientId });
 }
 
 /** Kiểm tra payload ký ví trước khi gọi service để tránh tạo truy vấn DB với dữ liệu sai định dạng. */
