@@ -5,6 +5,7 @@ import { flushSync } from 'react-dom';
 import Link from 'next/link';
 import { buildApiUrl, fetchApi } from './utils/apiClient';
 import { authenticationSessionUpdatedEventName, clearAuthSession, readAuthSession } from './utils/authSession';
+import { useLogoutConfirmation } from '@/app/hooks/useLogoutConfirmation';
 import IpfsEvidencePreviewCard from '@/app/components/common/IpfsEvidencePreviewCard';
 import { buildIpfsGatewayUrl, getIpfsContentType, resolveIpfsPreviewKind } from './utils/ipfs';
 import FairRankingTab from '@/app/components/fairRanking/FairRankingTab';
@@ -897,14 +898,15 @@ export default function HomePage() {
   };
 
   /**
-   * Hàm xử lý đăng xuất từ menu người dùng.
-   * Mục đích: xóa toàn bộ session client và cập nhật UI ngay không cần reload.
+   * Kết thúc phiên từ menu người dùng sau khi hộp thoại xác nhận đã được chấp thuận.
    */
-  const handleHeaderUserLogout = () => {
+  const handleConfirmedHeaderUserLogout = (): void => {
     clearAuthSession();
     setAuthenticatedUserName('');
     setIsUserMenuVisible(false);
   };
+
+  const { requestLogout, logoutConfirmationDialog } = useLogoutConfirmation(handleConfirmedHeaderUserLogout);
 
   /** Hàm đóng modal chi tiết dự án. Mục đích: reset trạng thái mở modal theo mọi cách đóng (nút, overlay, Escape). */
   const closeProjectDetailModal = () => {
@@ -1303,7 +1305,7 @@ export default function HomePage() {
                   type="button"
                   role="menuitem"
                   className="flex min-h-[44px] w-full items-center justify-start rounded-lg px-3.5 py-2.5 text-sm font-semibold text-[#0d1117] transition-colors duration-150 hover:bg-[#f3f4f6] active:bg-[#e5e7eb] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0e7c6b]"
-                  onClick={handleHeaderUserLogout}
+                  onClick={requestLogout}
                 >
                   Đăng xuất
                 </button>
@@ -1459,7 +1461,7 @@ export default function HomePage() {
                     className="mobile-menu-logout"
                     onClick={() => {
                       setIsMobileMenuOpen(false);
-                      handleHeaderUserLogout();
+                      requestLogout();
                     }}
                   >
                     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -2535,6 +2537,7 @@ export default function HomePage() {
           </div>
         </div>
       </footer>
+      {logoutConfirmationDialog}
     </main>
   );
 }

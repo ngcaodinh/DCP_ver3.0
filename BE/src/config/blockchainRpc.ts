@@ -21,3 +21,10 @@ export function normalizeBlockchainRpcUrl(rpcUrlValue: string | undefined): stri
 export function getBlockchainRpcUrl(): string {
   return normalizeBlockchainRpcUrl(process.env.BLOCKCHAIN_RPC_URL);
 }
+
+/** Lấy RPC dự phòng cho các worker đọc chain; hỗ trợ tên AuditorStaking cũ để rollout không gián đoạn. */
+export function getBlockchainRpcFallbackUrl(): string {
+  return process.env.BLOCKCHAIN_RPC_FALLBACK_URL?.trim()
+    || process.env.AUDITOR_STAKING_RPC_FALLBACK_URL?.trim()
+    || '';
+}

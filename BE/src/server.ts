@@ -42,7 +42,7 @@ import { initializeEventSocketBridge, shutdownEventSocketBridge } from './servic
 import { startTrustScoreScheduler, stopTrustScoreScheduler } from './workers/trustScoreScheduler';
 import { startProjectActivationWorker, stopProjectActivationWorker } from './workers/projectActivationWorker';
 import { ensureRootAdminWallets } from './services/authService';
-import { reconcileGovernanceBootstrapFromChain, reconcileGovernanceRosterFromChain } from './services/governanceSeatService';
+import { reconcileGovernanceAtStartup } from './services/governanceSeatStartup.service';
 import { isAddress } from 'ethers';
 import { validateAdminLoginWalletConfiguration } from './config/adminAccess';
 
@@ -151,8 +151,7 @@ async function startServer(): Promise<void> {
   await connectToMongoDb();
   await verifyRequiredCommitteeGovernanceIndexes();
   await ensureRootAdminWallets();
-  await reconcileGovernanceBootstrapFromChain();
-  await reconcileGovernanceRosterFromChain();
+  await reconcileGovernanceAtStartup();
   await connectToRedisSafely();
 
   if (shouldRunWorkers()) {

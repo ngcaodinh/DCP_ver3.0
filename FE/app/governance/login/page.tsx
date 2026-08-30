@@ -26,6 +26,15 @@ type WalletLoginResult = {
 };
 
 const POLYGON_AMOY_CHAIN_ID = '0x13882';
+const CHAIN_NOT_ADDED_ERROR_CODE = 4902;
+const POLYGON_AMOY_NETWORK = {
+  chainId: POLYGON_AMOY_CHAIN_ID,
+  chainName: 'Polygon Amoy testnet',
+  nativeCurrency: { name: 'POL', symbol: 'POL', decimals: 18 },
+  rpcUrls: ['https://rpc-amoy.polygon.technology/'],
+  blockExplorerUrls: ['https://amoy.polygonscan.com/']
+} as const;
+const METAMASK_FOX_ICON_URL = 'https://images.ctfassets.net/clixtyxoaeas/1ezuBGezqfIeifWdVtwU4c/d970d4cdf13b163efddddd5709164d2e/MetaMask-icon-Fox.svg';
 const HONEYCOMB_PATTERN = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='60' height='52'%3E%3Cpolygon points='30,2 58,16 58,44 30,58 2,44 2,16' fill='none' stroke='rgba(255,255,255,0.08)' stroke-width='1.5'/%3E%3C/svg%3E\")";
 
 /** Điều hướng quản trị sau xác thực; không cho role lạ rơi vào cổng Ủy ban. */
@@ -40,7 +49,7 @@ function resolveGovernanceDestination(role: string): string | null {
 export default function GovernanceLoginPage(): ReactElement {
   const router = useRouter();
   const [isConnecting, setIsConnecting] = useState(false);
-  const [message, setMessage] = useState('Kết nối ví MetaMask để tiếp tục.');
+  const [message, setMessage] = useState('Kết nối ví MetaMask để tiếp tục !');
   const [walletAddress, setWalletAddress] = useState('');
 
   /** Đảm bảo ví ở Polygon Amoy trước khi ký để luồng quản trị không vô tình chạy ở mạng khác. */
@@ -51,8 +60,19 @@ export default function GovernanceLoginPage(): ReactElement {
     if (chainId === POLYGON_AMOY_CHAIN_ID) return;
     try {
       await provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: POLYGON_AMOY_CHAIN_ID }] });
-    } catch {
-      throw new Error('Vui lòng chuyển MetaMask sang mạng Polygon Amoy rồi thử lại.');
+    } catch (error: unknown) {
+      if (
+        typeof error !== 'object' ||
+        error === null ||
+        !('code' in error) ||
+        (error.code !== CHAIN_NOT_ADDED_ERROR_CODE && error.code !== String(CHAIN_NOT_ADDED_ERROR_CODE))
+      ) {
+        throw error;
+      }
+
+      // MetaMask chỉ cho chuyển sau khi người dùng xác nhận thêm mạng chưa từng được cấu hình.
+      await provider.request({ method: 'wallet_addEthereumChain', params: [POLYGON_AMOY_NETWORK] });
+      await provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: POLYGON_AMOY_CHAIN_ID }] });
     }
   }, []);
 
@@ -146,10 +166,11 @@ export default function GovernanceLoginPage(): ReactElement {
         <h1 className="mt-3 text-3xl font-extrabold tracking-tight text-[#0d1117]">Đăng nhập bằng MetaMask</h1>
         <p className="mt-3 text-sm leading-6 text-[#4b5563]">Chỉ ví admin, Chủ tịch DAO và Ủy viên Điều hành đã được cấp ghế mới có thể đăng nhập. DCP không yêu cầu hoặc lưu private key của bạn.</p>
         <button type="button" onClick={() => void connectAndLogin()} disabled={isConnecting} className="mt-8 flex w-full items-center justify-center gap-3 rounded-xl bg-[#0e7c6b] px-4 py-3.5 font-bold text-white shadow-[0_10px_24px_rgba(14,124,107,0.22)] transition hover:-translate-y-0.5 hover:bg-[#0a5c50] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-[#0e7c6b]/20 disabled:cursor-wait disabled:opacity-60">
+          <img src={METAMASK_FOX_ICON_URL} alt="MetaMask logo" className="h-6 w-6 shrink-0" />
           {isConnecting ? 'Đang xác thực…' : 'Kết nối ví MetaMask'}
         </button>
         <p role="status" className="mt-4 rounded-xl border border-[#d7eee9] bg-[#f2fbf9] px-4 py-3 text-sm leading-6 text-[#0a5c50]">{message}</p>
-        <div className="mt-6 rounded-xl border border-[#e5e7eb] bg-[#f8fafb] p-4 text-xs leading-5 text-[#4b5563]">Yêu cầu ký chỉ xác thực đăng nhập, không chuyển tiền và không tạo giao dịch blockchain.</div>
+        <div className="mt-6 rounded-xl border border-[#e5e7eb] bg-[#f8fafb] p-4 text-xs leading-5 text-[#4b5563]">DCP chỉ yêu cầu bạn xác nhận chữ ký đăng nhập trong MetaMask. Không cần private key, không chuyển tài sản và không phát sinh phí gas.</div>
       </div>
     </section>
     <style jsx global>{`

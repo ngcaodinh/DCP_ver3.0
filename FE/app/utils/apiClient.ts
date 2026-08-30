@@ -143,6 +143,8 @@ export function getApiErrorMessage(error: unknown, fallbackMessage: string): str
   if (typeof error === "object" && error !== null && "message" in error) {
     const message = (error as ApiErrorResponse).message;
     if (typeof message === "string" && message.trim().length > 0) {
+      // Không hiển thị chi tiết host khi browser không kết nối được API; giữ thông báo an toàn và hữu ích cho người dùng.
+      if (/failed to fetch|network error|networkerror|load failed/i.test(message)) return fallbackMessage;
       return message;
     }
   }

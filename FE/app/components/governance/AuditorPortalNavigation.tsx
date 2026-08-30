@@ -54,7 +54,7 @@ export default function AuditorPortalNavigation({ activeTab, onTabChange, onLogo
     setIsMobileMenuOpen(false);
   };
 
-  /** Đóng menu mobile trước khi xoá phiên và điều hướng để thao tác đăng xuất không bị gián đoạn. */
+  /** Đóng menu mobile trước khi mở bước xác nhận đăng xuất để thao tác không bị che khuất. */
   const handleLogoutClick = (): void => {
     setIsMobileMenuOpen(false);
     onLogout();

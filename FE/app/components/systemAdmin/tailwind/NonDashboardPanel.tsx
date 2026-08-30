@@ -15,6 +15,8 @@ import { useState, useCallback, useEffect } from "react";
 import SybilManagementPanel from "./SybilManagementPanel";
 import SystemErrorLogPanel from "./SystemErrorLogPanel";
 import CommitteeSeatsPanel from "./CommitteeSeatsPanel";
+import TransferStatusPanel from "../../adminTransfers/TransferStatusPanel";
+import FeedbackFlaggingPageClient from "../../../admin/feedback/FeedbackFlaggingPageClient";
 
 import { fetchApi, buildApiUrl } from "@/app/utils/apiClient";
 
@@ -1359,12 +1361,6 @@ export default function NonDashboardPanel({
   onOpenDrawer?: (urgentRequestItem: UrgentRequestItem) => void;
 }) {
   switch (activePage) {
-    case "kyc":
-      return <KycPanel />;
-
-    case "bankAccountApproval":
-      return <BankAccountApprovalPanel />;
-
     case "systemErrorLog":
       return <SystemErrorLogPanel onPushToast={onPushToast} />;
 
@@ -1377,8 +1373,14 @@ export default function NonDashboardPanel({
     case "sybilManagement":
       return <SybilManagementPanel onPushToast={onPushToast} />;
 
+    case "transferQueue":
+      return <TransferStatusPanel onPushToast={onPushToast} />;
+
     case "committeeSeats":
       return <CommitteeSeatsPanel />;
+
+    case "feedbackFlagging":
+      return <FeedbackFlaggingPageClient embedded />;
 
     default:
       return null;

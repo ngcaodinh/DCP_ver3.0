@@ -15,4 +15,8 @@ describe("getApiErrorMessage", () => {
     expect(getApiErrorMessage("lỗi dạng chuỗi", "fallback")).toBe("fallback");
     expect(getApiErrorMessage({ message: 123 }, "fallback")).toBe("fallback");
   });
+
+  it("does not expose the failed API host for network errors", () => {
+    expect(getApiErrorMessage(new TypeError("Failed to fetch (localhost:4000)"), "Không thể kết nối máy chủ.")).toBe("Không thể kết nối máy chủ.");
+  });
 });

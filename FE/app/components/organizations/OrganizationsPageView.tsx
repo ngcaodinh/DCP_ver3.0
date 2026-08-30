@@ -15,6 +15,7 @@ import {
 import { ApiErrorResponse, fetchApi, buildApiUrl } from '@/app/utils/apiClient';
 import { clearAuthSession, readAuthSession } from '@/app/utils/authSession';
 import { refreshAuthSession } from '@/app/utils/authSessionRefresh';
+import { useLogoutConfirmation } from '@/app/hooks/useLogoutConfirmation';
 import Topbar from '../regulatoryBodies/tailwind/Topbar';
 import NotificationBell from '@/app/components/notifications/NotificationBell';
 import {
@@ -929,8 +930,8 @@ export default function OrganizationsPageView({ initialPage = 'dashboard' }: Org
     }
   }, [backendBaseUrl, router]);
 
-  /** Hàm gọi API logout, xóa phiên cục bộ và điều hướng về login an toàn. */
-  const handleLogout = useCallback(async () => {
+  /** Gọi API kết thúc phiên Organization sau khi người dùng đã xác nhận đăng xuất. */
+  const handleConfirmedLogout = useCallback(async (): Promise<void> => {
     if (isLogoutProcessing) {
       return;
     }
@@ -959,6 +960,8 @@ export default function OrganizationsPageView({ initialPage = 'dashboard' }: Org
       setIsLogoutProcessing(false);
     }
   }, [backendBaseUrl, isLogoutProcessing, router]);
+
+  const { requestLogout, logoutConfirmationDialog } = useLogoutConfirmation(handleConfirmedLogout);
   /** Hàm mở menu mobile. Mục đích: giữ tương thích API của Topbar trong khi sidebar hiện tại là desktop cố định. */
   const handleOpenMobileMenu = () => {
     setIsMobileMenuOpen(true);
@@ -1115,7 +1118,7 @@ export default function OrganizationsPageView({ initialPage = 'dashboard' }: Org
             <button
               type="button"
               onClick={() => {
-                void handleLogout();
+                requestLogout();
               }}
               disabled={isLogoutProcessing}
               className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-xs font-semibold text-white transition hover:bg-white/15 disabled:cursor-not-allowed disabled:opacity-60"
@@ -1134,7 +1137,7 @@ export default function OrganizationsPageView({ initialPage = 'dashboard' }: Org
             notificationContent={<NotificationBell />}
             onOpenMobileMenu={handleOpenMobileMenu}
             onLogout={() => {
-              void handleLogout();
+              requestLogout();
             }}
           />
 
@@ -1298,6 +1301,7 @@ export default function OrganizationsPageView({ initialPage = 'dashboard' }: Org
           onCreated={handleDisbursementCreated}
         />
       ) : null}
+      {logoutConfirmationDialog}
     </main>
   );
 }

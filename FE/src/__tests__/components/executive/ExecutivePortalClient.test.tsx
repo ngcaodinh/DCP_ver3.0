@@ -15,7 +15,7 @@ function createDeferred<T>(): Deferred<T> {
   const promise = new Promise<T>(resolve => { resolvePromise = resolve; });
   return { promise, resolve: resolvePromise };
 }
-vi.mock('@/app/utils/apiClient', () => ({ buildApiUrl: (path: string) => path, fetchApi: mockFetchApi }));
+vi.mock('@/app/utils/apiClient', () => ({ buildSameOriginApiUrl: (path: string) => path, fetchApi: mockFetchApi, getApiErrorMessage: (error: unknown, fallback: string) => error instanceof Error && error.message ? error.message : fallback }));
 vi.mock('@/app/utils/authSession', () => ({ readAuthSession: () => ({ accessToken: 'token' }) }));
 vi.mock('@/app/utils/committeeGovernanceSigner', () => ({ signCommitteeGovernanceVote: mockSignCommitteeGovernanceVote }));
 

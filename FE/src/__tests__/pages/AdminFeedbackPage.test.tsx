@@ -19,9 +19,9 @@ vi.mock('@/app/utils/apiClient', () => ({ buildApiUrl: mocks.buildApiUrl, fetchA
 
 import FeedbackFlaggingPageClient from '@/app/admin/feedback/FeedbackFlaggingPageClient';
 
-function renderPage() {
+function renderPage({ embedded = false }: { embedded?: boolean } = {}) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(<QueryClientProvider client={client}><FeedbackFlaggingPageClient /></QueryClientProvider>);
+  return render(<QueryClientProvider client={client}><FeedbackFlaggingPageClient embedded={embedded} /></QueryClientProvider>);
 }
 
 function successResponse() {
@@ -111,6 +111,20 @@ describe('AdminFeedbackPageClient', () => {
     await waitFor(() => expect(mocks.replace).toHaveBeenCalledWith(
       '/admin/feedback?page=1&limit=20&deletionState=active',
       { scroll: false }
+    ));
+  });
+
+  it('does not replace the Admin shell URL when embedded feedback changes tab', async () => {
+    renderPage({ embedded: true });
+    await waitFor(() => expect(screen.getByRole('table')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Đã xoá' }));
+
+    expect(mocks.replace).not.toHaveBeenCalled();
+    expect(screen.queryByRole('heading', { name: 'Feedback Flagging Panel' })).not.toBeInTheDocument();
+    await waitFor(() => expect(mocks.fetchApi).toHaveBeenLastCalledWith(
+      expect.stringContaining('deletionState=deleted'),
+      expect.anything()
     ));
   });
 });

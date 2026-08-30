@@ -1,6 +1,6 @@
 import { ethers } from 'ethers';
 import { getLogger } from './logger';
-import { getBlockchainRpcUrl } from './blockchainRpc';
+import { getBlockchainRpcFallbackUrl, getBlockchainRpcUrl } from './blockchainRpc';
 import { sanitizeProviderError } from '../utils/sanitizeProviderError';
 
 const logger = getLogger();
@@ -31,8 +31,9 @@ const auditorStakingEthersAbi = [
   , 'event RewardPoolFunded(address indexed funder, uint256 amount)'
 ] as const;
 
-const AUDITOR_STAKING_RPC_BATCH_MAX_COUNT = 3;
+const AUDITOR_STAKING_RPC_BATCH_MAX_COUNT = 1;
 let readOnlyProvider: ethers.JsonRpcProvider | null = null;
+let readOnlyFallbackProvider: ethers.JsonRpcProvider | null = null;
 let readOnlyContract: ethers.Contract | null = null;
 let writableContract: ethers.Contract | null = null;
 let oracleSigner: ethers.Wallet | null = null;
@@ -51,7 +52,7 @@ export function getReadOnlyAuditorStakingProvider(): ethers.JsonRpcProvider {
   if (!readOnlyProvider) {
     const rpcUrl = getBlockchainRpcUrl();
     if (!rpcUrl) throw new Error('Thiếu BLOCKCHAIN_RPC_URL khi khởi tạo AuditorStaking provider.');
-    // RPC hiện tại từ chối batch lớn hơn 3 request; ethers mặc định có thể gom tới 100 request trong cùng event loop.
+    // Không ghép eth_getLogs với read khác để tránh RPC public trả lỗi nội bộ khi tải cao.
     readOnlyProvider = new ethers.JsonRpcProvider(rpcUrl, undefined, {
       batchMaxCount: AUDITOR_STAKING_RPC_BATCH_MAX_COUNT
     });
@@ -59,7 +60,22 @@ export function getReadOnlyAuditorStakingProvider(): ethers.JsonRpcProvider {
   return readOnlyProvider;
 }
 
-/** Lấy signer oracle từ cấu hình backend và kiểm tra định dạng private key. */
+/** Lấy RPC fallback độc lập khi vận hành cấu hình để projector có đường đọc log dự phòng. */
+export function getReadOnlyAuditorStakingFallbackProvider(): ethers.JsonRpcProvider | null {
+  const fallbackRpcUrl = getBlockchainRpcFallbackUrl();
+  if (!fallbackRpcUrl) return null;
+  if (fallbackRpcUrl === getBlockchainRpcUrl()) {
+    throw new Error('BLOCKCHAIN_RPC_FALLBACK_URL phải khác BLOCKCHAIN_RPC_URL.');
+  }
+  if (!readOnlyFallbackProvider) {
+    readOnlyFallbackProvider = new ethers.JsonRpcProvider(fallbackRpcUrl, undefined, {
+      batchMaxCount: AUDITOR_STAKING_RPC_BATCH_MAX_COUNT
+    });
+  }
+  return readOnlyFallbackProvider;
+}
+
+/** Khởi tạo signer oracle từ cấu hình backend và kiểm tra định dạng private key. */
 function getAuditorStakingOracleSigner(): ethers.Wallet {
   if (oracleSigner) return oracleSigner;
   const privateKey = process.env.AUDITOR_STAKING_ORACLE_PRIVATE_KEY?.trim() ?? '';

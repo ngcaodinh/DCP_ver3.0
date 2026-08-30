@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { buildSameOriginApiUrl, fetchApi, type ApiErrorResponse } from '@/app/utils/apiClient';
 import { clearAuthSession, readAuthSession } from '@/app/utils/authSession';
 import { refreshAuthSession } from '@/app/utils/authSessionRefresh';
+import { useLogoutConfirmation } from '@/app/hooks/useLogoutConfirmation';
 import AuditorFieldReportForm from './AuditorFieldReportForm';
 import AuditorStakeAccountPanel from './AuditorStakeAccountPanel';
 import AuditorEarningsPanel from './AuditorEarningsPanel';
@@ -144,16 +145,18 @@ export default function AuditorPortalClient(): ReactElement {
     setSelectedProject(null);
   };
 
-  /** Xoá toàn bộ dữ liệu phiên Auditor ở client và đưa người dùng về màn hình đăng nhập. */
-  const handleLogout = (): void => {
+  /** Xóa toàn bộ dữ liệu phiên Auditor sau khi người dùng đã xác nhận đăng xuất. */
+  const handleConfirmedLogout = (): void => {
     clearAuthSession();
     setSelectedProject(null);
     replace('/login');
   };
 
+  const { requestLogout, logoutConfirmationDialog } = useLogoutConfirmation(handleConfirmedLogout);
+
   return (
     <>
-      <AuditorPortalNavigation activeTab={activeTab} onTabChange={setActiveTab} onLogout={handleLogout} />
+      <AuditorPortalNavigation activeTab={activeTab} onTabChange={setActiveTab} onLogout={requestLogout} />
       <main className="min-h-screen w-full overflow-x-clip bg-[radial-gradient(circle_at_top_right,_rgba(20,184,166,0.14),_transparent_32%),linear-gradient(180deg,_#f8fffd_0%,_#f8fafc_38%,_#f8fafc_100%)] px-3 py-5 text-slate-900 sm:px-6 sm:py-10">
         <div className="mx-auto min-w-0 max-w-6xl space-y-5 sm:space-y-6">
         <header className="relative min-w-0 overflow-hidden rounded-3xl border border-emerald-900/10 bg-white px-4 py-6 shadow-[0_20px_60px_rgba(14,124,107,0.10)] sm:px-8 sm:py-9">
@@ -245,6 +248,7 @@ export default function AuditorPortalClient(): ReactElement {
         )}
         </div>
       </main>
+      {logoutConfirmationDialog}
     </>
   );
 }

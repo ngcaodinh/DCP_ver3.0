@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import NotificationBell from '@/app/components/notifications/NotificationBell';
+import { useLogoutConfirmation } from '@/app/hooks/useLogoutConfirmation';
 import { clearAuthSession, readAuthSession } from '@/app/utils/authSession';
 import NonDashboardPanel from './tailwind/NonDashboardPanel';
 import Sidebar from './tailwind/Sidebar';
@@ -47,20 +48,22 @@ export default function RegulatoryBodiesPageClientTailwind() {
     window.setTimeout(() => setToasts(previous => previous.filter(item => item.id !== id)), 4_000);
   }, []);
 
-  /** Xoá session local rồi quay lại cổng đăng nhập. */
-  const handleLogout = useCallback((): void => {
+  /** Xóa session Regulatory sau khi người dùng đã xác nhận và quay lại cổng đăng nhập. */
+  const handleConfirmedLogout = useCallback((): void => {
     clearAuthSession();
     router.replace('/login');
   }, [router]);
+
+  const { requestLogout, logoutConfirmationDialog } = useLogoutConfirmation(handleConfirmedLogout);
 
   if (isLoading) return <div className="flex min-h-screen items-center justify-center bg-slate-50 text-sm text-slate-500">Đang xác thực quyền truy cập…</div>;
   if (!isAuthorised) return null;
 
   return (
     <main className="min-h-screen bg-slate-50 text-slate-900 lg:flex">
-      <div className="hidden lg:block"><Sidebar selectedPageKey={activePage} navigationItemList={navigationItemList.filter(item => item.key !== 'disbursement')} onSelectPage={setActivePage} onLogout={handleLogout} /></div>
+      <div className="hidden lg:block"><Sidebar selectedPageKey={activePage} navigationItemList={navigationItemList.filter(item => item.key !== 'disbursement')} onSelectPage={setActivePage} onLogout={requestLogout} /></div>
       <section className="flex-1 p-0">
-        <Topbar breadcrumbTitle={getPageTitle(activePage)} userDisplayName={userDisplayName} userEmail={userEmail} userWalletAddress={userWalletAddress} notificationContent={<NotificationBell />} onOpenMobileMenu={() => undefined} onLogout={handleLogout} />
+        <Topbar breadcrumbTitle={getPageTitle(activePage)} userDisplayName={userDisplayName} userEmail={userEmail} userWalletAddress={userWalletAddress} notificationContent={<NotificationBell />} onOpenMobileMenu={() => undefined} onLogout={requestLogout} />
         <div className="space-y-5 p-4 lg:p-7">
           <header><h1 className="text-2xl font-bold">{getPageTitle(activePage)}</h1><p className="mt-1 text-xs text-slate-500">Giám sát tuân thủ và vận hành</p></header>
           {activePage === 'dashboard' ? (
@@ -72,6 +75,7 @@ export default function RegulatoryBodiesPageClientTailwind() {
         </div>
       </section>
       <ToastStack toastItemList={toasts} onCloseToast={(id) => setToasts(previous => previous.filter(item => item.id !== id))} />
+      {logoutConfirmationDialog}
     </main>
   );
 }

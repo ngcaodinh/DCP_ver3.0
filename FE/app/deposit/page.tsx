@@ -7,6 +7,7 @@ import { readAuthSession } from '../utils/authSession';
 import { useAuthCheck } from '../utils/useAuthCheck';
 import LoginModal from '../components/LoginModal';
 import { clearAuthSession } from '../utils/authSession';
+import { useLogoutConfirmation } from '../hooks/useLogoutConfirmation';
 
 type QuickChip = { id: number; value: number; label: string };
 
@@ -742,14 +743,15 @@ function DepositHomePageContent() {
   }, [handleCloseMobileMenu]);
 
   /**
-   * Hàm xử lý đăng xuất.
-   * Mục đích: xóa session, reset auth state, và chuyển hướng về trang chủ.
+   * Kết thúc phiên nạp tiền sau khi người dùng đã xác nhận và quay về trang chủ.
    */
-  const handleLogout = () => {
+  const handleConfirmedLogout = (): void => {
     clearAuthSession();
     syncSessionFromStorage();
     router.push('/');
   };
+
+  const { requestLogout, logoutConfirmationDialog } = useLogoutConfirmation(handleConfirmedLogout);
 
   /**
    * Hàm xử lý click chip nhanh.
@@ -960,7 +962,7 @@ function DepositHomePageContent() {
             <div className="border-t border-white/10 px-3 pb-5 pt-3 text-sm">
               <button
                 type="button"
-                onClick={handleLogout}
+                onClick={requestLogout}
                 className="flex w-full items-center justify-center rounded-xl bg-red-500/15 px-4 py-2.5 text-sm font-semibold text-red-400 ring-1 ring-red-400/40 transition hover:bg-red-500/25 hover:text-red-300"
               >
                 Đăng xuất
@@ -1048,7 +1050,7 @@ function DepositHomePageContent() {
                 <div className="mt-auto border-t border-white/10 px-5 pb-5 pt-4 text-sm">
                   <button
                     type="button"
-                    onClick={handleLogout}
+                    onClick={requestLogout}
                     className="flex w-full items-center justify-center rounded-xl bg-red-500/15 px-4 py-2.5 text-sm font-semibold text-red-400 ring-1 ring-red-400/40 transition hover:bg-red-500/25 hover:text-red-300"
                   >
                     Đăng xuất
@@ -1349,6 +1351,7 @@ function DepositHomePageContent() {
           </button>
         </nav>
       </main>
+      {logoutConfirmationDialog}
     </>
   );
 }

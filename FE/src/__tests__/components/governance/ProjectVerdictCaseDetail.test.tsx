@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({ fetchApi: vi.fn(), signCommitteeGovernanceVote: vi.fn() }));
 
-vi.mock('@/app/utils/apiClient', () => ({ buildApiUrl: (path: string) => path, fetchApi: mocks.fetchApi }));
+vi.mock('@/app/utils/apiClient', () => ({ buildSameOriginApiUrl: (path: string) => path, fetchApi: mocks.fetchApi, getApiErrorMessage: (_error: unknown, fallback: string) => fallback }));
 vi.mock('@/app/utils/authSession', () => ({ readAuthSession: () => ({ accessToken: 'governance-token' }) }));
 vi.mock('@/app/components/oracle/GeofenceMapLazy', () => ({ GeofenceMapLazy: () => <div data-testid="gps-map">GPS map</div> }));
 vi.mock('@/app/components/governance/ChallengeEvidenceGallery', () => ({ ChallengeEvidenceGallery: () => <div>Challenge evidence gallery</div> }));

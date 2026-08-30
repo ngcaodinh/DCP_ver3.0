@@ -23,7 +23,7 @@ export type PageKey =
 export type NavigationItem = {
   key: PageKey;
   label: string;
-  iconPath: string;         // SVG path string cho icon
+  iconPath: string; // SVG path string cho icon
   badge?: number;          // Số thông báo chờ xử lý
 };
 

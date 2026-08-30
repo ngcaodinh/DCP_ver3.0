@@ -139,7 +139,7 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="vi">
-      <body className={`${beVietnamProFont.variable} ${lexendFont.variable} overflow-x-hidden`}>
+      <body className={`${beVietnamProFont.variable} ${lexendFont.variable} overflow-x-clip`}>
         <Script
           id="website-structured-data"
           type="application/ld+json"

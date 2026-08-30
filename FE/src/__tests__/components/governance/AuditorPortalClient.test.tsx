@@ -246,6 +246,8 @@ describe('AuditorPortalClient', () => {
     render(<AuditorPortalClient />);
 
     fireEvent.click(await screen.findByRole('button', { name: 'Đăng xuất' }));
+    const confirmationDialog = screen.getByRole('dialog', { name: 'Xác nhận đăng xuất' });
+    fireEvent.click(within(confirmationDialog).getByRole('button', { name: 'Đăng xuất' }));
 
     expect(mockClearAuthSession).toHaveBeenCalledOnce();
     expect(mockRouterReplace).toHaveBeenCalledWith('/login');
@@ -257,6 +259,8 @@ describe('AuditorPortalClient', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Mở menu' }));
     const mobileMenu = screen.getByRole('dialog', { name: 'Menu nghiệp vụ Auditor' });
     fireEvent.click(within(mobileMenu).getByRole('button', { name: 'Đăng xuất' }));
+    const confirmationDialog = screen.getByRole('dialog', { name: 'Xác nhận đăng xuất' });
+    fireEvent.click(within(confirmationDialog).getByRole('button', { name: 'Đăng xuất' }));
 
     expect(mockClearAuthSession).toHaveBeenCalledOnce();
     expect(mockRouterReplace).toHaveBeenCalledWith('/login');

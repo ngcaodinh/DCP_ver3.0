@@ -13,6 +13,7 @@
  * Cron: 5 phút (300000ms) bằng recursive setTimeout để đảm bảo mỗi lần chạy hoàn tất trước khi tính delay.
  */
 import { ethers } from 'ethers';
+import { getBlockchainRpcFallbackUrl } from '../config/blockchainRpc';
 import { getLogger } from '../config/logger';
 import { runWithWorkerContext } from '../config/requestContext';
 import { getRedisClientIfReady } from '../config/redis';
@@ -31,6 +32,7 @@ import {
 } from '../models/depositModel';
 import { upsertDonationByTransactionHash } from '../models/donationModel';
 import type { UnifiedTransaction } from '../models/unifiedTransactionModel';
+import { sanitizeProviderError } from '../utils/sanitizeProviderError';
 
 const logger = getLogger();
 
@@ -43,12 +45,24 @@ const LOCK_TTL_MS = 4 * 60 * 1000;
 const MAPPER_LOCK_KEY = 'data_mapper:lock';
 const LAST_SYNCED_BLOCK_KEY = 'data_mapper:last_synced_block';
 
-/**
- * Số blocks tối đa cho mỗi lần gọi eth_getLogs.
- * Ghi chú: Alchemy/Infura thường giới hạn ~10k blocks, nên chunk 5000 để an toàn
- * và dễ dàng retry khi gặp timeout.
- */
-const MAX_BLOCKS_PER_GETLOGS_REQUEST = 5000;
+/** Đọc số nguyên môi trường trong giới hạn an toàn cho tải RPC DataMapper. */
+function readBoundedInteger(variableName: string, defaultValue: number, minimum: number, maximum: number): number {
+  const configuredValue = Number.parseInt(process.env[variableName] ?? String(defaultValue), 10);
+  if (!Number.isInteger(configuredValue) || configuredValue < minimum || configuredValue > maximum) {
+    throw new Error(`${variableName} phải là số nguyên trong khoảng ${minimum}-${maximum}.`);
+  }
+  return configuredValue;
+}
+
+/** Public RPC thường giới hạn thấp hơn provider có API key, nên chunk mặc định là 250 block. */
+const MAX_BLOCKS_PER_GETLOGS_REQUEST = readBoundedInteger(
+  'DATA_MAPPER_MAX_BLOCKS_PER_GETLOGS_REQUEST',
+  250,
+  1,
+  5_000
+);
+const DATA_MAPPER_RPC_BATCH_MAX_COUNT = 1;
+const DATA_MAPPER_LOGS_RETRY_DELAYS_MS = [250, 1_000] as const;
 
 /**
  * Số request đồng thời tối đa khi upsert donation/unified records.
@@ -91,9 +105,11 @@ const DONATION_RECEIVED_ABI = [
 ] as const;
 
 let rpcProvider: ethers.JsonRpcProvider | null = null;
+let fallbackRpcProvider: ethers.JsonRpcProvider | null = null;
 
 export function resetModuleState(): void {
   rpcProvider = null;
+  fallbackRpcProvider = null;
 }
 
 /**
@@ -142,9 +158,100 @@ function getRpcProvider(): ethers.JsonRpcProvider | null {
   if (!rpcUrl) return null;
 
   if (!rpcProvider) {
-    rpcProvider = new ethers.JsonRpcProvider(rpcUrl);
+    // Không ghép eth_getLogs với RPC read khác để tránh public RPC trả lỗi nội bộ khi tải cao.
+    rpcProvider = new ethers.JsonRpcProvider(rpcUrl, undefined, {
+      batchMaxCount: DATA_MAPPER_RPC_BATCH_MAX_COUNT
+    });
   }
   return rpcProvider;
+}
+
+/** Lấy provider dự phòng cho DataMapper, bỏ qua khi deployment không cấu hình endpoint thứ hai. */
+function getFallbackRpcProvider(): ethers.JsonRpcProvider | null {
+  const fallbackRpcUrl = getBlockchainRpcFallbackUrl();
+  if (!fallbackRpcUrl) return null;
+
+  const primaryRpcUrl = String(process.env.BLOCKCHAIN_RPC_URL || '').trim();
+  if (fallbackRpcUrl === primaryRpcUrl) {
+    throw new Error('BLOCKCHAIN_RPC_FALLBACK_URL phải khác BLOCKCHAIN_RPC_URL.');
+  }
+  if (!fallbackRpcProvider) {
+    fallbackRpcProvider = new ethers.JsonRpcProvider(fallbackRpcUrl, undefined, {
+      batchMaxCount: DATA_MAPPER_RPC_BATCH_MAX_COUNT
+    });
+  }
+  return fallbackRpcProvider;
+}
+
+/** Kiểm tra object lỗi RPC để nhận diện code và payload lồng nhau do ethers tạo ra. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** Tìm marker lỗi nội bộ tạm thời trong payload HTTP/RPC lồng nhau. */
+function containsTemporaryInternalError(value: unknown, depth = 0): boolean {
+  if (depth > 3) return false;
+  if (typeof value === 'string') return value.toLowerCase().includes('temporary internal error');
+  if (!isRecord(value)) return false;
+  return Object.values(value).some(nestedValue => containsTemporaryInternalError(nestedValue, depth + 1));
+}
+
+/** Chỉ retry khi RPC xác nhận lỗi tạm thời, không che giấu lỗi filter hay cấu hình không hợp lệ. */
+function isTemporaryGetLogsError(error: unknown): boolean {
+  if (!isRecord(error) || !containsTemporaryInternalError(error)) return false;
+  const providerError = isRecord(error.error) ? error.error : null;
+  if (providerError?.code === 19 || providerError?.code === '19') return true;
+  return typeof error.message === 'string' && error.message.toLowerCase().includes('server response 500');
+}
+
+/** Chờ backoff ngắn trước khi gửi lại eth_getLogs tới cùng provider. */
+function waitForGetLogsRetry(delayMs: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, delayMs));
+}
+
+/** Đọc log donation từ một provider với retry hữu hạn dành riêng cho lỗi RPC tạm thời. */
+async function getDonationLogsFromProvider(
+  provider: ethers.JsonRpcProvider,
+  filter: ethers.Filter
+): Promise<ethers.Log[]> {
+  for (let retryAttempt = 0; ; retryAttempt += 1) {
+    try {
+      return await provider.getLogs(filter);
+    } catch (error) {
+      const retryDelayMs = DATA_MAPPER_LOGS_RETRY_DELAYS_MS[retryAttempt];
+      if (!isTemporaryGetLogsError(error) || retryDelayMs === undefined) throw error;
+      logger.warn('[DataMapper] RPC eth_getLogs lỗi tạm thời; sẽ retry cùng checkpoint.', {
+        retryAttempt: retryAttempt + 1,
+        retryDelayMs,
+        errorMessage: sanitizeProviderError(error) ?? 'UNKNOWN_ERROR'
+      });
+      await waitForGetLogsRetry(retryDelayMs);
+    }
+  }
+}
+
+/** Đọc log từ fallback sau khi xác thực cả hai RPC đang truy cập cùng một blockchain. */
+async function getDonationLogs(
+  provider: ethers.JsonRpcProvider,
+  fallbackProvider: ethers.JsonRpcProvider | null,
+  filter: ethers.Filter
+): Promise<ethers.Log[]> {
+  try {
+    return await getDonationLogsFromProvider(provider, filter);
+  } catch (error) {
+    if (!isTemporaryGetLogsError(error) || !fallbackProvider) throw error;
+    const [primaryNetwork, fallbackNetwork] = await Promise.all([
+      provider.getNetwork(),
+      fallbackProvider.getNetwork()
+    ]);
+    if (primaryNetwork.chainId !== fallbackNetwork.chainId) {
+      throw new Error('BLOCKCHAIN_RPC_FALLBACK_URL đang trỏ tới blockchain khác BLOCKCHAIN_RPC_URL.');
+    }
+    logger.warn('[DataMapper] Primary eth_getLogs đã hết retry; chuyển sang fallback.', {
+      errorMessage: sanitizeProviderError(error) ?? 'UNKNOWN_ERROR'
+    });
+    return getDonationLogsFromProvider(fallbackProvider, filter);
+  }
 }
 
 export async function acquireDistributedLock(): Promise<boolean> {
@@ -462,6 +569,7 @@ async function syncBlockchainDonationEvents(): Promise<BlockchainSyncResult> {
   }
 
   const provider = getRpcProvider();
+  const fallbackProvider = getFallbackRpcProvider();
   if (!provider) {
     logger.warn('[DataMapper] Không thể khởi tạo RPC provider, bỏ qua blockchain sync.');
     return { syncedCount: 0, changedCount: 0, latestBlock: 0, affectedProjectIds: [] };
@@ -502,18 +610,17 @@ async function syncBlockchainDonationEvents(): Promise<BlockchainSyncResult> {
     const affectedProjectIds = new Set<string>();
     const semaphore = new Semaphore(DB_WRITE_CONCURRENCY);
 
-    // Ghi chú logic phức tạp: Alchemy/Infura thường giới hạn phạm vi ~10k blocks/lần.
-    // Chia thành chunks 5000 blocks và commit checkpoint theo từng chunk đã hoàn tất.
+    // Chia thành chunk nhỏ và commit checkpoint theo từng chunk đã hoàn tất để public RPC không quá tải.
     for (let chunkStart = fromBlock; chunkStart <= currentHeadBlock; chunkStart += MAX_BLOCKS_PER_GETLOGS_REQUEST) {
       const chunkEnd = Math.min(chunkStart + MAX_BLOCKS_PER_GETLOGS_REQUEST - 1, currentHeadBlock);
       let chunkLogs: ethers.Log[];
       try {
-        chunkLogs = await provider.getLogs({
+        chunkLogs = await getDonationLogs(provider, fallbackProvider, {
           address: contractAddress,
           fromBlock: chunkStart,
           toBlock: chunkEnd,
           topics: [eventTopic]
-        }) as ethers.Log[];
+        });
       } catch (err) {
         logger.error('[DataMapper] Lỗi khi getLogs chunk, giữ checkpoint trước vùng lỗi để retry.', {
           fromBlock: chunkStart,

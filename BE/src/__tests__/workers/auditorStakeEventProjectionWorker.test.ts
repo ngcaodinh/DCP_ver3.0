@@ -9,6 +9,9 @@ const mocks = vi.hoisted(() => ({
   findPayoutByHash: vi.fn(),
   findStakeGuard: vi.fn(),
   findUserByWallet: vi.fn(),
+  fallbackGetLogs: vi.fn(),
+  fallbackGetNetwork: vi.fn(),
+  getFallbackProvider: vi.fn(),
   getLogs: vi.fn(),
   linkPayout: vi.fn(),
   loggerError: vi.fn(),
@@ -23,6 +26,30 @@ const CONTRACT_ADDRESS = '0x00000000000000000000000000000000000000a1';
 const STAKER_TOPIC = `0x${'0'.repeat(24)}00000000000000000000000000000000000000b2`;
 const WITHDRAWAL_HASH = `0x${'c'.repeat(64)}`;
 
+/** Tạo lỗi ethers bọc RPC code 19 giống phản hồi tạm thời của eth_getLogs trên production. */
+function createTemporaryGetLogsError(): Error & { error: { code: number; message: string } } {
+  return Object.assign(
+    new Error('could not coalesce error'),
+    { error: { code: 19, message: 'Temporary internal error. Please retry.' } }
+  );
+}
+
+/** Tạo HTTP 500 có responseBody tạm thời giống shape ethers phát sinh từ RPC production. */
+function createTemporaryServerResponseError(): Error & { info: { responseBody: string } } {
+  return Object.assign(
+    new Error('server response 500 Internal Server Error'),
+    { info: { responseBody: '{"error":{"message":"Temporary internal error. Please retry"}}' } }
+  );
+}
+
+/** Tạo fallback provider cùng hoặc khác chain để kiểm tra worker không đọc nhầm blockchain. */
+function createFallbackProvider(chainId = 31_337n) {
+  return {
+    getNetwork: mocks.fallbackGetNetwork.mockResolvedValue({ chainId }),
+    getLogs: mocks.fallbackGetLogs
+  };
+}
+
 vi.mock('../../config/auditorStakingContract', () => ({
   getAuditorStakingContractAddressLowercase: () => CONTRACT_ADDRESS,
   getReadOnlyAuditorStakingContract: () => ({
@@ -36,6 +63,7 @@ vi.mock('../../config/auditorStakingContract', () => ({
     getBlockNumber: vi.fn().mockResolvedValue(2),
     getLogs: mocks.getLogs
   }),
+  getReadOnlyAuditorStakingFallbackProvider: mocks.getFallbackProvider,
   logAuditorStakingSignerAddressOnce: vi.fn()
 }));
 vi.mock('../../config/logger', () => ({ getLogger: () => ({ error: mocks.loggerError, warn: mocks.loggerWarn }) }));
@@ -92,6 +120,7 @@ describe('auditor stake event projection', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.getLogs.mockResolvedValue([createWithdrawalLog()]);
+    mocks.getFallbackProvider.mockReturnValue(null);
     mocks.findCheckpoint.mockResolvedValue({
       chainId: '31337', contractAddress: CONTRACT_ADDRESS, lastProcessedBlock: 1, lastProcessedLogIndex: -1
     });
@@ -105,6 +134,7 @@ describe('auditor stake event projection', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     __resetAuditorStakeEventProjectionWorkerState();
   });
 
@@ -147,5 +177,137 @@ describe('auditor stake event projection', () => {
       2,
       Number.MAX_SAFE_INTEGER
     );
+  });
+
+  it('retries eth_getLogs after a temporary provider error and projects the recovered response', async () => {
+    vi.useFakeTimers();
+    mocks.getLogs
+      .mockRejectedValueOnce(createTemporaryGetLogsError())
+      .mockResolvedValueOnce([createWithdrawalLog()]);
+    mocks.findUserByWallet.mockResolvedValue({ id: 'auditor-1', role: 'auditor' });
+
+    const reconciliation = __auditorStakeEventProjectionWorkerTestHooks.reconcileAuditorStakeEventsInternal();
+    await vi.runAllTimersAsync();
+    await reconciliation;
+
+    expect(mocks.getLogs).toHaveBeenCalledTimes(2);
+    expect(mocks.loggerWarn).toHaveBeenCalledWith(
+      expect.stringContaining('eth_getLogs'),
+      expect.objectContaining({ retryAttempt: 1, retryDelayMs: 250 })
+    );
+    expect(mocks.saveCheckpoint).toHaveBeenCalledWith(
+      expect.objectContaining({ contractAddress: CONTRACT_ADDRESS }),
+      2,
+      Number.MAX_SAFE_INTEGER
+    );
+  });
+
+  it('retries when ethers wraps a temporary RPC response in an HTTP 500 error', async () => {
+    vi.useFakeTimers();
+    mocks.getLogs
+      .mockRejectedValueOnce(createTemporaryServerResponseError())
+      .mockResolvedValueOnce([createWithdrawalLog()]);
+    mocks.findUserByWallet.mockResolvedValue({ id: 'auditor-1', role: 'auditor' });
+
+    const reconciliation = __auditorStakeEventProjectionWorkerTestHooks.reconcileAuditorStakeEventsInternal();
+    await vi.runAllTimersAsync();
+    await reconciliation;
+
+    expect(mocks.getLogs).toHaveBeenCalledTimes(2);
+    expect(mocks.saveCheckpoint).toHaveBeenCalledWith(
+      expect.objectContaining({ contractAddress: CONTRACT_ADDRESS }),
+      2,
+      Number.MAX_SAFE_INTEGER
+    );
+  });
+
+  it('uses the same-chain fallback RPC after primary eth_getLogs retries are exhausted', async () => {
+    vi.useFakeTimers();
+    mocks.getLogs.mockRejectedValue(createTemporaryGetLogsError());
+    mocks.fallbackGetLogs.mockResolvedValue([createWithdrawalLog()]);
+    mocks.getFallbackProvider.mockReturnValue(createFallbackProvider());
+    mocks.findUserByWallet.mockResolvedValue({ id: 'auditor-1', role: 'auditor' });
+
+    const reconciliation = __auditorStakeEventProjectionWorkerTestHooks.reconcileAuditorStakeEventsInternal();
+    await vi.runAllTimersAsync();
+    await reconciliation;
+
+    expect(mocks.getLogs).toHaveBeenCalledTimes(3);
+    expect(mocks.fallbackGetNetwork).toHaveBeenCalledOnce();
+    expect(mocks.fallbackGetLogs).toHaveBeenCalledOnce();
+    expect(mocks.loggerWarn).toHaveBeenCalledWith(
+      expect.stringContaining('fallback'),
+      expect.any(Object)
+    );
+    expect(mocks.saveCheckpoint).toHaveBeenCalledWith(
+      expect.objectContaining({ contractAddress: CONTRACT_ADDRESS }),
+      2,
+      Number.MAX_SAFE_INTEGER
+    );
+  });
+
+  it('uses fallback directly during the cooldown after it recovers a temporary primary failure', async () => {
+    vi.useFakeTimers();
+    mocks.getLogs.mockRejectedValue(createTemporaryGetLogsError());
+    mocks.fallbackGetLogs.mockResolvedValue([createWithdrawalLog()]);
+    mocks.getFallbackProvider.mockReturnValue(createFallbackProvider());
+    mocks.findUserByWallet.mockResolvedValue({ id: 'auditor-1', role: 'auditor' });
+
+    const firstReconciliation = __auditorStakeEventProjectionWorkerTestHooks.reconcileAuditorStakeEventsInternal();
+    await vi.runAllTimersAsync();
+    await firstReconciliation;
+
+    await __auditorStakeEventProjectionWorkerTestHooks.reconcileAuditorStakeEventsInternal();
+
+    expect(mocks.getLogs).toHaveBeenCalledTimes(3);
+    expect(mocks.fallbackGetLogs).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops after bounded retries for a temporary eth_getLogs error without advancing the checkpoint', async () => {
+    vi.useFakeTimers();
+    mocks.getLogs.mockRejectedValue(createTemporaryGetLogsError());
+
+    const reconciliation = __auditorStakeEventProjectionWorkerTestHooks.reconcileAuditorStakeEventsInternal();
+    await vi.runAllTimersAsync();
+    await reconciliation;
+
+    expect(mocks.getLogs).toHaveBeenCalledTimes(3);
+    expect(mocks.saveCheckpoint).not.toHaveBeenCalled();
+    expect(mocks.loggerWarn).toHaveBeenLastCalledWith(
+      expect.stringContaining('projector'),
+      expect.any(Object)
+    );
+  });
+
+  it('rejects a fallback RPC on another chain without querying its logs', async () => {
+    vi.useFakeTimers();
+    mocks.getLogs.mockRejectedValue(createTemporaryGetLogsError());
+    mocks.getFallbackProvider.mockReturnValue(createFallbackProvider(80_002n));
+
+    const reconciliation = __auditorStakeEventProjectionWorkerTestHooks.reconcileAuditorStakeEventsInternal();
+    await vi.runAllTimersAsync();
+    await reconciliation;
+
+    expect(mocks.fallbackGetNetwork).toHaveBeenCalledOnce();
+    expect(mocks.fallbackGetLogs).not.toHaveBeenCalled();
+    expect(mocks.saveCheckpoint).not.toHaveBeenCalled();
+  });
+
+  it('does not retry a non-temporary eth_getLogs error', async () => {
+    mocks.getLogs.mockRejectedValue(new Error('Invalid filter parameters'));
+
+    await __auditorStakeEventProjectionWorkerTestHooks.reconcileAuditorStakeEventsInternal();
+
+    expect(mocks.getLogs).toHaveBeenCalledOnce();
+    expect(mocks.saveCheckpoint).not.toHaveBeenCalled();
+  });
+
+  it('does not retry a generic HTTP 500 error without the temporary RPC marker', async () => {
+    mocks.getLogs.mockRejectedValue(new Error('server response 500 Internal Server Error'));
+
+    await __auditorStakeEventProjectionWorkerTestHooks.reconcileAuditorStakeEventsInternal();
+
+    expect(mocks.getLogs).toHaveBeenCalledOnce();
+    expect(mocks.saveCheckpoint).not.toHaveBeenCalled();
   });
 });

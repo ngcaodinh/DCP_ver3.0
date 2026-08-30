@@ -1,83 +1,84 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const {
-  mockCreateDraft,
-  mockExecuteProposal,
-  mockFetchApi,
-  mockSignDraft,
-  mockSubmitProposal
-} = vi.hoisted(() => ({
-  mockCreateDraft: vi.fn(),
-  mockExecuteProposal: vi.fn(),
-  mockFetchApi: vi.fn(),
-  mockSignDraft: vi.fn(),
-  mockSubmitProposal: vi.fn()
-}));
+const { mockFetchApi } = vi.hoisted(() => ({ mockFetchApi: vi.fn() }));
 
 vi.mock('@/app/utils/apiClient', () => ({
   buildApiUrl: (path: string) => path,
   fetchApi: mockFetchApi,
-  getApiErrorMessage: (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback
+  getApiErrorMessage: (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback,
 }));
 
 vi.mock('@/app/utils/authSession', () => ({
-  readAuthSession: () => ({ accessToken: 'admin-token' })
-}));
-
-vi.mock('@/app/utils/committeeSeatChange', () => ({
-  createCommitteeSeatChangeDraft: mockCreateDraft,
-  executeCommitteeSeatChangeProposal: mockExecuteProposal,
-  parseCommitteeSeatChangeDraft: (value: string) => JSON.parse(value),
-  signCommitteeSeatChangeDraft: mockSignDraft,
-  submitCommitteeSeatChangeProposal: mockSubmitProposal
+  readAuthSession: () => ({ accessToken: 'admin-token' }),
 }));
 
 import CommitteeSeatsPanel from '@/app/components/systemAdmin/tailwind/CommitteeSeatsPanel';
 
-const oldSeat = '0x1111111111111111111111111111111111111111';
-const newSeat = '0x2222222222222222222222222222222222222222';
-const draft = {
-  oldSeat,
-  newSeat,
-  role: 1,
-  committeeEpoch: '3',
-  deadline: '4000000000',
-  chainId: '80002',
-  signatures: []
-};
+const chairWalletAddress = '0x1111111111111111111111111111111111111111';
 
-describe('CommitteeSeatsPanel seat-change workflow', () => {
+describe('CommitteeSeatsPanel quyền Admin', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('chỉ hiển thị trạng thái và danh sách khi roster đã bootstrap', async () => {
     mockFetchApi.mockImplementation((url: string) => Promise.resolve({
       data: url.includes('/bootstrap/state')
         ? { transactionHash: '0xbootstrapped' }
-        : [{ userId: 'chair-1', displayName: 'Chair', role: 'executive_chair', walletAddress: oldSeat, accountStatus: 'ACTIVE', lastLoginAt: '2026-08-28T00:00:00.000Z' }]
+        : [{ userId: 'chair-1', displayName: 'Chair', role: 'executive_chair', walletAddress: chairWalletAddress, accountStatus: 'ACTIVE', lastLoginAt: '2026-08-28T00:00:00.000Z' }],
     }));
-    mockCreateDraft.mockResolvedValue(draft);
-    mockSignDraft.mockResolvedValue({ signer: oldSeat, nonce: '4', deadline: draft.deadline, signature: '0xsigned' });
-    mockSubmitProposal.mockResolvedValue('0xproposal');
-    mockExecuteProposal.mockResolvedValue('0xexecuted');
-  });
 
-  it('creates, collects, relays and executes a shareable EIP-712 seat-change draft after bootstrap', async () => {
     render(<CommitteeSeatsPanel />);
 
-    await screen.findByRole('heading', { name: 'Thay ghế on-chain (3/5 chữ ký + timelock)' });
-    fireEvent.change(screen.getByLabelText('Ghế cần thay'), { target: { value: oldSeat } });
-    fireEvent.change(screen.getByPlaceholderText('Địa chỉ ví ghế mới 0x...'), { target: { value: newSeat } });
-    fireEvent.click(screen.getByRole('button', { name: 'Tạo draft thay ghế' }));
+    expect(await screen.findByRole('heading', { name: 'Danh sách ghế đã khóa trên chuỗi' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Thu ghế' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Tạo draft thay ghế/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Nạp 5 ghế lên blockchain/i })).not.toBeInTheDocument();
+  });
 
-    await waitFor(() => expect(mockCreateDraft).toHaveBeenCalledWith(expect.objectContaining({ oldSeat, newSeat, role: 1 })));
-    fireEvent.click(screen.getByRole('button', { name: 'Ký draft hiện tại' }));
-    await waitFor(() => expect(mockSignDraft).toHaveBeenCalledWith(expect.objectContaining({ draft })));
-    expect((screen.getByLabelText('JSON draft thay ghế') as HTMLTextAreaElement).value).toContain('0xsigned');
+  it('yêu cầu xác nhận địa chỉ đầy đủ trước khi Admin cấp ghế trong giai đoạn bootstrap', async () => {
+    mockFetchApi.mockImplementation((url: string) => Promise.resolve({ data: url.includes('/bootstrap/state') ? null : [] }));
+    render(<CommitteeSeatsPanel />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Gửi proposal (đủ 3 chữ ký)' }));
-    await waitFor(() => expect(mockSubmitProposal).toHaveBeenCalledOnce());
-    fireEvent.change(screen.getByPlaceholderText('Proposal ID sau timelock'), { target: { value: '12' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Thực thi proposal' }));
-    await waitFor(() => expect(mockExecuteProposal).toHaveBeenCalledWith(expect.objectContaining({ chainId: '80002', proposalId: '12' })));
+    await screen.findByRole('heading', { name: 'Cấp ghế mới' });
+    fireEvent.change(screen.getByLabelText('Tên hiển thị'), { target: { value: 'Ủy viên A' } });
+    fireEvent.change(screen.getByLabelText('Địa chỉ ví đầy đủ'), { target: { value: chairWalletAddress } });
+    fireEvent.click(screen.getByRole('button', { name: 'Xem lại địa chỉ đầy đủ' }));
+
+    expect(await screen.findByText(chairWalletAddress)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Đúng, cấp ghế' })).toBeEnabled();
+  });
+
+  it('vẫn hiển thị form cấp ghế khi chưa đọc được proof bootstrap từ server', async () => {
+    mockFetchApi.mockImplementation((url: string) => {
+      if (url.includes('/bootstrap/state')) return Promise.reject(new Error('Không kết nối được server'));
+      return Promise.resolve({ data: [] });
+    });
+    render(<CommitteeSeatsPanel />);
+
+    expect(await screen.findByRole('heading', { name: 'Cấp ghế mới' })).toBeInTheDocument();
+    expect(screen.getByText(/Không thể xác minh proof bootstrap từ server/i)).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Danh sách ghế đã khóa trên chuỗi' })).not.toBeInTheDocument();
+  });
+
+  it('gửi dữ liệu đã review đến API tạo ghế và tải lại danh sách', async () => {
+    mockFetchApi.mockImplementation((url: string) => {
+      if (url.includes('/bootstrap/state')) return Promise.resolve({ data: null });
+      if (url === '/api/governance/seats') return Promise.resolve({ data: [] });
+      return Promise.resolve({ data: null });
+    });
+    render(<CommitteeSeatsPanel />);
+
+    await screen.findByRole('heading', { name: 'Cấp ghế mới' });
+    fireEvent.change(screen.getByLabelText('Tên hiển thị'), { target: { value: 'Ủy viên A' } });
+    fireEvent.change(screen.getByLabelText('Địa chỉ ví đầy đủ'), { target: { value: chairWalletAddress } });
+    fireEvent.click(screen.getByRole('button', { name: 'Xem lại địa chỉ đầy đủ' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Đúng, cấp ghế' }));
+
+    await waitFor(() => expect(mockFetchApi).toHaveBeenCalledWith('/api/governance/seats', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ walletAddress: chairWalletAddress, displayName: 'Ủy viên A', role: 'executive_member' }),
+    })));
   });
 });

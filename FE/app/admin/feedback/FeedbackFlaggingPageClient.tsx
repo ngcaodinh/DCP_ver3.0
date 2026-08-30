@@ -25,12 +25,17 @@ interface ActionState {
   mode: FeedbackActionMode;
 }
 
+interface FeedbackFlaggingPageClientProps {
+  /** True khi panel được hiển thị bên trong shell quản trị. */
+  embedded?: boolean;
+}
+
 /** Trang admin điều phối auth, URL state, server query và action lifecycle của feedback panel. */
-export default function FeedbackFlaggingPageClient(): ReactElement | null {
+export default function FeedbackFlaggingPageClient({ embedded = false }: FeedbackFlaggingPageClientProps): ReactElement | null {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const initialDeletionState = useMemo(() => readDeletionStateFromUrl(searchParams), [searchParams]);
-  const initialPage = useMemo(() => readPageFromUrl(searchParams), [searchParams]);
+  const initialDeletionState = useMemo(() => embedded ? 'active' : readDeletionStateFromUrl(searchParams), [embedded, searchParams]);
+  const initialPage = useMemo(() => embedded ? 1 : readPageFromUrl(searchParams), [embedded, searchParams]);
   const [authState, setAuthState] = useState<'checking' | 'ready' | 'denied'>('checking');
   const [accessToken, setAccessToken] = useState('');
   const [deletionState, setDeletionState] = useState<DeletionState>(initialDeletionState);
@@ -41,9 +46,10 @@ export default function FeedbackFlaggingPageClient(): ReactElement | null {
   const returnFocusRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
+    if (embedded) return;
     setDeletionState(readDeletionStateFromUrl(searchParams));
     setPage(readPageFromUrl(searchParams));
-  }, [searchParams]);
+  }, [embedded, searchParams]);
 
   useEffect(() => {
     const session = readAuthSession();
@@ -60,6 +66,14 @@ export default function FeedbackFlaggingPageClient(): ReactElement | null {
     setAccessToken(session.accessToken);
     setAuthState('ready');
   }, [router]);
+
+  /** Cập nhật bộ lọc và phân trang; chỉ thay URL khi trang được mở độc lập. */
+  const updateListState = useCallback((nextPage: number, nextDeletionState: DeletionState): void => {
+    const safePage = Math.min(MAX_PAGE, Math.max(1, nextPage));
+    setPage(safePage);
+    setDeletionState(nextDeletionState);
+    if (!embedded) replaceUrl(router, safePage, nextDeletionState);
+  }, [embedded, router]);
 
   const feedbackQuery = useQuery({
     queryKey: ['admin-flagged-feedback', page, deletionState],
@@ -85,9 +99,8 @@ export default function FeedbackFlaggingPageClient(): ReactElement | null {
   useEffect(() => {
     if (!data || page <= Math.max(data.totalPages, 1)) return;
     const validPage = Math.min(MAX_PAGE, Math.max(1, data.totalPages));
-    setPage(validPage);
-    replaceUrl(router, validPage, deletionState);
-  }, [data, deletionState, page, router]);
+    updateListState(validPage, deletionState);
+  }, [data, deletionState, page, updateListState]);
 
   /** Thêm toast bounded và tự dọn sau 4 giây theo convention admin hiện có. */
   const addToast = useCallback((toast: Omit<ToastItem, 'id'>) => {
@@ -103,10 +116,8 @@ export default function FeedbackFlaggingPageClient(): ReactElement | null {
 
   /** Chuyển tab bằng URL state để deep-link và back/forward giữ đúng danh sách. */
   const handleChangeDeletionState = useCallback((nextState: DeletionState) => {
-    setDeletionState(nextState);
-    setPage(1);
-    replaceUrl(router, 1, nextState);
-  }, [router]);
+    updateListState(1, nextState);
+  }, [updateListState]);
 
   /** Ghi nhận trigger button để dialog trả focus đúng phần tử sau khi đóng. */
   const handleViewDetail = useCallback((item: FlaggedFeedbackItem, trigger: HTMLButtonElement) => {
@@ -130,12 +141,10 @@ export default function FeedbackFlaggingPageClient(): ReactElement | null {
       tone: 'success'
     });
     if (mode === 'restore') {
-      setDeletionState('active');
-      setPage(1);
-      replaceUrl(router, 1, 'active');
+      updateListState(1, 'active');
     }
     void feedbackQuery.refetch();
-  }, [addToast, feedbackQuery, router]);
+  }, [addToast, feedbackQuery, updateListState]);
 
   /** Refresh sau conflict/404 để UI phản ánh trạng thái thắng của request khác. */
   const handleActionRefresh = useCallback(async () => {
@@ -157,18 +166,22 @@ export default function FeedbackFlaggingPageClient(): ReactElement | null {
   if (authState === 'denied') return null;
 
   return (
-    <main className="min-h-screen bg-slate-50 px-4 py-6 sm:px-6 lg:px-8">
-      <div className="mx-auto max-w-7xl">
-        <nav className="mb-2 text-xs text-slate-400">
-          <a href="/admin" className="hover:text-slate-600">Admin</a>
-          <span className="mx-1.5">›</span>
-          <span className="font-medium text-slate-600">Feedback bị flag</span>
-        </nav>
+    <section className={embedded ? 'space-y-5' : 'min-h-screen bg-slate-50 px-4 py-6 sm:px-6 lg:px-8'}>
+      <div className={embedded ? '' : 'mx-auto max-w-7xl'}>
+        {!embedded ? (
+          <nav className="mb-2 text-xs text-slate-400">
+            <a href="/admin" className="hover:text-slate-600">Admin</a>
+            <span className="mx-1.5">›</span>
+            <span className="font-medium text-slate-600">Feedback bị flag</span>
+          </nav>
+        ) : null}
         <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
-          <div>
-            <h1 className="text-2xl font-bold text-slate-900">Feedback Flagging Panel</h1>
-            <p className="mt-1 text-sm text-slate-500">Review feedback bị flag, lý do và cửa sổ khôi phục 30 ngày.</p>
-          </div>
+          {!embedded ? (
+            <div>
+              <h1 className="text-2xl font-bold text-slate-900">Feedback Flagging Panel</h1>
+              <p className="mt-1 text-sm text-slate-500">Review feedback bị flag, lý do và cửa sổ khôi phục 30 ngày.</p>
+            </div>
+          ) : <div />}
           <button type="button" onClick={() => void feedbackQuery.refetch()} className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100">Làm mới</button>
         </div>
 
@@ -190,9 +203,9 @@ export default function FeedbackFlaggingPageClient(): ReactElement | null {
             <div className="mt-4 flex items-center justify-between text-sm text-slate-600">
               <span>{data.total} bản ghi</span>
               <div className="flex items-center gap-2">
-                <button type="button" disabled={page <= 1} onClick={() => moveToPage(router, page - 1, deletionState, setPage)} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 disabled:cursor-not-allowed disabled:opacity-40">Trước</button>
+                <button type="button" disabled={page <= 1} onClick={() => updateListState(page - 1, deletionState)} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 disabled:cursor-not-allowed disabled:opacity-40">Trước</button>
                 <span>Trang {data.page} / {Math.max(data.totalPages, 1)}</span>
-                <button type="button" disabled={page >= data.totalPages} onClick={() => moveToPage(router, page + 1, deletionState, setPage)} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 disabled:cursor-not-allowed disabled:opacity-40">Sau</button>
+                <button type="button" disabled={page >= data.totalPages} onClick={() => updateListState(page + 1, deletionState)} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 disabled:cursor-not-allowed disabled:opacity-40">Sau</button>
               </div>
             </div>
           </>
@@ -213,7 +226,7 @@ export default function FeedbackFlaggingPageClient(): ReactElement | null {
         />
       )}
       <ToastStack toastItemList={toasts} onCloseToast={removeToast} />
-    </main>
+    </section>
   );
 }
 
@@ -231,13 +244,6 @@ function readPageFromUrl(searchParams: Readonly<URLSearchParams>): number {
 /** Đồng bộ page/tab vào URL mà không reload toàn trang. */
 function replaceUrl(router: ReturnType<typeof useRouter>, page: number, deletionState: DeletionState): void {
   router.replace(`/admin/feedback?page=${page}&limit=${PAGE_LIMIT}&deletionState=${deletionState}`, { scroll: false });
-}
-
-/** Di chuyển page và giữ nguyên tab hiện tại. */
-function moveToPage(router: ReturnType<typeof useRouter>, page: number, deletionState: DeletionState, setPage: (page: number) => void): void {
-  const nextPage = Math.min(MAX_PAGE, Math.max(1, page));
-  setPage(nextPage);
-  replaceUrl(router, nextPage, deletionState);
 }
 
 /** Lấy message server an toàn cho vùng alert của panel. */

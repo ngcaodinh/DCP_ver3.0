@@ -3,6 +3,7 @@ import {
   getAuditorStakingContractAddressLowercase,
   logAuditorStakingSignerAddressOnce,
   getReadOnlyAuditorStakingContract,
+  getReadOnlyAuditorStakingFallbackProvider,
   getReadOnlyAuditorStakingProvider
 } from '../config/auditorStakingContract';
 import { getLogger } from '../config/logger';
@@ -41,10 +42,110 @@ import { withRpcTimeout } from '../utils/withRpcTimeout';
 const logger = getLogger();
 const LAST_LOG_INDEX_IN_BLOCK = Number.MAX_SAFE_INTEGER;
 const LOGS_TIMEOUT_MS = 30_000;
+const LOGS_RETRY_DELAYS_MS = [250, 1_000] as const;
+const PRIMARY_RPC_FALLBACK_COOLDOWN_MS = 5 * 60_000;
 const MAX_CONSECUTIVE_PROJECTION_FAILURES = 3;
 let projectionTimer: ReturnType<typeof setInterval> | null = null;
 let timeoutSweepTimer: ReturnType<typeof setInterval> | null = null;
 let isProjectionRunning = false;
+let primaryRpcFallbackCooldownUntilMs = 0;
+
+/** Kiểm tra object lỗi RPC trước khi đọc các field không được type bởi ethers. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** Tìm thông điệp lỗi tạm thời trong payload lồng nhau mà ethers tạo từ HTTP response của RPC. */
+function containsTemporaryInternalError(value: unknown, depth = 0): boolean {
+  if (depth > 3) return false;
+  if (typeof value === 'string') return value.toLowerCase().includes('temporary internal error');
+  if (!isRecord(value)) return false;
+  return Object.values(value).some(nestedValue => containsTemporaryInternalError(nestedValue, depth + 1));
+}
+
+/** Nhận diện lỗi RPC tạm thời dù ethers bọc code 19 trong error hoặc HTTP 500 trong info.responseBody. */
+function isTemporaryGetLogsError(error: unknown): boolean {
+  if (!isRecord(error) || !containsTemporaryInternalError(error)) return false;
+
+  const providerError = isRecord(error.error) ? error.error : null;
+  const errorCode = providerError?.code;
+  if (errorCode === 19 || errorCode === '19') return true;
+
+  const errorMessage = error.message;
+  return typeof errorMessage === 'string'
+    && errorMessage.toLowerCase().includes('server response 500');
+}
+
+/** Chờ backoff ngắn giữa các lần gọi lại eth_getLogs để tránh dồn tải vào RPC provider. */
+function waitForGetLogsRetry(delayMs: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, delayMs));
+}
+
+/** Lấy log AuditorStaking với retry hữu hạn chỉ cho phản hồi tạm thời đã biết của RPC provider. */
+async function getAuditorStakeLogsFromProvider(
+  provider: ethers.JsonRpcProvider,
+  filter: ethers.Filter
+): Promise<ethers.Log[]> {
+  for (let retryAttempt = 0; ; retryAttempt += 1) {
+    try {
+      return await withRpcTimeout(provider.getLogs(filter), LOGS_TIMEOUT_MS);
+    } catch (error) {
+      const retryDelayMs = LOGS_RETRY_DELAYS_MS[retryAttempt];
+      if (!isTemporaryGetLogsError(error) || retryDelayMs === undefined) throw error;
+
+      logger.warn('RPC eth_getLogs AuditorStaking lỗi tạm thời; sẽ retry cùng checkpoint.', {
+        retryAttempt: retryAttempt + 1,
+        retryDelayMs,
+        errorMessage: sanitizeProviderError(error) ?? 'UNKNOWN_ERROR'
+      });
+      await waitForGetLogsRetry(retryDelayMs);
+    }
+  }
+}
+
+/** Đọc log từ fallback sau khi xác thực endpoint vẫn đang kết nối đúng blockchain của primary. */
+async function getAuditorStakeLogsFromFallback(
+  fallbackProvider: ethers.JsonRpcProvider,
+  expectedChainId: bigint,
+  filter: ethers.Filter
+): Promise<ethers.Log[]> {
+  const fallbackNetwork = await withRpcTimeout(fallbackProvider.getNetwork());
+  if (fallbackNetwork.chainId !== expectedChainId) {
+    throw new Error('AUDITOR_STAKING_RPC_FALLBACK_URL đang trỏ tới blockchain khác BLOCKCHAIN_CHAIN_ID.');
+  }
+  return getAuditorStakeLogsFromProvider(fallbackProvider, filter);
+}
+
+/** Dùng fallback trong cooldown sau lỗi tạm thời để không liên tục dồn retry vào primary đang quá tải. */
+async function getAuditorStakeLogs(
+  provider: ethers.JsonRpcProvider,
+  fallbackProvider: ethers.JsonRpcProvider | null,
+  expectedChainId: bigint,
+  filter: ethers.Filter
+): Promise<ethers.Log[]> {
+  if (fallbackProvider && Date.now() < primaryRpcFallbackCooldownUntilMs) {
+    try {
+      return await getAuditorStakeLogsFromFallback(fallbackProvider, expectedChainId, filter);
+    } catch (error) {
+      if (!isTemporaryGetLogsError(error)) throw error;
+      // Fallback tạm thời lỗi thì mở lại primary ngay trong lần chạy này để không mất đường đọc log duy nhất.
+      primaryRpcFallbackCooldownUntilMs = 0;
+    }
+  }
+
+  try {
+    return await getAuditorStakeLogsFromProvider(provider, filter);
+  } catch (error) {
+    if (!isTemporaryGetLogsError(error) || !fallbackProvider) throw error;
+
+    logger.warn('RPC eth_getLogs AuditorStaking primary đã hết retry; chuyển sang fallback.', {
+      errorMessage: sanitizeProviderError(error) ?? 'UNKNOWN_ERROR'
+    });
+    const logs = await getAuditorStakeLogsFromFallback(fallbackProvider, expectedChainId, filter);
+    primaryRpcFallbackCooldownUntilMs = Date.now() + PRIMARY_RPC_FALLBACK_COOLDOWN_MS;
+    return logs;
+  }
+}
 
 /** Kiểm tra log có thực sự ở sau checkpoint để replay block dở dang mà không chạy lại log cũ. */
 function isLogAfterCheckpoint(log: ethers.Log, checkpoint: AuditorStakeEventCheckpoint): boolean {
@@ -137,6 +238,7 @@ async function reconcileAuditorStakeEventsInternal(): Promise<void> {
   isProjectionRunning = true;
   try {
     const provider = getReadOnlyAuditorStakingProvider();
+    const fallbackProvider = getReadOnlyAuditorStakingFallbackProvider();
     const contract = getReadOnlyAuditorStakingContract();
     const [network, currentBlock] = await Promise.all([
       withRpcTimeout(provider.getNetwork()),
@@ -160,12 +262,17 @@ async function reconcileAuditorStakeEventsInternal(): Promise<void> {
 
     for (let chunkStart = checkpoint.lastProcessedBlock; chunkStart <= finalizedBlock; chunkStart += AUDITOR_STAKE_MAX_BLOCKS_PER_REQUEST) {
       const chunkEnd = Math.min(chunkStart + AUDITOR_STAKE_MAX_BLOCKS_PER_REQUEST - 1, finalizedBlock);
-      const logs = await withRpcTimeout(provider.getLogs({
-        address: scope.contractAddress,
-        fromBlock: chunkStart,
-        toBlock: chunkEnd,
-        topics: [eventTopics]
-      }), LOGS_TIMEOUT_MS);
+      const logs = await getAuditorStakeLogs(
+        provider,
+        fallbackProvider,
+        network.chainId,
+        {
+          address: scope.contractAddress,
+          fromBlock: chunkStart,
+          toBlock: chunkEnd,
+          topics: [eventTopics]
+        }
+      );
       const seenWallets = new Set<string>();
       let lastSuccessfulLog: ethers.Log | null = null;
       let failedLog: ethers.Log | null = null;
@@ -304,6 +411,7 @@ export function stopAuditorStakeEventProjectionWorker(): void {
 export function __resetAuditorStakeEventProjectionWorkerState(): void {
   stopAuditorStakeEventProjectionWorker();
   isProjectionRunning = false;
+  primaryRpcFallbackCooldownUntilMs = 0;
 }
 
 /** Các hook nội bộ giúp test worker kiểm tra retry và dead-letter mà không mở timer thật. */

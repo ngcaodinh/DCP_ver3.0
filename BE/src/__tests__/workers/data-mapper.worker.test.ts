@@ -9,6 +9,9 @@ const mockRedisGet = vi.hoisted(() => vi.fn<() => Promise<string | null>>());
 const mockRedisDel = vi.hoisted(() => vi.fn<() => Promise<number>>());
 const mockRpcGetBlockNumber = vi.hoisted(() => vi.fn<() => Promise<number>>());
 const mockRpcGetLogs = vi.hoisted(() => vi.fn<() => Promise<unknown[]>>());
+const mockRpcGetNetwork = vi.hoisted(() => vi.fn<() => Promise<{ chainId: bigint }>>());
+const mockFallbackGetLogs = vi.hoisted(() => vi.fn<() => Promise<unknown[]>>());
+const mockFallbackGetNetwork = vi.hoisted(() => vi.fn<() => Promise<{ chainId: bigint }>>());
 const mockInterfaceGetEvent = vi.hoisted(() => vi.fn());
 const mockInterfaceParseLog = vi.hoisted(() => vi.fn());
 const mockCreateUnifiedTransactionFromBlockchain = vi.hoisted(() => vi.fn());
@@ -95,10 +98,9 @@ vi.mock('../../models/unifiedTransactionModel', () => ({
 
 vi.mock('ethers', () => ({
   ethers: {
-    JsonRpcProvider: vi.fn(() => ({
-      getBlockNumber: mockRpcGetBlockNumber,
-      getLogs: mockRpcGetLogs,
-    })),
+    JsonRpcProvider: vi.fn((rpcUrl: string) => rpcUrl === 'https://fallback-rpc.example.com'
+      ? { getLogs: mockFallbackGetLogs, getNetwork: mockFallbackGetNetwork }
+      : { getBlockNumber: mockRpcGetBlockNumber, getLogs: mockRpcGetLogs, getNetwork: mockRpcGetNetwork }),
     Interface: vi.fn(() => ({
       getEvent: mockInterfaceGetEvent,
       parseLog: mockInterfaceParseLog,
@@ -160,6 +162,14 @@ function makeEmptyDepositQuery() {
   };
 }
 
+/** Tạo lỗi RPC code 19 để kiểm tra DataMapper fail over thay vì bỏ dở checkpoint ngay lập tức. */
+function createTemporaryGetLogsError(): Error & { error: { code: number; message: string } } {
+  return Object.assign(
+    new Error('could not coalesce error'),
+    { error: { code: 19, message: 'Temporary internal error. Please retry.' } }
+  );
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   resetModuleState();
@@ -168,6 +178,9 @@ beforeEach(() => {
   mockRedisDel.mockResolvedValue(1);
   mockRpcGetBlockNumber.mockResolvedValue(0);
   mockRpcGetLogs.mockResolvedValue([]);
+  mockRpcGetNetwork.mockResolvedValue({ chainId: 31_337n });
+  mockFallbackGetLogs.mockResolvedValue([]);
+  mockFallbackGetNetwork.mockResolvedValue({ chainId: 31_337n });
   mockInterfaceGetEvent.mockReturnValue({ topicHash: '0xDonationReceived' });
   mockInterfaceParseLog.mockReturnValue(null);
   mockCreateUnifiedTransactionFromBlockchain.mockResolvedValue({});
@@ -183,6 +196,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   resetModuleState();
 });
 
@@ -465,6 +479,23 @@ describe('runDataMapperCycle', () => {
     expect(mockRedisSet).not.toHaveBeenCalledWith('data_mapper:last_synced_block', '1');
   });
 
+  it('dùng fallback RPC cùng chain sau khi primary eth_getLogs hết retry tạm thời', async () => {
+    vi.useFakeTimers();
+    vi.stubEnv('BLOCKCHAIN_RPC_FALLBACK_URL', 'https://fallback-rpc.example.com');
+    mockRpcGetBlockNumber.mockResolvedValue(1);
+    mockRpcGetLogs.mockRejectedValue(createTemporaryGetLogsError());
+    mockFallbackGetLogs.mockResolvedValue([]);
+
+    const synchronization = runDataMapperCycle();
+    await vi.runAllTimersAsync();
+    await synchronization;
+
+    expect(mockRpcGetLogs).toHaveBeenCalledTimes(3);
+    expect(mockFallbackGetNetwork).toHaveBeenCalledOnce();
+    expect(mockFallbackGetLogs).toHaveBeenCalledOnce();
+    expect(mockRedisSet).toHaveBeenCalledWith('data_mapper:last_synced_block', '1');
+  });
+
   it('checkpoint hỏng được coi là chưa sync để không làm worker dừng im lặng', async () => {
     mockRedisGet.mockResolvedValue('invalid-block-checkpoint');
     mockRpcGetBlockNumber.mockResolvedValue(1);
@@ -477,6 +508,23 @@ describe('runDataMapperCycle', () => {
       toBlock: 1
     }));
     expect(mockRedisSet).toHaveBeenCalledWith('data_mapper:last_synced_block', '1');
+  });
+
+  it('chia eth_getLogs thành các chunk 250 block để không làm quá tải public RPC', async () => {
+    mockRpcGetBlockNumber.mockResolvedValue(251);
+    mockRpcGetLogs.mockResolvedValue([]);
+
+    await runDataMapperCycle();
+
+    expect(mockRpcGetLogs).toHaveBeenCalledTimes(2);
+    expect(mockRpcGetLogs).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      fromBlock: 1,
+      toBlock: 250
+    }));
+    expect(mockRpcGetLogs).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      fromBlock: 251,
+      toBlock: 251
+    }));
   });
 
   it('invalidate summary theo đúng các project có blockchain event mới', async () => {

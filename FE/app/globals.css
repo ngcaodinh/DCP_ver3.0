@@ -2260,6 +2260,29 @@ footer {
   }
 }
 
+/* Hiệu ứng drawer của các cổng quản trị; tắt qua motion-reduce ở component. */
+@keyframes executiveDrawerIn {
+  from {
+    opacity: 0;
+    transform: translateX(-16px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes executiveScrimIn {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
 @keyframes countUp {
   from {
     opacity: 0;

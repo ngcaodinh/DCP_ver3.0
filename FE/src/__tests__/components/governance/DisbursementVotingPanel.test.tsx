@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({ fetchApi: vi.fn() }));
 
 vi.mock('@/app/utils/apiClient', () => ({
   buildApiUrl: (path: string) => path,
+  buildSameOriginApiUrl: (path: string) => path,
   fetchApi: mocks.fetchApi,
   getApiErrorMessage: (_error: unknown, fallback: string) => fallback
 }));

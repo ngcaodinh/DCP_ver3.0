@@ -59,6 +59,14 @@ describe('GovernanceLoginPage MetaMask flow', () => {
     delete (window as Window & { ethereum?: unknown }).ethereum;
   });
 
+  it('renders the MetaMask fox logo inside the connect button', () => {
+    render(<GovernanceLoginPage />);
+
+    const logo = screen.getByRole('img', { name: 'MetaMask logo' });
+    expect(logo).toHaveAttribute('src', expect.stringContaining('MetaMask-icon-Fox.svg'));
+    expect(screen.getByRole('button', { name: /Kết nối ví MetaMask/ })).toContainElement(logo);
+  });
+
   it('hiển thị lỗi rõ ràng khi chưa cài MetaMask', async () => {
     render(<GovernanceLoginPage />);
 
@@ -68,7 +76,7 @@ describe('GovernanceLoginPage MetaMask flow', () => {
     expect(mocks.fetchApi).not.toHaveBeenCalled();
   });
 
-  it('chặn login khi sai network và switch chain bị từ chối', async () => {
+  it('chặn login khi người dùng từ chối chuyển sang mạng đã có', async () => {
     const provider = createProvider();
     provider.request.mockImplementation(({ method }: { method: string }) => {
       if (method === 'eth_chainId') return Promise.resolve('0x1');
@@ -80,8 +88,63 @@ describe('GovernanceLoginPage MetaMask flow', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Kết nối ví MetaMask/ }));
 
-    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('mạng Polygon Amoy'));
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('user rejected'));
     expect(provider.request).toHaveBeenCalledWith({ method: 'wallet_switchEthereumChain', params: [{ chainId: '0x13882' }] });
+    expect(provider.request).not.toHaveBeenCalledWith(expect.objectContaining({ method: 'wallet_addEthereumChain' }));
+    expect(mocks.fetchApi).not.toHaveBeenCalled();
+  });
+
+  it('thêm rồi tự chuyển sang Polygon Amoy khi ví chưa có mạng này', async () => {
+    const provider = createProvider();
+    let switchRequestCount = 0;
+    provider.request.mockImplementation(({ method }: { method: string }) => {
+      if (method === 'eth_chainId') return Promise.resolve('0x1');
+      if (method === 'wallet_switchEthereumChain') {
+        switchRequestCount += 1;
+        return switchRequestCount === 1 ? Promise.reject({ code: 4902 }) : Promise.resolve(null);
+      }
+      if (method === 'wallet_addEthereumChain') return Promise.resolve(null);
+      if (method === 'eth_requestAccounts') return Promise.resolve([walletAddress]);
+      if (method === 'personal_sign') return Promise.resolve('0xsig');
+      return Promise.resolve(null);
+    });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }));
+    mocks.parseJsonSafely.mockResolvedValue(createLoginResponse('executive_member'));
+    setProvider(provider);
+    render(<GovernanceLoginPage />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Kết nối ví MetaMask/ }));
+
+    await waitFor(() => expect(mocks.replace).toHaveBeenCalledWith('/executive/member'));
+    expect(provider.request).toHaveBeenNthCalledWith(2, { method: 'wallet_switchEthereumChain', params: [{ chainId: '0x13882' }] });
+    expect(provider.request).toHaveBeenNthCalledWith(3, {
+      method: 'wallet_addEthereumChain',
+      params: [{
+        chainId: '0x13882',
+        chainName: 'Polygon Amoy testnet',
+        nativeCurrency: { name: 'POL', symbol: 'POL', decimals: 18 },
+        rpcUrls: ['https://rpc-amoy.polygon.technology/'],
+        blockExplorerUrls: ['https://amoy.polygonscan.com/']
+      }]
+    });
+    expect(provider.request).toHaveBeenNthCalledWith(4, { method: 'wallet_switchEthereumChain', params: [{ chainId: '0x13882' }] });
+  });
+
+  it('dừng login khi người dùng từ chối thêm Polygon Amoy', async () => {
+    const provider = createProvider();
+    provider.request.mockImplementation(({ method }: { method: string }) => {
+      if (method === 'eth_chainId') return Promise.resolve('0x1');
+      if (method === 'wallet_switchEthereumChain') return Promise.reject({ code: 4902 });
+      if (method === 'wallet_addEthereumChain') return Promise.reject(new Error('add rejected'));
+      return Promise.resolve([]);
+    });
+    setProvider(provider);
+    render(<GovernanceLoginPage />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Kết nối ví MetaMask/ }));
+
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('add rejected'));
+    expect(provider.request).toHaveBeenCalledTimes(3);
     expect(mocks.fetchApi).not.toHaveBeenCalled();
   });
 

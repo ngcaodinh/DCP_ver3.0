@@ -14,6 +14,7 @@ function createDeferred<T>(): Deferred<T> {
 
 vi.mock('@/app/utils/apiClient', () => ({
   buildApiUrl: (path: string) => path,
+  buildSameOriginApiUrl: (path: string) => path,
   fetchApi: mockFetchApi,
   getApiErrorMessage: () => 'Không thể tải dữ liệu.'
 }));
@@ -41,7 +42,22 @@ describe('ExecutiveCommitteePanels', () => {
 
     render(<ActiveProjectsPanel />);
 
-    expect(await screen.findByRole('status')).toHaveTextContent('Không thể tải dữ liệu.');
+    const status = await screen.findByRole('status');
+    expect(status).toHaveTextContent('Không thể tải dữ liệu.');
+    expect(status).toHaveTextContent('Thử lại');
+    expect(screen.queryByText('Chưa có dự án cần theo dõi')).not.toBeInTheDocument();
+  });
+
+  it('cho phép tải lại danh sách sau khi backend trở lại', async () => {
+    mockFetchApi.mockRejectedValueOnce(new Error('network failure'));
+
+    render(<ActiveProjectsPanel />);
+
+    const retryButton = await screen.findByRole('button', { name: 'Thử lại' });
+    mockFetchApi.mockResolvedValueOnce({ data: { items: [], nextCursor: null } });
+    fireEvent.click(retryButton);
+
+    expect(await screen.findByText('Chưa có dự án cần theo dõi')).toBeInTheDocument();
   });
 
   it('hiển thị empty state cho hàng chờ giải ngân', async () => {
