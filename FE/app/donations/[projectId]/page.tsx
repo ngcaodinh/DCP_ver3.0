@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useRouter, usePathname, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import confetti from 'canvas-confetti';
-import { ApiErrorResponse, buildApiUrl, fetchApi } from '../../utils/apiClient';
+import { ApiErrorResponse, buildApiUrl, fetchApi, getApiErrorMessage } from '../../utils/apiClient';
 import { readAuthSession } from '../../utils/authSession';
 import { useGuestWallet } from '../../components/GuestWalletProvider';
 import { executeOneClickDonationRequest } from '../components/DonationModal.services';
@@ -98,11 +98,43 @@ interface DonationHistoryItem {
   isAnonymous: boolean;
 }
 
+/** Payload số dư token từ endpoint deposit, tương thích response phẳng và response có envelope. */
+interface TokenBalanceResponsePayload {
+  tokenBalance?: unknown;
+  data?: {
+    tokenBalance?: unknown;
+  };
+}
+
 /** Trạng thái transaction cho authenticated donation. */
 type TransactionStatus = 'idle' | 'processing' | 'submitted' | 'success' | 'failed';
 
 /** Chế độ quyên góp đang active trên trang. */
 type DonationMode = 'public' | 'anonymous' | null;
+
+/**
+ * Hàm đọc số dư token từ response API.
+ * Mục đích: giữ độ chính xác uint256 bằng bigint và từ chối payload không hợp lệ.
+ */
+function resolveTokenBalance(payload: unknown): bigint {
+  const balancePayload = payload as TokenBalanceResponsePayload;
+  const tokenBalance = balancePayload?.data?.tokenBalance ?? balancePayload?.tokenBalance;
+  if (typeof tokenBalance !== 'string' || !/^\d+$/.test(tokenBalance)) {
+    throw new Error('Phản hồi số dư Smart Account không hợp lệ.');
+  }
+
+  return BigInt(tokenBalance);
+}
+
+/**
+ * Hàm chuẩn hóa lỗi tải số dư Smart Account cho giao diện quyên góp công khai.
+ * Mục đích: chỉ hiển thị message typed từ API, còn lỗi mạng/response bất thường vẫn dùng thông báo an toàn mặc định.
+ */
+function mapTokenBalanceLoadError(error: unknown): string {
+  const fallbackMessage = 'Không thể tải số dư Smart Account. Bạn vẫn có thể thử quyên góp, hệ thống sẽ kiểm tra lại trước khi gửi giao dịch.';
+  const isTypedApiError = typeof error === 'object' && error !== null && 'errorCode' in error;
+  return isTypedApiError ? getApiErrorMessage(error, fallbackMessage) : fallbackMessage;
+}
 
 /**
  * Hàm định dạng số tiền VND.
@@ -410,6 +442,9 @@ interface DonationSectionProps {
   anonymousDonationCount: number;
   anonymousHasPendingDonation: boolean;
   isLoggedIn: boolean;
+  userTokenBalance: bigint | null;
+  isUserTokenBalanceLoading: boolean;
+  userTokenBalanceError: string;
   payosPaymentUrl: string | null;
   payosStatus: PayosDonationStatus | null;
   payosReturnStatus: { code: string; status: string } | null;
@@ -449,6 +484,9 @@ function DonationSection(props: DonationSectionProps) {
     anonymousDonationCount,
     anonymousHasPendingDonation,
     isLoggedIn,
+    userTokenBalance,
+    isUserTokenBalanceLoading,
+    userTokenBalanceError,
     payosPaymentUrl,
     payosStatus,
     payosReturnStatus,
@@ -516,6 +554,22 @@ function DonationSection(props: DonationSectionProps) {
         </div>
         <div className="mb-4 rounded-md border border-[#e5e7eb] bg-gray-50 px-3 py-2 text-sm text-[#374151]">
           Sử dụng tài khoản đã đăng nhập. Giao dịch ghi nhận công khai trên hệ thống.
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+            <span>
+              Số dư Smart Account:{' '}
+              <strong>
+                {isUserTokenBalanceLoading
+                  ? 'Đang tải...'
+                  : userTokenBalance !== null
+                    ? `${userTokenBalance.toLocaleString('vi-VN')} token`
+                    : 'Chưa thể tải số dư'}
+              </strong>
+            </span>
+            <Link href="/deposit" className="font-semibold text-[#0e7c6b] underline underline-offset-2">
+              Nạp tiền thêm
+            </Link>
+          </div>
+          {userTokenBalanceError && <p className="mt-2 text-xs text-[#b91c1c]">{userTokenBalanceError}</p>}
         </div>
         <input
           type="number"
@@ -541,7 +595,7 @@ function DonationSection(props: DonationSectionProps) {
         )}
         <button
           type="button"
-          disabled={isPublicSubmitting}
+          disabled={isPublicSubmitting || isUserTokenBalanceLoading}
           onClick={onOpenPublicConfirm}
           className="project-detail-submit-btn public mt-3"
         >
@@ -553,7 +607,7 @@ function DonationSection(props: DonationSectionProps) {
             <div className="w-full max-w-sm rounded-xl bg-white p-5 shadow-xl">
               <h3 className="text-base font-semibold text-[#111827]">Xác nhận quyên góp</h3>
               <p className="mt-2 text-sm text-[#374151]">
-                Bạn muốn quyên góp <strong>{pendingPublicAmount.toLocaleString('vi-VN')} token</strong> cho dự án này?
+                Bạn có chắc chắn xác nhận quyên góp với số tiền <strong>{pendingPublicAmount.toLocaleString('vi-VN')} token</strong> cho dự án này?
               </p>
               <p className="mt-1 text-xs text-[#9ca3af]">Giao dịch ghi nhận công khai trên blockchain.</p>
               <div className="mt-4 flex justify-end gap-2">
@@ -811,6 +865,9 @@ export default function DonationProjectDetailPage() {
   const [publicMessage, setPublicMessage] = useState('');
   const [isPublicConfirmOpen, setIsPublicConfirmOpen] = useState(false);
   const [pendingPublicAmount, setPendingPublicAmount] = useState<number | null>(null);
+  const [userTokenBalance, setUserTokenBalance] = useState<bigint | null>(null);
+  const [isUserTokenBalanceLoading, setIsUserTokenBalanceLoading] = useState(false);
+  const [userTokenBalanceError, setUserTokenBalanceError] = useState('');
 
   const [isAnonymousSubmitting, setIsAnonymousSubmitting] = useState(false);
   const [anonymousStatus, setAnonymousStatus] = useState<string>('IDLE');
@@ -827,6 +884,54 @@ export default function DonationProjectDetailPage() {
   const [donationSuccessTxHash, setDonationSuccessTxHash] = useState<string | null>(null);
   const redirectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [pendingAnonymousAmount, setPendingAnonymousAmount] = useState<number | null>(null);
+
+  /**
+   * Hàm tải số dư token on-chain của Smart Account đã đăng nhập.
+   * Mục đích: hiển thị số dư chính xác và kiểm tra trước khi gửi one-click donation.
+   */
+  const loadUserTokenBalance = useCallback(async (): Promise<bigint | null> => {
+    const { accessToken } = readAuthSession();
+    if (!accessToken) {
+      setUserTokenBalance(null);
+      setUserTokenBalanceError('Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại để tải số dư.');
+      return null;
+    }
+
+    setIsUserTokenBalanceLoading(true);
+    setUserTokenBalanceError('');
+
+    try {
+      const balanceResponse = await fetchApi<unknown>(buildApiUrl('/api/deposit/balance'), {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${accessToken}` },
+        cache: 'no-store',
+      });
+      const tokenBalance = resolveTokenBalance(balanceResponse);
+      setUserTokenBalance(tokenBalance);
+      return tokenBalance;
+    } catch (error) {
+      setUserTokenBalance(null);
+      setUserTokenBalanceError(mapTokenBalanceLoadError(error));
+      return null;
+    } finally {
+      setIsUserTokenBalanceLoading(false);
+    }
+  }, []);
+
+  /**
+   * Hàm hiển thị hiệu ứng chúc mừng dùng chung cho các luồng quyên góp thành công.
+   * Mục đích: giữ trải nghiệm công khai và ẩn danh nhất quán mà không lặp lại cấu hình pháo hoa.
+   */
+  const showDonationSuccess = useCallback((transactionHash: string | null | undefined): void => {
+    confetti({
+      particleCount: 120,
+      spread: 70,
+      origin: { y: 0.6 },
+      colors: ['#FFD700', '#FF6347', '#00CED1', '#32CD32', '#FF69B4'],
+    });
+    setDonationSuccessTxHash(transactionHash || null);
+    setShowDonationSuccessPopup(true);
+  }, []);
 
   const handleTogglePayosConfirmModal = (open: boolean) => setShowPayosConfirmModal(open);
 
@@ -956,17 +1061,7 @@ export default function DonationProjectDetailPage() {
           setAnonymousMessage('Quyên góp ẩn danh thành công! Cảm ơn bạn vì tấm lòng sẻ chia.');
           setDonationAmountInput('');
 
-          // Bắn pháo hoa chúc mừng
-          confetti({
-            particleCount: 120,
-            spread: 70,
-            origin: { y: 0.6 },
-            colors: ['#FFD700', '#FF6347', '#00CED1', '#32CD32', '#FF69B4'],
-          });
-
-          // Hiển thị popup thành công
-          setDonationSuccessTxHash(statusResponse.relayTxHash);
-          setShowDonationSuccessPopup(true);
+          showDonationSuccess(statusResponse.relayTxHash);
 
           // Xóa URL params PayOS sau khi xử lý xong để trang sạch sẽ.
           if (typeof window !== 'undefined') {
@@ -992,7 +1087,7 @@ export default function DonationProjectDetailPage() {
     }, 3000);
 
     return () => window.clearInterval(pollIntervalId);
-  }, [isAwaitingAnonymousPayment, payosOrderCode, projectId, loadProjectData]);
+  }, [isAwaitingAnonymousPayment, payosOrderCode, projectId, loadProjectData, showDonationSuccess]);
 
   /**
    * Effect tự động redirect về trang project detail sau khi popup thành công hiển thị.
@@ -1028,7 +1123,7 @@ export default function DonationProjectDetailPage() {
    * Hàm mở form quyên góp công khai.
    * Mục đích: giữ nguyên UI phân tách 2 luồng donate như trước.
    */
-  const handleOpenPublicDonation = () => {
+  const handleOpenPublicDonation = async () => {
     if (!isLoggedIn) {
       setPublicStatus('failed');
       setPublicMessage('Vui lòng đăng nhập để sử dụng quyên góp công khai.');
@@ -1041,6 +1136,8 @@ export default function DonationProjectDetailPage() {
     setDonationAmountInput('');
     setPublicStatus('idle');
     setPublicMessage('');
+    setUserTokenBalance(null);
+    await loadUserTokenBalance();
   };
 
   /**
@@ -1098,9 +1195,21 @@ export default function DonationProjectDetailPage() {
    */
   const handleOpenPublicConfirm = () => {
     const parsedAmount = Number(donationAmountInput);
-    if (!Number.isFinite(parsedAmount) || parsedAmount <= 0 || !Number.isInteger(parsedAmount)) {
+    if (!Number.isFinite(parsedAmount) || parsedAmount <= 0 || !Number.isSafeInteger(parsedAmount)) {
       setPublicStatus('failed');
-      setPublicMessage('Số token quyên góp phải là số nguyên lớn hơn 0.');
+      setPublicMessage('Số token quyên góp phải là số nguyên dương hợp lệ.');
+      return;
+    }
+
+    if (isUserTokenBalanceLoading) {
+      setPublicStatus('failed');
+      setPublicMessage('Đang tải số dư Smart Account. Vui lòng chờ trong giây lát.');
+      return;
+    }
+
+    if (userTokenBalance !== null && BigInt(parsedAmount) > userTokenBalance) {
+      setPublicStatus('failed');
+      setPublicMessage('Số token quyên góp vượt quá số dư hiện có của bạn. Vui lòng nạp thêm token để tiếp tục.');
       return;
     }
 
@@ -1127,13 +1236,14 @@ export default function DonationProjectDetailPage() {
       setPublicStatus('processing');
       setPublicMessage('Hệ thống đang gửi giao dịch quyên góp, vui lòng chờ trong giây lát...');
 
-      await executeOneClickDonationRequest(accessToken, projectDetail.projectId, pendingPublicAmount, false);
+      const transactionHash = await executeOneClickDonationRequest(accessToken, projectDetail.projectId, pendingPublicAmount, false);
 
       setPublicStatus('success');
       setPublicMessage('Giao dịch quyên góp đã được xác nhận thành công trên blockchain.');
       setDonationAmountInput('');
       setPendingPublicAmount(null);
-      await loadProjectData();
+      showDonationSuccess(transactionHash);
+      await Promise.all([loadProjectData(), loadUserTokenBalance()]);
     } catch (error) {
       setPublicStatus('failed');
       setPublicMessage(mapDonationErrorMessage(error));
@@ -1281,6 +1391,9 @@ export default function DonationProjectDetailPage() {
               anonymousDonationCount={initState.donationCount}
               anonymousHasPendingDonation={initState.hasPendingDonation}
               isLoggedIn={isLoggedIn}
+              userTokenBalance={userTokenBalance}
+              isUserTokenBalanceLoading={isUserTokenBalanceLoading}
+              userTokenBalanceError={userTokenBalanceError}
               payosPaymentUrl={payosPaymentUrl}
               payosStatus={payosStatus}
               payosReturnStatus={payosReturnStatus}

@@ -174,7 +174,13 @@ describe('zeroDevService - encrypt/decrypt Owner Private Key', () => {
       const replacement = parts[1][0] === '0' ? '1' : '0';
       const tamperedEncrypted = `${parts[0]}:${replacement}${parts[1].slice(1)}:${parts[2]}`;
 
-      expect(() => decryptOwnerPrivateKey(tamperedEncrypted)).toThrow();
+      try {
+        decryptOwnerPrivateKey(tamperedEncrypted);
+        throw new Error('Expected decryptOwnerPrivateKey to throw.');
+      } catch (error) {
+        expect(error).toMatchObject({ statusCode: 409, errorCode: 'DECRYPTION_ERROR' });
+      }
     });
+
   });
 });

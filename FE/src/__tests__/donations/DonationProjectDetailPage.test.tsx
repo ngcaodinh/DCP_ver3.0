@@ -9,9 +9,18 @@ vi.mock('next/navigation', () => ({
   useSearchParams: vi.fn(),
 }));
 
+vi.mock('canvas-confetti', () => ({
+  default: vi.fn(),
+}));
+
 vi.mock('@/app/utils/apiClient', () => ({
   fetchApi: vi.fn(),
   buildApiUrl: vi.fn((path: string) => `http://localhost:3000${path}`),
+  getApiErrorMessage: vi.fn((error: unknown, fallbackMessage: string) => (
+    typeof error === 'object' && error !== null && 'message' in error && typeof error.message === 'string'
+      ? error.message
+      : fallbackMessage
+  )),
 }));
 
 vi.mock('@/app/utils/authSession', () => ({
@@ -54,10 +63,12 @@ vi.mock('@/app/utils/guestPayosClient', () => ({
 }));
 
 import { useParams, usePathname, useRouter, useSearchParams } from 'next/navigation';
+import confetti from 'canvas-confetti';
 import { fetchApi } from '@/app/utils/apiClient';
 import { readAuthSession } from '@/app/utils/authSession';
 import { useGuestWallet } from '@/app/components/GuestWalletProvider';
 import { initPayosDonation } from '@/app/utils/guestPayosClient';
+import { executeOneClickDonationRequest } from '@/app/donations/components/DonationModal.services';
 import DonationProjectDetailPage from '@/app/donations/[projectId]/page';
 
 /**
@@ -131,6 +142,7 @@ function makeProjectFetchResponses(location: unknown = {
 describe('DonationProjectDetailPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(fetchApi).mockReset();
 
     vi.mocked(useParams).mockReturnValue({ projectId: 'project-001' });
     vi.mocked(usePathname).mockReturnValue('/donations/project-001');
@@ -237,6 +249,168 @@ describe('DonationProjectDetailPage', () => {
     expect(screen.getByTestId('project-geographic-location')).toHaveTextContent('Thông tin vị trí không hợp lệ.');
     expect(screen.queryByRole('link', { name: /mở trên google maps/i })).not.toBeInTheDocument();
     expect(screen.queryByTestId('project-geofence-map')).not.toBeInTheDocument();
+  });
+
+  it('hiển thị số dư Smart Account và link nạp tiền cho quyên góp công khai', async () => {
+    vi.mocked(readAuthSession).mockReturnValue({ accessToken: 'access-token-001' } as never);
+
+    render(<DonationProjectDetailPage />);
+
+    await screen.findByText('Quỹ hỗ trợ khẩn cấp');
+    vi.mocked(fetchApi).mockReset();
+    vi.mocked(fetchApi).mockResolvedValue({ tokenBalance: '125000' } as never);
+
+    fireEvent.click(screen.getByRole('button', { name: /quyên góp công khai/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Số dư Smart Account:/i)).toHaveTextContent('125.000 token');
+    });
+    expect(screen.getByText(/Sử dụng tài khoản đã đăng nhập/i)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /^Nạp tiền thêm$/i })).toHaveAttribute('href', '/deposit');
+  });
+
+  it('hiển thị trạng thái tải số dư và khóa nút quyên góp trong lúc chờ', async () => {
+    vi.mocked(readAuthSession).mockReturnValue({ accessToken: 'access-token-001' } as never);
+
+    render(<DonationProjectDetailPage />);
+
+    await screen.findByText('Quỹ hỗ trợ khẩn cấp');
+    vi.mocked(fetchApi).mockReset();
+    vi.mocked(fetchApi).mockReturnValue(new Promise<never>(() => undefined) as never);
+
+    fireEvent.click(screen.getByRole('button', { name: /quyên góp công khai/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Số dư Smart Account:/i)).toHaveTextContent('Đang tải...');
+    });
+    expect(screen.getByRole('button', { name: /^quyên góp$/i })).toBeDisabled();
+    expect(screen.getByRole('link', { name: /^Nạp tiền thêm$/i })).toHaveAttribute('href', '/deposit');
+  });
+
+  it('hiển thị lỗi tải số dư nhưng vẫn cung cấp link nạp tiền', async () => {
+    vi.mocked(readAuthSession).mockReturnValue({ accessToken: 'access-token-001' } as never);
+
+    render(<DonationProjectDetailPage />);
+
+    await screen.findByText('Quỹ hỗ trợ khẩn cấp');
+    vi.mocked(fetchApi).mockReset();
+    vi.mocked(fetchApi).mockRejectedValue(new Error('Balance service unavailable'));
+
+    fireEvent.click(screen.getByRole('button', { name: /quyên góp công khai/i }));
+
+    await screen.findByText(/Không thể tải số dư Smart Account/i);
+    expect(screen.getByText(/Số dư Smart Account:/i)).toHaveTextContent('Chưa thể tải số dư');
+    expect(screen.queryByText(/Số dư Smart Account: 0 token/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /^Nạp tiền thêm$/i })).toHaveAttribute('href', '/deposit');
+  });
+
+  it('hiển thị message an toàn từ lỗi typed của endpoint số dư', async () => {
+    vi.mocked(readAuthSession).mockReturnValue({ accessToken: 'access-token-001' } as never);
+
+    render(<DonationProjectDetailPage />);
+
+    await screen.findByText('Quỹ hỗ trợ khẩn cấp');
+    vi.mocked(fetchApi).mockReset();
+    vi.mocked(fetchApi).mockRejectedValue({
+      message: 'Không thể kết nối blockchain để đọc số dư Smart Account. Vui lòng thử lại sau.',
+      errorCode: 'BLOCKCHAIN_UNAVAILABLE'
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /quyên góp công khai/i }));
+
+    await screen.findByText(/Không thể kết nối blockchain để đọc số dư Smart Account/i);
+    expect(screen.getByText(/Số dư Smart Account:/i)).toHaveTextContent('Chưa thể tải số dư');
+  });
+
+  it('chặn số tiền không hợp lệ hoặc vượt số dư trước khi mở xác nhận', async () => {
+    vi.mocked(readAuthSession).mockReturnValue({ accessToken: 'access-token-001' } as never);
+
+    render(<DonationProjectDetailPage />);
+
+    await screen.findByText('Quỹ hỗ trợ khẩn cấp');
+    vi.mocked(fetchApi).mockReset();
+    vi.mocked(fetchApi).mockResolvedValue({ tokenBalance: '100' } as never);
+    fireEvent.click(screen.getByRole('button', { name: /quyên góp công khai/i }));
+    await screen.findByText(/100 token/i);
+
+    const amountInput = screen.getByPlaceholderText(/nhập số token muốn quyên góp/i);
+    const donateButton = screen.getByRole('button', { name: /^quyên góp$/i });
+
+    fireEvent.click(donateButton);
+    expect(screen.getByText(/số nguyên dương hợp lệ/i)).toBeInTheDocument();
+
+    fireEvent.change(amountInput, { target: { value: '10.5' } });
+    fireEvent.click(donateButton);
+    expect(screen.getByText(/số nguyên dương hợp lệ/i)).toBeInTheDocument();
+
+    fireEvent.change(amountInput, { target: { value: '9007199254740992' } });
+    fireEvent.click(donateButton);
+    expect(screen.getByText(/số nguyên dương hợp lệ/i)).toBeInTheDocument();
+
+    fireEvent.change(amountInput, { target: { value: '101' } });
+    fireEvent.click(donateButton);
+    expect(screen.getByText(/vượt quá số dư hiện có/i)).toBeInTheDocument();
+    expect(screen.queryByText(/bạn có chắc chắn xác nhận/i)).not.toBeInTheDocument();
+    expect(executeOneClickDonationRequest).not.toHaveBeenCalled();
+  });
+
+  it('mở popup xác nhận, không submit khi hủy, và gọi one-click donation khi xác nhận', async () => {
+    vi.mocked(readAuthSession).mockReturnValue({ accessToken: 'access-token-001' } as never);
+    vi.mocked(executeOneClickDonationRequest).mockResolvedValue('0xabcdef1234567890');
+
+    render(<DonationProjectDetailPage />);
+
+    await screen.findByText('Quỹ hỗ trợ khẩn cấp');
+    const refreshedResponses = makeProjectFetchResponses();
+    vi.mocked(fetchApi).mockReset();
+    vi.mocked(fetchApi)
+      .mockResolvedValueOnce({ tokenBalance: '100' } as never)
+      .mockResolvedValueOnce(refreshedResponses[0] as never)
+      .mockResolvedValueOnce(refreshedResponses[1] as never)
+      .mockResolvedValueOnce(refreshedResponses[2] as never)
+      .mockResolvedValueOnce({ tokenBalance: '50' } as never);
+    fireEvent.click(screen.getByRole('button', { name: /quyên góp công khai/i }));
+    await screen.findByText(/100 token/i);
+
+    fireEvent.change(screen.getByPlaceholderText(/nhập số token muốn quyên góp/i), { target: { value: '50' } });
+    fireEvent.click(screen.getByRole('button', { name: /^quyên góp$/i }));
+
+    await screen.findByRole('heading', { name: /xác nhận quyên góp/i });
+    expect(screen.getByText(/^50 token$/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /^Hủy$/i }));
+    expect(executeOneClickDonationRequest).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: /^quyên góp$/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /^Xác nhận$/i }));
+
+    await waitFor(() => {
+      expect(executeOneClickDonationRequest).toHaveBeenCalledWith('access-token-001', 'project-001', 50, false);
+    });
+    await screen.findByRole('heading', { name: /quyên góp thành công/i });
+    expect(confetti).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/Tx: 0xabcdef/i)).toBeInTheDocument();
+  });
+
+  it('hiển thị lỗi one-click donation mà không bắn pháo hoa hoặc mở popup thành công', async () => {
+    vi.mocked(readAuthSession).mockReturnValue({ accessToken: 'access-token-001' } as never);
+    vi.mocked(executeOneClickDonationRequest).mockRejectedValue(new Error('Relay unavailable'));
+
+    render(<DonationProjectDetailPage />);
+
+    await screen.findByText('Quỹ hỗ trợ khẩn cấp');
+    vi.mocked(fetchApi).mockReset();
+    vi.mocked(fetchApi).mockResolvedValue({ tokenBalance: '100' } as never);
+    fireEvent.click(screen.getByRole('button', { name: /quyên góp công khai/i }));
+    await screen.findByText(/100 token/i);
+
+    fireEvent.change(screen.getByPlaceholderText(/nhập số token muốn quyên góp/i), { target: { value: '50' } });
+    fireEvent.click(screen.getByRole('button', { name: /^quyên góp$/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /^Xác nhận$/i }));
+
+    await screen.findByText('Relay unavailable');
+    expect(confetti).not.toHaveBeenCalled();
+    expect(screen.queryByRole('heading', { name: /quyên góp thành công/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^quyên góp$/i })).not.toBeDisabled();
   });
 
   it('khởi tạo PayOS cho quyên góp ẩn danh ở mức tối đa', async () => {

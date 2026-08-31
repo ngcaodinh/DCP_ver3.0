@@ -165,9 +165,9 @@ function normalizeProjectIdToBigInt(projectId: string): bigint {
 
 /** Hàm gửi donation one-click bằng ZeroDev. Mục đích: backend batch approve + donate để frontend không cần popup MetaMask. */
 export async function executeOneClickDonation(authenticatedUserId: string, projectId: string, amount: number, isAnonymous: boolean) {
-  const normalizedAmount = Math.floor(Number(amount));
-  if (!Number.isFinite(normalizedAmount) || normalizedAmount <= 0) {
-    throw new ApplicationError('Số token quyên góp phải lớn hơn 0.', 400, 'VALIDATION_ERROR');
+  const normalizedAmount = Number(amount);
+  if (!Number.isSafeInteger(normalizedAmount) || normalizedAmount <= 0) {
+    throw new ApplicationError('Số token quyên góp phải là số nguyên dương hợp lệ.', 400, 'VALIDATION_ERROR');
   }
 
   const authenticatedUser = await findUserById(authenticatedUserId.trim());
@@ -187,7 +187,36 @@ export async function executeOneClickDonation(authenticatedUserId: string, proje
     throw new ApplicationError('Thiếu cấu hình DONATION_RANKING_CONTRACT_ADDRESS.', 500, 'INTERNAL_ERROR');
   }
 
-  const paymasterEnabledKernelClient = await createKernelClientFromEncryptedOwnerKey(authenticatedUser.smartAccountOwnerEncryptedPrivateKey);
+  let zeroDevConfig: ReturnType<typeof getZeroDevConfig>;
+  try {
+    zeroDevConfig = getZeroDevConfig();
+  } catch (error) {
+    logger.error('Không thể tải cấu hình ZeroDev cho one-click donation.', {
+      authenticatedUserId,
+      projectId,
+      errorName: error instanceof Error ? error.name : 'UnknownError',
+      errorMessage: error instanceof Error ? error.message : 'Unknown error'
+    });
+    throw new ApplicationError('Dịch vụ blockchain hiện không khả dụng. Vui lòng thử lại sau.', 503, 'BLOCKCHAIN_UNAVAILABLE');
+  }
+
+  let paymasterEnabledKernelClient: Awaited<ReturnType<typeof createKernelClientFromEncryptedOwnerKey>>;
+  try {
+    paymasterEnabledKernelClient = await createKernelClientFromEncryptedOwnerKey(authenticatedUser.smartAccountOwnerEncryptedPrivateKey);
+  } catch (error) {
+    if (error instanceof ApplicationError) {
+      throw error;
+    }
+
+    logger.error('Không thể khởi tạo Smart Account cho one-click donation.', {
+      authenticatedUserId,
+      projectId,
+      errorName: error instanceof Error ? error.name : 'UnknownError',
+      errorMessage: error instanceof Error ? error.message : 'Unknown error'
+    });
+    throw new ApplicationError('Không thể khởi tạo Smart Account để ký giao dịch. Vui lòng thử lại sau.', 503, 'BLOCKCHAIN_UNAVAILABLE');
+  }
+
   const paymasterEnabledKernelClientAccount = (paymasterEnabledKernelClient as { account?: { address?: `0x${string}` } }).account;
   if (!paymasterEnabledKernelClientAccount?.address) {
     throw new ApplicationError('Không thể lấy smart account address để gửi giao dịch.', 500, 'INTERNAL_ERROR');
@@ -203,23 +232,52 @@ export async function executeOneClickDonation(authenticatedUserId: string, proje
   // Ghi chú logic phức tạp: nếu ví trong hồ sơ user lệch với smart account dựng từ owner key,
   // hệ thống tự đồng bộ lại DB ngay tại thời điểm donation để xử lý dứt điểm dữ liệu user cũ.
   if (normalizedAuthenticatedWalletAddress && normalizedAuthenticatedWalletAddress !== normalizedKernelAccountAddress) {
-    await updateUser({
-      ...authenticatedUser,
-      walletAddress: normalizedKernelAccountAddress
-    });
+    try {
+      await updateUser({
+        ...authenticatedUser,
+        walletAddress: normalizedKernelAccountAddress
+      });
 
-    logger.warn('Đã tự động đồng bộ walletAddress do phát hiện SMART_ACCOUNT_MISMATCH.', {
-      correlationId: authenticatedUser.correlationId,
-      walletAddress: normalizedKernelAccountAddress,
-      smartAccountAddress: normalizedKernelAccountAddress
-    });
+      logger.warn('Đã tự động đồng bộ walletAddress do phát hiện SMART_ACCOUNT_MISMATCH.', {
+        correlationId: authenticatedUser.correlationId,
+        walletAddress: normalizedKernelAccountAddress,
+        smartAccountAddress: normalizedKernelAccountAddress
+      });
+    } catch (error) {
+      logger.warn('Không thể đồng bộ walletAddress trước khi gửi one-click donation; tiếp tục dùng Smart Account đã xác thực.', {
+        authenticatedUserId,
+        projectId,
+        errorName: error instanceof Error ? error.name : 'UnknownError',
+        errorMessage: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
   }
 
-  const readOnlyProvider = new ethers.JsonRpcProvider(getZeroDevConfig().rpcUrl);
-  const donationContract = new ethers.Contract(donationContractAddress, donationContractAbi, readOnlyProvider);
-  const charityTokenAddress = (await donationContract.charityToken()) as `0x${string}`;
-  const charityTokenContract = new ethers.Contract(charityTokenAddress, erc20Abi, readOnlyProvider);
-  const currentTokenBalance = (await charityTokenContract.balanceOf(paymasterEnabledKernelClientAccount.address)) as bigint;
+  let charityTokenAddress: `0x${string}`;
+  let donationContract: ethers.Contract;
+  let charityTokenContract: ethers.Contract;
+  let currentTokenBalance: bigint;
+  let currentAllowance: bigint;
+  try {
+    const readOnlyProvider = new ethers.JsonRpcProvider(zeroDevConfig.rpcUrl);
+    donationContract = new ethers.Contract(donationContractAddress, donationContractAbi, readOnlyProvider);
+    charityTokenAddress = (await donationContract.charityToken()) as `0x${string}`;
+    charityTokenContract = new ethers.Contract(charityTokenAddress, erc20Abi, readOnlyProvider);
+    currentTokenBalance = (await charityTokenContract.balanceOf(paymasterEnabledKernelClientAccount.address)) as bigint;
+    currentAllowance = (await charityTokenContract.allowance(paymasterEnabledKernelClientAccount.address, donationContractAddress)) as bigint;
+  } catch (error) {
+    if (error instanceof ApplicationError) {
+      throw error;
+    }
+
+    logger.error('Không thể đọc trạng thái token trước khi gửi one-click donation.', {
+      authenticatedUserId,
+      projectId,
+      errorName: error instanceof Error ? error.name : 'UnknownError',
+      errorMessage: error instanceof Error ? error.message : 'Unknown error'
+    });
+    throw new ApplicationError('Không thể kiểm tra số dư Smart Account trên blockchain. Vui lòng thử lại sau.', 502, 'BLOCKCHAIN_UNAVAILABLE');
+  }
 
   if (currentTokenBalance < donationAmountAsBigInt) {
     throw new ApplicationError(
@@ -228,8 +286,6 @@ export async function executeOneClickDonation(authenticatedUserId: string, proje
       'INSUFFICIENT_TOKEN_BALANCE'
     );
   }
-
-  const currentAllowance = (await charityTokenContract.allowance(paymasterEnabledKernelClientAccount.address, donationContractAddress)) as bigint;
 
   const callList: Array<{ to: `0x${string}`; data: `0x${string}`; value: bigint }> = [];
 
@@ -251,7 +307,7 @@ export async function executeOneClickDonation(authenticatedUserId: string, proje
   // Vì vậy khi paymaster policy không khớp, trả lỗi nghiệp vụ rõ ràng thay vì fallback sang self-sponsored.
   const sendTransactionPayload = {
     calls: callList,
-    entryPointAddress: getZeroDevConfig().entryPointAddress
+    entryPointAddress: zeroDevConfig.entryPointAddress
   };
 
   let transactionHash: string;
@@ -278,16 +334,36 @@ export async function executeOneClickDonation(authenticatedUserId: string, proje
       );
     }
 
-    throw paymasterError;
+    if (paymasterError instanceof ApplicationError) {
+      throw paymasterError;
+    }
+
+    logger.error('Không thể gửi one-click donation qua bundler/paymaster.', {
+      authenticatedUserId,
+      projectId,
+      donationContractAddress,
+      smartAccountAddress: paymasterEnabledKernelClientAccount.address,
+      errorName: paymasterError instanceof Error ? paymasterError.name : 'UnknownError',
+      errorMessage: paymasterErrorMessage || 'Unknown error'
+    });
+    throw new ApplicationError('Không thể gửi giao dịch one-click donation. Vui lòng thử lại sau.', 502, 'TRANSACTION_FAILED');
   }
 
   logger.info('One-click donation transaction submitted.', { transactionHash });
-  await createSubmittedDonationNotification(
+  void createSubmittedDonationNotification(
     projectIdAsBigInt.toString(),
     Number(donationAmountAsBigInt),
     transactionHash,
     paymasterEnabledKernelClientAccount.address.toLowerCase()
-  );
+  ).catch((error) => {
+    logger.warn('Không thể tạo thông báo sau khi one-click donation đã được gửi.', {
+      authenticatedUserId,
+      projectId,
+      transactionHash,
+      errorName: error instanceof Error ? error.name : 'UnknownError',
+      errorMessage: error instanceof Error ? error.message : 'Unknown error'
+    });
+  });
 
   return {
     transactionHash,

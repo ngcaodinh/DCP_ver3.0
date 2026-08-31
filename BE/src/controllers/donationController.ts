@@ -1,4 +1,4 @@
-import { Response } from 'express';
+import { Request, Response } from 'express';
 import { getLogger } from '../config/logger';
 import { AuthenticatedRequest } from '../middleware/authenticationMiddleware';
 import {
@@ -14,6 +14,10 @@ import { getPublicLiveFeedTransactionList } from '../services/liveFeedService';
 import { sendErrorFromUnknown, sendErrorResponse, sendSuccessResponse } from '../utils/apiResponse';
 
 const logger = getLogger();
+
+function getCorrelationId(request: Request): string | undefined {
+  return request.headers['x-request-id']?.toString();
+}
 
 /** Hàm tự ghi nhận donation chạy nền sau khi đã submit on-chain. Mục đích: giảm phụ thuộc FE gọi /donations/record và tránh mất lịch sử. */
 function triggerAutoRecordDonationInBackground(authenticatedUserId: string, projectId: string, transactionHash: string, isAnonymous: boolean): void {
@@ -143,7 +147,7 @@ export async function handleStreamPublicLiveFeed(request: AuthenticatedRequest, 
 /** Hàm xử lý request donation one-click. Mục đích: backend gửi batch approve + donate để frontend thao tác kiểu web2 click. */
 export async function handleOneClickDonation(request: AuthenticatedRequest, response: Response): Promise<void> {
   if (!request.authenticatedUser) {
-    sendErrorResponse(response, 401, 'Bạn chưa đăng nhập hoặc phiên đăng nhập không hợp lệ.', 'UNAUTHENTICATED');
+    sendErrorResponse(response, 401, 'Bạn chưa đăng nhập hoặc phiên đăng nhập không hợp lệ.', 'UNAUTHENTICATED', [], getCorrelationId(request));
     return;
   }
 
@@ -164,7 +168,7 @@ export async function handleOneClickDonation(request: AuthenticatedRequest, resp
       normalizedAnonymousFlag
     );
 
-    sendSuccessResponse(response, 200, 'Gửi giao dịch one-click donation thành công.', oneClickDonationResult);
+    sendSuccessResponse(response, 200, 'Gửi giao dịch one-click donation thành công.', oneClickDonationResult, getCorrelationId(request));
 
     // Ghi chú logic phức tạp: ghi nhận chạy nền để đảm bảo lịch sử vẫn được lưu ngay cả khi FE không kịp gọi /donations/record.
     triggerAutoRecordDonationInBackground(
@@ -174,8 +178,14 @@ export async function handleOneClickDonation(request: AuthenticatedRequest, resp
       normalizedAnonymousFlag
     );
   } catch (error) {
-    logger.error('Gửi giao dịch one-click donation thất bại.', { errorMessage: (error as Error).message });
-    sendErrorFromUnknown(response, error, 'Không thể gửi giao dịch one-click donation.');
+    logger.error('Gửi giao dịch one-click donation thất bại.', {
+      authenticatedUserId: request.authenticatedUser.userId,
+      projectId: String(projectId || '').trim(),
+      isAnonymous: Boolean(isAnonymous),
+      errorName: error instanceof Error ? error.name : 'UnknownError',
+      errorMessage: error instanceof Error ? error.message : 'Unknown error'
+    });
+    sendErrorFromUnknown(response, error, 'Không thể gửi giao dịch one-click donation.', getCorrelationId(request));
   }
 }
 

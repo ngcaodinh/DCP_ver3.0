@@ -11,6 +11,7 @@ import {
 import { getZeroDevConfig } from '../config/zeroDev';
 import { getLogger } from '../config/logger';
 import { AppError } from '../utils/appError';
+import { ApplicationError } from '../utils/applicationError';
 
 const logger = getLogger();
 const zeroDevConfig = getZeroDevConfig();
@@ -38,12 +39,12 @@ function getOwnerEncryptionKey(): Buffer {
 
   const encryptionSecret = String(process.env.SMART_ACCOUNT_ENCRYPTION_KEY || '').trim();
   if (!encryptionSecret) {
-    throw new AppError('Thiếu SMART_ACCOUNT_ENCRYPTION_KEY để bảo vệ owner private key.', 500);
+    throw new ApplicationError('Dịch vụ Smart Account chưa sẵn sàng. Vui lòng thử lại sau.', 503, 'BLOCKCHAIN_UNAVAILABLE');
   }
 
   const normalizedSecret = encryptionSecret.startsWith('0x') ? encryptionSecret.slice(2) : encryptionSecret;
   if (!/^[a-fA-F0-9]{64}$/.test(normalizedSecret)) {
-    throw new AppError('SMART_ACCOUNT_ENCRYPTION_KEY phải là chuỗi hex 32 bytes.', 500);
+    throw new ApplicationError('Dịch vụ Smart Account chưa sẵn sàng. Vui lòng thử lại sau.', 503, 'BLOCKCHAIN_UNAVAILABLE');
   }
 
   cachedEncryptionKey = Buffer.from(normalizedSecret, 'hex');
@@ -75,14 +76,30 @@ export function encryptOwnerPrivateKey(ownerPrivateKey: string): string {
 export function decryptOwnerPrivateKey(encryptedOwnerPrivateKey: string): `0x${string}` {
   const [ivHexValue, encryptedHexValue, authTagHexValue] = String(encryptedOwnerPrivateKey || '').split(':');
   if (!ivHexValue || !encryptedHexValue || !authTagHexValue) {
-    throw new AppError('Định dạng encrypted owner private key không hợp lệ.', 400);
+    throw new ApplicationError(
+      'Không thể khôi phục khóa ký Smart Account. Vui lòng liên hệ hỗ trợ để được kiểm tra tài khoản.',
+      409,
+      'DECRYPTION_ERROR'
+    );
   }
 
-  const encryptionKey = getOwnerEncryptionKey();
-  const decipher = crypto.createDecipheriv('aes-256-gcm', encryptionKey, Buffer.from(ivHexValue, 'hex'));
-  decipher.setAuthTag(Buffer.from(authTagHexValue, 'hex'));
-  const decryptedText = Buffer.concat([decipher.update(Buffer.from(encryptedHexValue, 'hex')), decipher.final()]).toString('utf8');
-  return decryptedText as `0x${string}`;
+  try {
+    const encryptionKey = getOwnerEncryptionKey();
+    const decipher = crypto.createDecipheriv('aes-256-gcm', encryptionKey, Buffer.from(ivHexValue, 'hex'));
+    decipher.setAuthTag(Buffer.from(authTagHexValue, 'hex'));
+    const decryptedText = Buffer.concat([decipher.update(Buffer.from(encryptedHexValue, 'hex')), decipher.final()]).toString('utf8');
+    return decryptedText as `0x${string}`;
+  } catch (error) {
+    if (error instanceof ApplicationError) {
+      throw error;
+    }
+
+    throw new ApplicationError(
+      'Không thể khôi phục khóa ký Smart Account. Vui lòng liên hệ hỗ trợ để được kiểm tra tài khoản.',
+      409,
+      'DECRYPTION_ERROR'
+    );
+  }
 }
 
 /**

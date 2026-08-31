@@ -9,10 +9,34 @@ import {
 import { findDepositTransactionByOrderCode, listRecentDepositTransactionsByUserId } from '../models/depositModel';
 import { findUserById } from '../models/authModel';
 import { getLogger } from '../config/logger';
+import { getBlockchainRpcUrl } from '../config/blockchainRpc';
+import { ApplicationError } from '../utils/applicationError';
+import { sanitizeProviderError } from '../utils/sanitizeProviderError';
 
 const charityTokenAbi = ['function balanceOf(address account) view returns (uint256)'];
 
 const logger = getLogger();
+
+/**
+ * Hàm rút trích chi tiết lỗi đọc số dư để log có ích nhưng không làm lộ payload RPC.
+ * Mục đích: provider đôi khi không gán `message`; ưu tiên shortMessage/reason/code đã được sanitize.
+ */
+function getSafeTokenBalanceErrorDetail(error: unknown): string {
+  if (error instanceof Error && error.message.trim()) {
+    return sanitizeProviderError(error.message) || 'UNKNOWN_ERROR';
+  }
+
+  if (typeof error === 'object' && error !== null) {
+    const providerError = error as { shortMessage?: unknown; reason?: unknown; code?: unknown };
+    const errorDetail = [providerError.shortMessage, providerError.reason, providerError.code]
+      .find((value) => typeof value === 'string' && value.trim().length > 0);
+    if (typeof errorDetail === 'string') {
+      return sanitizeProviderError(errorDetail) || 'UNKNOWN_ERROR';
+    }
+  }
+
+  return 'UNKNOWN_ERROR';
+}
 
 /**
  * Hàm xử lý tạo payment link cho nghiệp vụ deposit.
@@ -204,18 +228,30 @@ export async function handleGetDepositStatus(request: Request, response: Respons
  * Mục đích: giữ nguyên độ chính xác uint256 trước khi từng endpoint quyết định định dạng response phù hợp.
  */
 async function getOnChainTokenBalance(walletAddress: string): Promise<bigint> {
-  const blockchainRpcUrl = String(process.env.BLOCKCHAIN_RPC_URL || '').trim();
+  const blockchainRpcUrl = getBlockchainRpcUrl();
   const charityTokenContractAddress = String(process.env.CHARITY_TOKEN_CONTRACT_ADDRESS || '').trim();
 
-  if (!blockchainRpcUrl || !charityTokenContractAddress || !walletAddress) {
-    return 0n;
+  if (!blockchainRpcUrl) {
+    throw new ApplicationError('Dịch vụ blockchain chưa được cấu hình để đọc số dư. Vui lòng thử lại sau.', 503, 'BLOCKCHAIN_UNAVAILABLE');
+  }
+  if (!ethers.isAddress(charityTokenContractAddress)) {
+    throw new ApplicationError('Cấu hình token DCT không hợp lệ. Vui lòng thử lại sau.', 503, 'BLOCKCHAIN_UNAVAILABLE');
+  }
+  if (!ethers.isAddress(walletAddress)) {
+    throw new ApplicationError('Địa chỉ Smart Account không hợp lệ. Vui lòng đăng nhập lại để hệ thống đồng bộ tài khoản.', 409, 'SMART_ACCOUNT_MISMATCH');
   }
 
-  const readOnlyProvider = new ethers.JsonRpcProvider(blockchainRpcUrl);
-  const charityTokenContract = new ethers.Contract(charityTokenContractAddress, charityTokenAbi, readOnlyProvider);
-  const tokenBalanceAsBigInt = await charityTokenContract.balanceOf(walletAddress) as bigint;
+  try {
+    const readOnlyProvider = new ethers.JsonRpcProvider(blockchainRpcUrl);
+    const charityTokenContract = new ethers.Contract(charityTokenContractAddress, charityTokenAbi, readOnlyProvider);
+    return await charityTokenContract.balanceOf(walletAddress) as bigint;
+  } catch (error) {
+    if (error instanceof ApplicationError) {
+      throw error;
+    }
 
-  return tokenBalanceAsBigInt;
+    throw new ApplicationError('Không thể kết nối blockchain để đọc số dư Smart Account. Vui lòng thử lại sau.', 502, 'BLOCKCHAIN_UNAVAILABLE');
+  }
 }
 
 /**
@@ -288,7 +324,18 @@ export async function handleGetTokenBalance(request: Request, response: Response
 
     response.status(200).json({ tokenBalance: tokenBalanceOnChain.toString() });
   } catch (error) {
-    logger.error('Lấy số dư token thất bại.', { errorMessage: (error as Error).message });
-    response.status(500).json({ message: 'Không thể lấy số dư token.' });
+    const applicationError = error instanceof ApplicationError
+      ? error
+      : new ApplicationError('Không thể tải số dư Smart Account. Vui lòng thử lại sau.', 503, 'BLOCKCHAIN_UNAVAILABLE');
+    logger.error('Lấy số dư token thất bại.', {
+      authenticatedUserId: authenticatedRequest.authenticatedUser.userId,
+      errorCode: applicationError.errorCode,
+      errorName: error instanceof Error ? error.name : 'UnknownError',
+      errorMessage: getSafeTokenBalanceErrorDetail(error)
+    });
+    response.status(applicationError.statusCode).json({
+      message: applicationError.message,
+      errorCode: applicationError.errorCode
+    });
   }
 }
