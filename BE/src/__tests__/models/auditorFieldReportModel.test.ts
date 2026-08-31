@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { AuditorFieldReportMongoModel, findAuditorFieldReportsByProjectIds } from '../../models/auditorFieldReportModel';
+import {
+  AuditorFieldReportMongoModel,
+  countAuditorFieldReportsByProjectIds,
+  findAuditorFieldReportGeofenceMetadataByProjectIds,
+  findAuditorFieldReportsByProjectIds
+} from '../../models/auditorFieldReportModel';
 
 describe('auditor field report batch query', () => {
   afterEach(() => {
@@ -38,5 +43,29 @@ describe('auditor field report batch query', () => {
 
     expect(JSON.stringify(aggregate.mock.calls[0][0])).toContain('$slice');
     expect(JSON.stringify(aggregate.mock.calls[0][0])).toContain('1');
+  });
+
+  it('đếm report bằng aggregate và trả Map theo projectId cho card ACTIVE', async () => {
+    const aggregate = vi.spyOn(AuditorFieldReportMongoModel, 'aggregate')
+      .mockReturnValue({ exec: async () => [{ _id: 'project-1', count: 2 }] } as never);
+
+    await expect(countAuditorFieldReportsByProjectIds([' project-1 ', 'project-1'])).resolves.toEqual(new Map([['project-1', 2]]));
+
+    expect(aggregate).toHaveBeenCalledWith([
+      { $match: { projectId: { $in: ['project-1'] } } },
+      { $group: { _id: '$projectId', count: { $sum: 1 } } }
+    ]);
+  });
+
+  it('chỉ projection metadata GPS cần thiết khi tính mức lệch card ACTIVE', async () => {
+    const find = vi.spyOn(AuditorFieldReportMongoModel, 'find')
+      .mockReturnValue({ lean: () => ({ exec: async () => [] }) } as never);
+
+    await findAuditorFieldReportGeofenceMetadataByProjectIds(['project-1']);
+
+    expect(find).toHaveBeenCalledWith(
+      { projectId: { $in: ['project-1'] } },
+      expect.objectContaining({ _id: 0, projectId: 1, 'photos.gps': 1, 'photos.accuracyMeters': 1 })
+    );
   });
 });

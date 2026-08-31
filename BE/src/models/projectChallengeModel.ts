@@ -30,6 +30,9 @@ export interface ProjectChallengeRecord {
   updatedAt: Date;
 }
 
+/** Dấu liên kết tối thiểu cho queue portal để kiểm tra challenge gốc mà không tải ảnh/lý do. */
+export type ProjectChallengeReference = Pick<ProjectChallengeRecord, 'challengeId' | 'projectId' | 'round'>;
+
 const gpsSchema = new Schema({ latitude: { type: Number, required: true, min: -90, max: 90 }, longitude: { type: Number, required: true, min: -180, max: 180 } }, { _id: false });
 const evidencePhotoSchema = new Schema<ProjectChallengeEvidencePhoto>({
   cid: { type: String, required: true }, contentSha256: { type: String, required: true }, fileName: { type: String, required: true }, mimeType: { type: String, enum: ['image/jpeg'], required: true },
@@ -61,6 +64,38 @@ export async function createProjectChallenge(payload: Omit<ProjectChallengeRecor
 /** Lấy các khiếu nại của một vòng niêm yết theo thứ tự mới nhất. */
 export async function findProjectChallenges(projectId: string, round: number): Promise<ProjectChallengeRecord[]> {
   return ProjectChallengeMongoModel.find({ projectId, round }).sort({ submittedAt: -1 }).lean<ProjectChallengeRecord[]>().exec();
+}
+
+/** Lấy khiếu nại theo đúng cặp project/vòng niêm yết để queue không lẫn dữ liệu vòng cũ. */
+export async function findProjectChallengesByProjectRounds(
+  projectRounds: Array<{ projectId: string; round: number }>
+): Promise<ProjectChallengeRecord[]> {
+  const normalizedPairs = [...new Map(projectRounds
+    .map(item => ({ projectId: String(item.projectId || '').trim(), round: Number(item.round) }))
+    .filter(item => item.projectId && Number.isInteger(item.round) && item.round >= 1)
+    .map(item => [`${item.projectId}:${item.round}`, item] as const)).values()];
+  if (!normalizedPairs.length) return [];
+  return ProjectChallengeMongoModel.find({ $or: normalizedPairs })
+    .sort({ projectId: 1, round: 1, submittedAt: -1 })
+    .lean<ProjectChallengeRecord[]>()
+    .exec();
+}
+
+/** Lấy ID khiếu nại của đúng cặp project/vòng để card portal fail-closed theo hồ sơ gốc. */
+export async function findProjectChallengeReferencesByProjectRounds(
+  projectRounds: Array<{ projectId: string; round: number }>
+): Promise<ProjectChallengeReference[]> {
+  const normalizedPairs = [...new Map(projectRounds
+    .map(item => ({ projectId: String(item.projectId || '').trim(), round: Number(item.round) }))
+    .filter(item => item.projectId && Number.isInteger(item.round) && item.round >= 1)
+    .map(item => [`${item.projectId}:${item.round}`, item] as const)).values()];
+  if (!normalizedPairs.length) return [];
+  return ProjectChallengeMongoModel.find(
+    { $or: normalizedPairs },
+    { _id: 0, challengeId: 1, projectId: 1, round: 1 }
+  )
+    .lean<ProjectChallengeReference[]>()
+    .exec();
 }
 
 /** Kiểm tra auditor đã khiếu nại trong vòng niêm yết hiện tại hay chưa. */

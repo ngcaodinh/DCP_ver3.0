@@ -58,12 +58,21 @@ export function evaluateVerdict(record: ProjectArbitrationRecord): ArbitrationVe
   return record.committeeSnapshot.length > 0 && record.votes.length >= record.committeeSnapshot.length ? 'NO_CONSENSUS' : null;
 }
 
+/** Khóa ký và ghi phiếu nếu challenge gốc của vụ xét xử không còn tồn tại ở đúng vòng. */
+async function assertArbitrationChallengeIntegrity(record: Pick<ProjectArbitrationRecord, 'projectId' | 'round' | 'openedByChallengeId'>): Promise<void> {
+  const challenges = await findProjectChallengesFromRepository(record.projectId, record.round) ?? [];
+  if (!challenges.some(challenge => challenge.challengeId === record.openedByChallengeId)) {
+    throw new ApplicationError('Vụ xét xử thiếu khiếu nại gốc của vòng hiện tại nên không thể biểu quyết.', 409, 'ARBITRATION_INTEGRITY_ERROR');
+  }
+}
+
 /** Ghi một phiếu nguyên tử, sau đó áp dụng phán quyết nếu đủ điều kiện. */
 export async function prepareArbitrationVoteSignature(voterUserId: string, input: { arbitrationId: string; decision: 'UPHOLD_PROJECT' | 'REJECT_PROJECT'; reason: string }): Promise<CommitteeVoteSignaturePayload | null> {
   const current = await findProjectArbitrationByIdFromRepository(input.arbitrationId);
   if (!current) throw new ApplicationError('Không tìm thấy vụ xét xử.', 404, 'NOT_FOUND');
   if (current.status !== 'PENDING' || current.deadlineAt <= new Date()) throw new ApplicationError('Vụ xét xử không còn hiệu lực.', 409, 'INVALID_STATUS_TRANSITION');
   if (!current.committeeSnapshot.some(member => member.userId === voterUserId)) throw new ApplicationError('Bạn không thuộc snapshot ủy ban của vụ việc này.', 403, 'NOT_COMMITTEE_MEMBER');
+  await assertArbitrationChallengeIntegrity(current);
   return prepareCommitteeVoteSignature('ARBITRATION', input.arbitrationId, input.decision, voterUserId, input.reason, current.deadlineAt);
 }
 
@@ -76,13 +85,14 @@ export async function voteOnArbitration(voterUserId: string, input: { arbitratio
   if (current.deadlineAt <= now) throw new ApplicationError('Vụ xét xử đã hết hạn.', 409, 'REQUEST_EXPIRED');
   const snapshotMember = current.committeeSnapshot.find(member => member.userId === voterUserId);
   if (!snapshotMember) throw new ApplicationError('Bạn không thuộc snapshot ủy ban của vụ việc này.', 403, 'NOT_COMMITTEE_MEMBER');
+  await assertArbitrationChallengeIntegrity(current);
   if (input.decision === 'REJECT_PROJECT') {
     const [project, donationSummary] = await Promise.all([
       findProjectById(current.projectId),
       aggregateDonationSummaryByProjectId(current.projectId)
     ]);
-    // Phiếu hủy ACTIVE có tiền quyên góp chỉ hợp lệ sau khi người bỏ phiếu xác nhận hậu quả khóa tiền vĩnh viễn.
-    if (project?.status === 'ACTIVE' && donationSummary.totalAmount > 0 && input.donationLockRiskAcknowledged !== true) {
+    // Arbitration có thể đang DISPUTED hoặc ACTIVE; mọi dự án có donation INDEXED đều phải xác nhận trước khi gửi phiếu hủy.
+    if (project && donationSummary.totalAmount > 0 && input.donationLockRiskAcknowledged !== true) {
       throw new ApplicationError('Bạn phải xác nhận rủi ro khóa vĩnh viễn tiền quyên góp trước khi bỏ phiếu hủy dự án.', 409, 'DONATION_LOCK_RISK_NOT_ACKNOWLEDGED');
     }
   }

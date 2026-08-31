@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 const { mockFetchApi } = vi.hoisted(() => ({ mockFetchApi: vi.fn() }));
 
@@ -24,6 +25,12 @@ vi.mock('@/app/components/oracle/GeofenceMapLazy', () => ({ GeofenceMapLazy: () 
 import { ActiveProjectsPanel } from '@/app/components/governance/ActiveProjectsPanel';
 import { DisbursementVotingPanel } from '@/app/components/governance/DisbursementVotingPanel';
 
+/** Bọc panel ACTIVE bằng QueryClient để kiểm thử server state không chia sẻ giữa các case. */
+function renderActiveProjectsPanel(): ReturnType<typeof render> {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(<QueryClientProvider client={queryClient}><ActiveProjectsPanel /></QueryClientProvider>);
+}
+
 describe('ExecutiveCommitteePanels', () => {
   beforeEach(() => {
     mockFetchApi.mockReset();
@@ -32,7 +39,7 @@ describe('ExecutiveCommitteePanels', () => {
   it('hiển thị empty state thay vì coi danh sách dự án đang tải là lỗi', async () => {
     mockFetchApi.mockResolvedValueOnce({ data: { items: [], nextCursor: null } });
 
-    render(<ActiveProjectsPanel />);
+    renderActiveProjectsPanel();
 
     expect(await screen.findByText('Chưa có dự án cần theo dõi')).toBeInTheDocument();
   });
@@ -40,7 +47,7 @@ describe('ExecutiveCommitteePanels', () => {
   it('thông báo lỗi tải danh sách dự án cho người dùng', async () => {
     mockFetchApi.mockRejectedValueOnce(new Error('network failure'));
 
-    render(<ActiveProjectsPanel />);
+    renderActiveProjectsPanel();
 
     const status = await screen.findByRole('status');
     expect(status).toHaveTextContent('Không thể tải dữ liệu.');
@@ -51,7 +58,7 @@ describe('ExecutiveCommitteePanels', () => {
   it('cho phép tải lại danh sách sau khi backend trở lại', async () => {
     mockFetchApi.mockRejectedValueOnce(new Error('network failure'));
 
-    render(<ActiveProjectsPanel />);
+    renderActiveProjectsPanel();
 
     const retryButton = await screen.findByRole('button', { name: 'Thử lại' });
     mockFetchApi.mockResolvedValueOnce({ data: { items: [], nextCursor: null } });
@@ -127,7 +134,7 @@ describe('ExecutiveCommitteePanels', () => {
       return url.endsWith('/project-one') ? firstDetail.promise : secondDetail.promise;
     });
 
-    render(<ActiveProjectsPanel />);
+    renderActiveProjectsPanel();
 
     fireEvent.click(await screen.findByRole('button', { name: /Dự án Một/i }));
     fireEvent.click(screen.getByRole('button', { name: /Dự án Hai/i }));

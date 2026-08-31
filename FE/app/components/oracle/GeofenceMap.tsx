@@ -62,6 +62,8 @@ export type GeofenceMarker = {
   evidenceThumbnailUrl?: string;
   /** Khoảng cách Haversine (m) do Oracle tính; null khi NO_GPS. */
   distanceMeters?: number | null;
+  /** Khoảng cách từ ảnh đến tâm vị trí dự án, tách biệt với khoảng cách tới mép geofence. */
+  distanceToProjectCenterMeters?: number | null;
   /** Thời điểm ảnh được xử lý/verify (ISO 8601). */
   capturedAt?: string;
   /** Thông điệp verdict do Oracle sinh ra (hiển thị trong popup). */
@@ -263,8 +265,12 @@ function EvidencePopup({ marker }: { marker: GeofenceMarker }) {
         <p className="mt-1.5 text-slate-500">{formatCoordinate(marker.coordinate)}</p>
       )}
 
-      {typeof marker.distanceMeters === 'number' && (
-        <p className="mt-0.5 text-slate-500">Khoảng cách: {marker.distanceMeters.toFixed(1)} m</p>
+      {typeof marker.distanceMeters === 'number' && marker.distanceMeters > 0 && (
+        <p className="mt-0.5 text-slate-500">Lệch ranh giới dự án: {marker.distanceMeters.toFixed(1)} m</p>
+      )}
+
+      {typeof marker.distanceToProjectCenterMeters === 'number' && (
+        <p className="mt-0.5 text-slate-500">Cách tâm vị trí dự án: {marker.distanceToProjectCenterMeters.toFixed(1)} m</p>
       )}
 
       {marker.capturedAt && (

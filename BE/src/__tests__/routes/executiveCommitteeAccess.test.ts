@@ -55,6 +55,8 @@ vi.mock('../../controllers/projectGovernanceController', () => ({
   handleGetMyAuditorListingRecords: createOkHandler(),
   handleGetExecutiveActiveProjectDetail: createOkHandler(),
   handleGetExecutiveActiveProjects: createOkHandler(),
+  handleGetExecutivePendingPublicationProjectDetail: createOkHandler(),
+  handleGetExecutivePendingPublicationProjects: createOkHandler(),
   handleGetExecutiveCaseDetail: createOkHandler(),
   handleGetExecutiveCases: createOkHandler(),
   handlePrepareArbitrationVoteSignature: createOkHandler(),
@@ -163,6 +165,7 @@ describe('executive committee route access', () => {
 
   it.each([
     ['GET', '/api/project-governance/executive/active-projects'],
+    ['GET', '/api/project-governance/executive/pending-activation-projects'],
     ['GET', '/api/project-governance/executive/cases'],
     ['POST', '/api/project-governance/executive/signing-payload'],
     ['GET', '/api/disbursement/executive/pending']
@@ -173,6 +176,13 @@ describe('executive committee route access', () => {
       .send({});
 
     expect(response.status).toBe(200);
+  });
+
+  it.each(['donor', 'organizations', 'auditor', 'admin', 'regulatory'])('từ chối %s khỏi hàng đợi dự án chờ công bố', async role => {
+    await request(createTestApp())
+      .get('/api/project-governance/executive/pending-activation-projects')
+      .set('x-role', role)
+      .expect(403);
   });
 
   it.each([

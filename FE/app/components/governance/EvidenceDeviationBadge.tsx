@@ -12,7 +12,9 @@ export function EvidenceDeviationBadge(props: { deviationLevel: DeviationLevel; 
     NO_GEOFENCE: { label: 'Chưa thiết lập vùng địa lý', className: 'border-slate-200 bg-slate-50 text-slate-700' }
   };
   const current = metadata[props.deviationLevel];
-  const distanceText = props.distanceMeters === null ? '' : ' · ' + Math.round(props.distanceMeters) + ' m';
+  const distanceText = props.distanceMeters !== null && ['WITHIN_ACCURACY', 'DEVIATED', 'CRITICAL'].includes(props.deviationLevel)
+    ? ' · lệch ranh giới ' + Math.round(props.distanceMeters) + ' m'
+    : '';
   const accuracyText = props.deviationLevel === 'WITHIN_ACCURACY' ? ' (±' + Math.round(props.accuracyMeters) + ' m)' : '';
   return <span className={'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold ' + current.className}><span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-current" />{current.label}{distanceText}{accuracyText}</span>;
 }

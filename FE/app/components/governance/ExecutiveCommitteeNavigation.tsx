@@ -1,6 +1,6 @@
 import type { ReactElement } from 'react';
 
-export type ExecutiveCommitteeTab = 'ACTIVE_PROJECTS' | 'DISBURSEMENT' | 'PROJECT_VERDICT';
+export type ExecutiveCommitteeTab = 'ACTIVE_PROJECTS' | 'PENDING_PUBLICATION' | 'DISBURSEMENT' | 'PROJECT_VERDICT';
 export type ExecutiveViewerRole = 'CHAIR' | 'MEMBER';
 
 interface ExecutiveCommitteeNavigationProps {
@@ -19,6 +19,7 @@ interface ExecutiveNavigationItem {
 
 const executiveNavigationItemList: ExecutiveNavigationItem[] = [
   { id: 'ACTIVE_PROJECTS', label: 'Dự án đang hoạt động', iconPath: 'M3 12h18M3 6h18M3 18h18' },
+  { id: 'PENDING_PUBLICATION', label: 'Dự án chờ công bố', iconPath: 'M12 2a8 8 0 1 0 8 8H12V2Zm0 12v4m0 0h4m-4 0H8' },
   { id: 'DISBURSEMENT', label: 'Duyệt giải ngân', iconPath: 'M12 3v18m-6-6 6 6 6-6M5 5h14v4H5z' },
   { id: 'PROJECT_VERDICT', label: 'Phán quyết dự án bị tố', iconPath: 'M12 3 4 7v5c0 5 3.4 8.5 8 9 4.6-.5 8-4 8-9V7l-8-4Zm-3.5 9 2.3 2.3 4.8-4.8' }
 ];

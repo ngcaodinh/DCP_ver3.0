@@ -120,6 +120,7 @@ describe('voteOnArbitration - CAS conflict handling', () => {
     vi.clearAllMocks();
     mocks.findProject.mockResolvedValue({ status: 'DISPUTED' });
     mocks.aggregateDonationSummary.mockResolvedValue({ totalAmount: 0, donationCount: 0 });
+    mocks.findChallenges.mockResolvedValue([{ challengeId: 'challenge-1' }]);
     mocks.readCommitteeEpochFromChain.mockResolvedValue('7');
     mocks.recoverArbitrationOnChainDecision.mockResolvedValue(true);
     mocks.closeRejectedProject.mockResolvedValue('CLOSED');
@@ -175,6 +176,22 @@ describe('voteOnArbitration - CAS conflict handling', () => {
     expect(mocks.findOneAndUpdate).not.toHaveBeenCalled();
   });
 
+  it('khóa cả preflight chữ ký và ghi phiếu khi challenge gốc của arbitration bị thiếu', async () => {
+    const current = createArbitration({ openedByChallengeId: 'challenge-missing' });
+    mocks.findArbitrationById.mockResolvedValue(current);
+    mocks.findChallenges.mockResolvedValue([{ challengeId: 'challenge-other' }]);
+
+    await expect(prepareArbitrationVoteSignature('chair-1', {
+      arbitrationId: 'arbitration-1', decision: 'UPHOLD_PROJECT', reason: 'Không thể ký khi dữ liệu tranh chấp thiếu.'
+    })).rejects.toMatchObject({ statusCode: 409, errorCode: 'ARBITRATION_INTEGRITY_ERROR' });
+    await expect(voteOnArbitration('chair-1', {
+      arbitrationId: 'arbitration-1', decision: 'UPHOLD_PROJECT', reason: 'Không thể bỏ phiếu khi dữ liệu tranh chấp thiếu.'
+    })).rejects.toMatchObject({ statusCode: 409, errorCode: 'ARBITRATION_INTEGRITY_ERROR' });
+
+    expect(mocks.prepareVoteSignature).not.toHaveBeenCalled();
+    expect(mocks.findOneAndUpdate).not.toHaveBeenCalled();
+  });
+
   it('trả ALREADY_VOTED khi phiếu cùng người dùng vừa được ghi đồng thời', async () => {
     const concurrentlyVoted = createArbitration({ votes: [{
       voterUserId: 'chair-1', voterRole: 'executive_chair', decision: 'UPHOLD_PROJECT', reason: 'Phiếu cạnh tranh.', markedAbusive: false, votedAt: new Date()
@@ -206,6 +223,18 @@ describe('voteOnArbitration - CAS conflict handling', () => {
     mocks.findArbitrationById.mockResolvedValue(createArbitration());
     mocks.findProject.mockResolvedValue({ status: 'ACTIVE' });
     mocks.aggregateDonationSummary.mockResolvedValue({ totalAmount: 2500000, donationCount: 3 });
+
+    await expect(voteOnArbitration('chair-1', {
+      arbitrationId: 'arbitration-1', decision: 'REJECT_PROJECT', reason: 'Bằng chứng xác nhận cần hủy dự án.'
+    })).rejects.toMatchObject({ statusCode: 409, errorCode: 'DONATION_LOCK_RISK_NOT_ACKNOWLEDGED' });
+
+    expect(mocks.findOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  it('từ chối phiếu hủy DISPUTED có donation INDEXED khi chưa xác nhận rủi ro khóa tiền', async () => {
+    mocks.findArbitrationById.mockResolvedValue(createArbitration());
+    mocks.findProject.mockResolvedValue({ status: 'DISPUTED' });
+    mocks.aggregateDonationSummary.mockResolvedValue({ totalAmount: 2_500_000, donationCount: 3 });
 
     await expect(voteOnArbitration('chair-1', {
       arbitrationId: 'arbitration-1', decision: 'REJECT_PROJECT', reason: 'Bằng chứng xác nhận cần hủy dự án.'

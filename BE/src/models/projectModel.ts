@@ -48,6 +48,17 @@ export type ProjectRecord = {
 };
 
 export type FeedbackProjectRecord = Pick<ProjectRecord, 'projectId' | 'organizationId' | 'name' | 'status'>;
+export type ExecutivePendingPublicationCursor = {
+  status: 'DISPUTED' | 'PENDING_ACTIVATION';
+  activationEligibleAt: Date | null;
+  projectId: string;
+};
+
+/** Projection tối thiểu cho card queue Chair/Member, không mang file hồ sơ hay milestone nặng. */
+export type ExecutivePendingPublicationListProject = Pick<
+  ProjectRecord,
+  'projectId' | 'organizationId' | 'name' | 'goalAmount' | 'status' | 'listedAt' | 'activationEligibleAt' | 'listingRound'
+>;
 
 const projectSchema = new Schema<ProjectRecord>({
   projectId: { type: String, required: true, unique: true },
@@ -100,6 +111,8 @@ const projectSchema = new Schema<ProjectRecord>({
 
 projectSchema.index({ organizationId: 1, name: 1 }, { unique: true });
 projectSchema.index({ status: 1, activationEligibleAt: 1 });
+// Queue pending phân trang theo status + thời điểm + projectId; index đầy đủ tránh blocking sort khi dữ liệu tăng.
+projectSchema.index({ status: 1, activationEligibleAt: 1, projectId: 1 });
 projectSchema.index({ status: 1, closureState: 1, closureNextAttemptAt: 1 });
 // Cursor portal Ủy ban luôn đi theo status + projectId; index này giữ pagination O(log n) khi dữ liệu tăng.
 projectSchema.index({ status: 1, projectId: 1 });
@@ -159,15 +172,90 @@ export async function findProjectsByStatusCursor(
   status: ProjectStatus,
   cursor: string | null,
   limitCount: number
-): Promise<Array<Pick<ProjectRecord, 'projectId' | 'name' | 'organizationId' | 'milestonePlan'>>> {
+): Promise<Array<Pick<ProjectRecord, 'projectId' | 'name' | 'organizationId' | 'goalAmount'>>> {
   return ProjectMongoModel.find(
     { status, ...(cursor ? { projectId: { $gt: cursor } } : {}) },
-    { _id: 0, projectId: 1, name: 1, organizationId: 1, milestonePlan: 1 }
+    { _id: 0, projectId: 1, name: 1, organizationId: 1, goalAmount: 1 }
   )
     .sort({ projectId: 1 })
     .limit(limitCount)
-    .lean<Array<Pick<ProjectRecord, 'projectId' | 'name' | 'organizationId' | 'milestonePlan'>>>()
+    .lean<Array<Pick<ProjectRecord, 'projectId' | 'name' | 'organizationId' | 'goalAmount'>>>()
     .exec();
+}
+
+/** Lấy queue niêm yết theo cursor ổn định để portal Ủy ban không tải toàn bộ hồ sơ đang chờ công bố. */
+export async function findProjectsByStatusListCursor(
+  statusList: ProjectStatus[],
+  cursor: string | null,
+  limitCount: number
+): Promise<ProjectRecord[]> {
+  if (!statusList.length) return [];
+  return ProjectMongoModel.find({
+    status: { $in: statusList },
+    ...(cursor ? { projectId: { $gt: cursor } } : {})
+  })
+    .sort({ projectId: 1 })
+    .limit(limitCount)
+    .lean<ProjectRecord[]>()
+    .exec();
+}
+
+/** Lấy một trạng thái sau cursor thời gian/projectId, giữ thứ tự ổn định trong chính trạng thái đó. */
+async function findPendingPublicationProjectsByStatusAfterCursor(
+  status: 'DISPUTED' | 'PENDING_ACTIVATION',
+  cursor: ExecutivePendingPublicationCursor | null,
+  limitCount: number
+): Promise<ExecutivePendingPublicationListProject[]> {
+  const isSameStatusCursor = cursor?.status === status;
+  const cursorFilter = !isSameStatusCursor
+    ? {}
+    : cursor.activationEligibleAt
+      ? {
+        $or: [
+          { activationEligibleAt: { $gt: cursor.activationEligibleAt } },
+          { activationEligibleAt: cursor.activationEligibleAt, projectId: { $gt: cursor.projectId } }
+        ]
+      }
+      : {
+        $or: [
+          { activationEligibleAt: { $ne: null } },
+          { activationEligibleAt: null, projectId: { $gt: cursor.projectId } }
+        ]
+      };
+  return ProjectMongoModel.find({ status, ...cursorFilter }, {
+    _id: 0,
+    projectId: 1,
+    organizationId: 1,
+    name: 1,
+    goalAmount: 1,
+    status: 1,
+    listedAt: 1,
+    activationEligibleAt: 1,
+    listingRound: 1
+  })
+    .sort({ activationEligibleAt: 1, projectId: 1 })
+    .limit(limitCount)
+    .lean<ExecutivePendingPublicationListProject[]>()
+    .exec();
+}
+
+/** Lấy queue chờ công bố với DISPUTED luôn đứng trước, vẫn giữ cursor không trùng hay mất item. */
+export async function findExecutivePendingPublicationProjects(
+  cursor: ExecutivePendingPublicationCursor | null,
+  limitCount: number
+): Promise<ExecutivePendingPublicationListProject[]> {
+  const normalizedLimit = Number.isFinite(limitCount) ? Math.max(1, Math.min(51, Math.floor(limitCount))) : 21;
+  if (cursor?.status === 'PENDING_ACTIVATION') {
+    return findPendingPublicationProjectsByStatusAfterCursor('PENDING_ACTIVATION', cursor, normalizedLimit);
+  }
+  const disputedProjects = await findPendingPublicationProjectsByStatusAfterCursor('DISPUTED', cursor, normalizedLimit);
+  if (disputedProjects.length >= normalizedLimit) return disputedProjects;
+  const pendingProjects = await findPendingPublicationProjectsByStatusAfterCursor(
+    'PENDING_ACTIVATION',
+    null,
+    normalizedLimit - disputedProjects.length
+  );
+  return [...disputedProjects, ...pendingProjects];
 }
 
 /** Hàm lấy danh sách dự án theo nhiều trạng thái review để Regulatory theo dõi cả queue đang chờ và lịch sử đã xử lý. */

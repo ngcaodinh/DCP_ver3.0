@@ -29,6 +29,12 @@ export interface AuditorFieldReportRecord {
   updatedAt: Date;
 }
 
+/** Metadata GPS tối thiểu cho card giám sát, cố ý không chọn CID/hash/note hay ảnh đầy đủ. */
+export type AuditorFieldReportGeofenceMetadata = {
+  projectId: string;
+  photos: Array<Pick<AuditorFieldReportPhoto, 'gps' | 'accuracyMeters' | 'isLowAccuracyOverride' | 'lowAccuracyReason'>>;
+};
+
 const gpsSchema = new Schema({ latitude: { type: Number, required: true, min: -90, max: 90 }, longitude: { type: Number, required: true, min: -180, max: 180 } }, { _id: false });
 const photoSchema = new Schema<AuditorFieldReportPhoto>({
   cid: { type: String, required: true }, contentSha256: { type: String, required: true }, fileName: { type: String, required: true }, mimeType: { type: String, enum: ['image/jpeg'], required: true },
@@ -77,6 +83,29 @@ export async function findAuditorFieldReportsByProjectIds(projectIds: string[], 
     { $unwind: '$items' },
     { $replaceRoot: { newRoot: '$items' } }
   ]).exec();
+}
+
+/** Đếm toàn bộ biên bản theo project bằng aggregate để card không phải hydrate ảnh chỉ để lấy count. */
+export async function countAuditorFieldReportsByProjectIds(projectIds: string[]): Promise<Map<string, number>> {
+  const normalizedProjectIds = [...new Set(projectIds.map(projectId => String(projectId || '').trim()).filter(Boolean))];
+  if (!normalizedProjectIds.length) return new Map();
+  const rows = await AuditorFieldReportMongoModel.aggregate<{ _id: string; count: number }>([
+    { $match: { projectId: { $in: normalizedProjectIds } } },
+    { $group: { _id: '$projectId', count: { $sum: 1 } } }
+  ]).exec();
+  return new Map(rows.map(row => [row._id, row.count]));
+}
+
+/** Lấy riêng metadata geofence cần cho mức lệch cao nhất, không đọc ảnh/note vào danh sách ACTIVE. */
+export async function findAuditorFieldReportGeofenceMetadataByProjectIds(projectIds: string[]): Promise<AuditorFieldReportGeofenceMetadata[]> {
+  const normalizedProjectIds = [...new Set(projectIds.map(projectId => String(projectId || '').trim()).filter(Boolean))];
+  if (!normalizedProjectIds.length) return [];
+  return AuditorFieldReportMongoModel.find(
+    { projectId: { $in: normalizedProjectIds } },
+    { _id: 0, projectId: 1, 'photos.gps': 1, 'photos.accuracyMeters': 1, 'photos.isLowAccuracyOverride': 1, 'photos.lowAccuracyReason': 1 }
+  )
+    .lean<AuditorFieldReportGeofenceMetadata[]>()
+    .exec();
 }
 
 /** Liệt kê biên bản của chính auditor cho màn hình lịch sử, luôn có trần bản ghi. */

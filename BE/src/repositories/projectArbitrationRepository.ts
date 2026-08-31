@@ -3,8 +3,10 @@ import {
   createProjectArbitration,
   findPendingArbitrationsExpiredBefore,
   findPendingProjectArbitrations,
+  findPendingProjectArbitrationsByProjectRounds,
   findProjectArbitrationById,
-  type ProjectArbitrationRecord
+  type ProjectArbitrationRecord,
+  type ProjectArbitrationVotingSummaryRecord
 } from '../models/projectArbitrationModel';
 
 /** Tạo vụ xét xử và giữ atomic với lần khiếu nại đầu tiên khi có transaction. */
@@ -23,6 +25,13 @@ export async function findProjectArbitrationByIdFromRepository(arbitrationId: st
 /** Lấy các vụ xét xử còn mở, tách data-access khỏi controller. */
 export async function findPendingProjectArbitrationsFromRepository(committeeUserId?: string): Promise<ProjectArbitrationRecord[]> {
   return findPendingProjectArbitrations(committeeUserId);
+}
+
+/** Lấy batch case đang mở theo cặp project/vòng niêm yết để ghép đúng hồ sơ tranh chấp. */
+export async function findPendingProjectArbitrationsByProjectRoundsFromRepository(
+  projectRounds: Array<{ projectId: string; round: number }>
+): Promise<ProjectArbitrationVotingSummaryRecord[]> {
+  return findPendingProjectArbitrationsByProjectRounds(projectRounds);
 }
 
 /** Lấy các vụ quá hạn theo batch để worker không bị unbounded. */

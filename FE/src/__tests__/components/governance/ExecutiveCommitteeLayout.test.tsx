@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock('next/navigation', () => ({ useRouter: () => ({ replace: mocks.replace }) }));
 vi.mock('@/app/utils/authSession', () => ({ readAuthSession: mocks.readAuthSession, clearAuthSession: mocks.clearAuthSession }));
 vi.mock('@/app/components/governance/ActiveProjectsPanel', () => ({ ActiveProjectsPanel: () => <div>Active projects content</div> }));
+vi.mock('@/app/components/governance/PendingPublicationProjectsPanel', () => ({ PendingPublicationProjectsPanel: () => <div>Pending publication content</div> }));
 vi.mock('@/app/components/governance/DisbursementVotingPanel', () => ({ DisbursementVotingPanel: () => <div>Disbursement content</div> }));
 vi.mock('@/app/components/governance/ExecutivePortalClient', () => ({ default: () => <div>Project verdict content</div> }));
 vi.mock('@/app/components/governance/ChairActionsPanel', () => ({ ChairActionsPanel: () => <div>Chair retry controls</div> }));
@@ -22,22 +23,31 @@ describe('ExecutiveCommitteeLayout role separation', () => {
     mocks.readAuthSession.mockReturnValue({ userRole: 'executive_chair', userWalletAddress: '0x111' });
   });
 
-  it('Chair thấy đúng ba tab và công cụ retry vận hành bắt buộc của Chair', async () => {
+  it('Chair thấy đúng bốn tab và công cụ retry vận hành bắt buộc của Chair', async () => {
     render(<ExecutiveCommitteeLayout viewerRole="CHAIR" />);
 
     expect(await screen.findByRole('tablist', { name: 'Điều hướng Ủy ban' })).toBeInTheDocument();
-    expect(screen.getAllByRole('tab')).toHaveLength(3);
+    expect(screen.getAllByRole('tab')).toHaveLength(4);
     expect(screen.getByText('Chair retry controls')).toBeInTheDocument();
     expect(screen.queryByText(/GPS override/i)).not.toBeInTheDocument();
   });
 
-  it('Member vẫn có ba tab nhưng không được render action retry của Chair', async () => {
+  it('Member vẫn có bốn tab nhưng không được render action retry của Chair', async () => {
     mocks.readAuthSession.mockReturnValue({ userRole: 'executive_member', userWalletAddress: '0x222' });
 
     render(<ExecutiveCommitteeLayout viewerRole="MEMBER" />);
 
     expect(await screen.findByRole('tablist', { name: 'Điều hướng Ủy ban' })).toBeInTheDocument();
-    expect(screen.getAllByRole('tab')).toHaveLength(3);
+    expect(screen.getAllByRole('tab')).toHaveLength(4);
+    expect(screen.queryByText('Chair retry controls')).not.toBeInTheDocument();
+  });
+
+  it('giữ khu vực dự án chờ công bố giống Member, không chen công cụ vận hành riêng của Chair', async () => {
+    render(<ExecutiveCommitteeLayout viewerRole="CHAIR" />);
+
+    fireEvent.click(await screen.findByRole('tab', { name: 'Dự án chờ công bố' }));
+
+    expect(screen.getByText('Pending publication content')).toBeInTheDocument();
     expect(screen.queryByText('Chair retry controls')).not.toBeInTheDocument();
   });
 

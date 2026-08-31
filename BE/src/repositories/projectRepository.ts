@@ -6,6 +6,10 @@ import {
   findProjectsByOrganizationId,
   findProjectsByStatus,
   findProjectsByStatusCursor,
+  findProjectsByStatusListCursor,
+  findExecutivePendingPublicationProjects,
+  type ExecutivePendingPublicationCursor,
+  type ExecutivePendingPublicationListProject,
   findProjectsByStatusList,
   findPendingActivationProjectsForPublic,
   findProjectsReadyForActivation,
@@ -96,8 +100,25 @@ export async function findProjectsByStatusCursorFromRepository(
   status: ProjectStatus,
   cursor: string | null,
   limitCount: number
-): Promise<Array<Pick<ProjectRecord, 'projectId' | 'name' | 'organizationId' | 'milestonePlan'>>> {
+): Promise<Array<Pick<ProjectRecord, 'projectId' | 'name' | 'organizationId' | 'goalAmount'>>> {
   return findProjectsByStatusCursor(status, cursor, limitCount);
+}
+
+/** Lấy trang queue niêm yết từ nhiều trạng thái với cursor để không phát sinh tải toàn bộ collection. */
+export async function findProjectsByStatusListCursorFromRepository(
+  statusList: ProjectStatus[],
+  cursor: string | null,
+  limitCount: number
+): Promise<ProjectRecord[]> {
+  return findProjectsByStatusListCursor(statusList, cursor, limitCount);
+}
+
+/** Lấy queue chờ công bố theo thứ tự DISPUTED rồi PENDING_ACTIVATION, có cursor ổn định. */
+export async function findExecutivePendingPublicationProjectsFromRepository(
+  cursor: ExecutivePendingPublicationCursor | null,
+  limitCount: number
+): Promise<ExecutivePendingPublicationListProject[]> {
+  return findExecutivePendingPublicationProjects(cursor, limitCount);
 }
 
 /** Hàm repository lấy queue review kèm dự án đã xử lý để Regulatory có lịch sử đầy đủ. */

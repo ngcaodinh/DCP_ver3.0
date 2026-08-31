@@ -3,7 +3,9 @@ import {
   createProjectChallenge,
   countProjectChallengesByProjectRound,
   countProjectChallengesByUserSince,
+  findProjectChallengeReferencesByProjectRounds,
   findProjectChallengesByUserForProjectIds,
+  findProjectChallengesByProjectRounds,
   findProjectChallenges,
   hasProjectChallengeByUser,
   type ProjectChallengeRecord
@@ -25,6 +27,20 @@ export async function createProjectChallengeFromRepository(
 /** Lấy khiếu nại của một vòng niêm yết phục vụ minh bạch và xét xử. */
 export async function findProjectChallengesFromRepository(projectId: string, round: number): Promise<ProjectChallengeRecord[]> {
   return findProjectChallenges(projectId, round);
+}
+
+/** Lấy batch khiếu nại theo cặp project/vòng để read model Ủy ban không gọi N+1. */
+export async function findProjectChallengesByProjectRoundsFromRepository(
+  projectRounds: Array<{ projectId: string; round: number }>
+): Promise<ProjectChallengeRecord[]> {
+  return findProjectChallengesByProjectRounds(projectRounds);
+}
+
+/** Lấy khóa challenge tối thiểu để read model portal kiểm tra liên kết arbitration. */
+export async function findProjectChallengeReferencesByProjectRoundsFromRepository(
+  projectRounds: Array<{ projectId: string; round: number }>
+): Promise<Array<Pick<ProjectChallengeRecord, 'challengeId' | 'projectId' | 'round'>>> {
+  return findProjectChallengeReferencesByProjectRounds(projectRounds);
 }
 
 /** Kiểm tra bản ghi khiếu nại trùng trước khi mở lại UI auditor. */

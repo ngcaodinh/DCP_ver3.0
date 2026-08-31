@@ -3102,3 +3102,7 @@ footer {
     background: #ffffff !important;
   }
 }
+@keyframes executive-dispute-attention {
+  0%, 100% { border-color: rgb(251 113 133); box-shadow: 0 0 0 3px rgb(251 113 133 / 0.14); }
+  50% { border-color: rgb(245 158 11); box-shadow: 0 0 0 4px rgb(245 158 11 / 0.18); }
+}

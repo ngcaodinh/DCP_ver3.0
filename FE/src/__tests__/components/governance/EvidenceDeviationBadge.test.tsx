@@ -23,4 +23,10 @@ describe('EvidenceDeviationBadge', () => {
     expect(screen.getByText(/Trong vùng dự án/)).toHaveClass('border-emerald-200');
     expect(screen.queryByText(/Lệch vị trí nghiêm trọng/)).not.toBeInTheDocument();
   });
+
+  it('không hiển thị khoảng cách 0 m tới ranh giới khi ảnh nằm trong vùng dự án', () => {
+    render(<EvidenceDeviationBadge deviationLevel="INSIDE" distanceMeters={0} accuracyMeters={88} />);
+
+    expect(screen.getByText(/Trong vùng dự án/)).not.toHaveTextContent('0 m');
+  });
 });

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { EXECUTIVE_CHAIR_ROLE, EXECUTIVE_VOTER_ROLES, AUDITOR_ROLE, ADMIN_ROLE } from '../constants/governanceRoles';
-import { handleGetAuditorActiveProjects, handleGetAuditorFieldReport, handleGetAuditorPendingProjects, handleGetExecutiveActiveProjectDetail, handleGetExecutiveActiveProjects, handleGetExecutiveCaseDetail, handleGetExecutiveCases, handleGetMyAuditorFieldReports, handleGetMyAuditorListingRecords, handlePrepareArbitrationVoteSignature, handleRecoverProjectArbitrationOnChainDecision, handleRetryProjectActivation, handleSubmitAuditorFieldReport, handleSubmitAuditorListingVerification, handleSubmitProjectChallenge, handleUpdateMilestonePlan, handleVoteOnArbitration } from '../controllers/projectGovernanceController';
+import { handleGetAuditorActiveProjects, handleGetAuditorFieldReport, handleGetAuditorPendingProjects, handleGetExecutiveActiveProjectDetail, handleGetExecutiveActiveProjects, handleGetExecutiveCaseDetail, handleGetExecutiveCases, handleGetExecutivePendingPublicationProjectDetail, handleGetExecutivePendingPublicationProjects, handleGetMyAuditorFieldReports, handleGetMyAuditorListingRecords, handlePrepareArbitrationVoteSignature, handleRecoverProjectArbitrationOnChainDecision, handleRetryProjectActivation, handleSubmitAuditorFieldReport, handleSubmitAuditorListingVerification, handleSubmitProjectChallenge, handleUpdateMilestonePlan, handleVoteOnArbitration } from '../controllers/projectGovernanceController';
 import { createAuthenticationMiddleware } from '../middleware/authenticationMiddleware';
 import { type AuthenticatedRequest } from '../middleware/authenticationMiddleware';
 import { createFreshRoleAuthorizationMiddleware } from '../middleware/roleAuthorizationMiddleware';
@@ -27,6 +27,8 @@ export function createProjectGovernanceRoutes(): Router {
   router.get('/executive/cases/:arbitrationId', authenticationMiddleware, createFreshRoleAuthorizationMiddleware([...EXECUTIVE_VOTER_ROLES]), handleGetExecutiveCaseDetail);
   router.get('/executive/active-projects', authenticationMiddleware, createFreshRoleAuthorizationMiddleware([...EXECUTIVE_VOTER_ROLES]), handleGetExecutiveActiveProjects);
   router.get('/executive/active-projects/:projectId', authenticationMiddleware, createFreshRoleAuthorizationMiddleware([...EXECUTIVE_VOTER_ROLES]), handleGetExecutiveActiveProjectDetail);
+  router.get('/executive/pending-activation-projects', authenticationMiddleware, createFreshRoleAuthorizationMiddleware([...EXECUTIVE_VOTER_ROLES]), handleGetExecutivePendingPublicationProjects);
+  router.get('/executive/pending-activation-projects/:projectId', authenticationMiddleware, createFreshRoleAuthorizationMiddleware([...EXECUTIVE_VOTER_ROLES]), handleGetExecutivePendingPublicationProjectDetail);
   router.post('/executive/signing-payload', authenticationMiddleware, createFreshRoleAuthorizationMiddleware([...EXECUTIVE_VOTER_ROLES]), executiveArbitrationSigningPayloadRateLimit, handlePrepareArbitrationVoteSignature);
   router.post('/executive/vote', authenticationMiddleware, createFreshRoleAuthorizationMiddleware([...EXECUTIVE_VOTER_ROLES]), executiveArbitrationVoteRateLimit, handleVoteOnArbitration);
   router.post('/executive/retry-activation', authenticationMiddleware, createFreshRoleAuthorizationMiddleware([EXECUTIVE_CHAIR_ROLE, 'admin']), handleRetryProjectActivation);

@@ -8,6 +8,7 @@ import { useLogoutConfirmation } from '@/app/hooks/useLogoutConfirmation';
 import { EXECUTIVE_COMMITTEE_POLICY } from '@/app/utils/executiveCommitteePolicy';
 import ExecutivePortalClient from './ExecutivePortalClient';
 import { ActiveProjectsPanel } from './ActiveProjectsPanel';
+import { PendingPublicationProjectsPanel } from './PendingPublicationProjectsPanel';
 import { ChairActionsPanel } from './ChairActionsPanel';
 import { DisbursementVotingPanel } from './DisbursementVotingPanel';
 import { ExecutiveCommitteeNavigation, type ExecutiveCommitteeTab, type ExecutiveViewerRole } from './ExecutiveCommitteeNavigation';
@@ -140,8 +141,8 @@ export function ExecutiveCommitteeLayout(props: { viewerRole: ExecutiveViewerRol
         <div role="region" aria-label="Ngưỡng biểu quyết" className="grid overflow-hidden rounded-2xl border border-emerald-200 bg-white p-4 shadow-[0_8px_24px_rgba(15,23,42,0.04)] sm:grid-cols-[minmax(0,1fr)_auto] sm:p-5">
           <div className="p-4 sm:p-5">
             <p className="text-xs font-bold uppercase tracking-[0.14em] text-[#0E7C6B]">Ngưỡng biểu quyết</p>
-            <p className="mt-1 text-base font-bold text-slate-950 sm:text-lg">01 Chủ tịch + 02 Ủy viên cùng một phía</p>
-            <p className="mt-1 text-sm leading-6 text-slate-600">Mọi quyết định chỉ hợp lệ khi đáp ứng đồng thời chữ ký Chủ tịch và số phiếu Ủy viên theo quy chế.</p>
+            <p className="mt-1 text-base font-bold text-slate-950 sm:text-lg">Tiếp tục 3/5 · Hủy vĩnh viễn 5/5</p>
+            <p className="mt-1 text-sm leading-6 text-slate-600">Tiếp tục cần chữ ký Chủ tịch và ít nhất 2 Ủy viên. Hủy dự án chỉ có hiệu lực khi cả 5 ghế snapshot cùng ký.</p>
           </div>
           <dl className="grid grid-cols-3 border-t border-emerald-100 bg-emerald-50/70 sm:w-[23rem] sm:border-l sm:border-t-0">
             <div className="min-w-0 border-r border-emerald-100 px-3 py-3 sm:px-4">
@@ -160,8 +161,9 @@ export function ExecutiveCommitteeLayout(props: { viewerRole: ExecutiveViewerRol
         </div>
 
         <div role="tabpanel" id={activePanelId} aria-labelledby={activeTabId}>
-          {props.viewerRole === 'CHAIR' ? <ChairActionsPanel /> : null}
+          {props.viewerRole === 'CHAIR' && activeTab !== 'PENDING_PUBLICATION' ? <ChairActionsPanel /> : null}
           {activeTab === 'ACTIVE_PROJECTS' ? <ActiveProjectsPanel /> : null}
+          {activeTab === 'PENDING_PUBLICATION' ? <PendingPublicationProjectsPanel /> : null}
           {activeTab === 'DISBURSEMENT' ? <DisbursementVotingPanel /> : null}
           {activeTab === 'PROJECT_VERDICT' ? <ExecutivePortalClient /> : null}
         </div>

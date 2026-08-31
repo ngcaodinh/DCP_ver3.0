@@ -165,6 +165,20 @@ export async function findLatestSubmissionByOrganizationId(organizationId: strin
     .exec();
 }
 
+/** Lấy trạng thái KYC mới nhất theo batch organization, chỉ dùng cho read model đã redacted. */
+export async function findLatestSubmissionsByOrganizationIds(
+  organizationIds: string[]
+): Promise<Array<Pick<OrganizationKycSubmission, 'organizationId' | 'status' | 'reviewedAt'>>> {
+  const normalizedOrganizationIds = [...new Set(organizationIds.map(organizationId => String(organizationId || '').trim()).filter(Boolean))];
+  if (!normalizedOrganizationIds.length) return [];
+  return OrganizationKycSubmissionModel.aggregate<Pick<OrganizationKycSubmission, 'organizationId' | 'status' | 'reviewedAt'>>([
+    { $match: { organizationId: { $in: normalizedOrganizationIds } } },
+    { $sort: { organizationId: 1, version: -1 } },
+    { $group: { _id: '$organizationId', status: { $first: '$status' }, reviewedAt: { $first: '$reviewedAt' } } },
+    { $project: { _id: 0, organizationId: '$_id', status: 1, reviewedAt: 1 } }
+  ]).exec();
+}
+
 /**
  * Tìm hồ sơ FOUNDATION mới nhất theo số đăng ký pháp nhân.
  * Mục đích: áp dụng chính sách nộp một lần và chỉ cho retry sau lỗi hệ thống.

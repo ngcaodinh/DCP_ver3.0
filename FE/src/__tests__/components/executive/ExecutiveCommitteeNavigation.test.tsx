@@ -17,6 +17,8 @@ describe('ExecutiveCommitteeNavigation', () => {
     expect(activeTab).toHaveAttribute('aria-controls', 'executive-ACTIVE_PROJECTS-panel');
     expect(activeTab).toHaveClass('min-w-0');
     expect(activeTab.querySelector('span')).toHaveClass('truncate');
+    fireEvent.click(screen.getByRole('tab', { name: 'Dự án chờ công bố' }));
+    expect(onSelect).toHaveBeenCalledWith('PENDING_PUBLICATION');
     fireEvent.click(screen.getByRole('tab', { name: 'Duyệt giải ngân' }));
 
     expect(onSelect).toHaveBeenCalledWith('DISBURSEMENT');

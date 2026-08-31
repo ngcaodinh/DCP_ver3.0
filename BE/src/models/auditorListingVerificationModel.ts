@@ -78,6 +78,37 @@ export async function findListingVerificationByProjectRoundAndUser(
   return AuditorListingVerificationMongoModel.findOne({ projectId, round, auditorUserId }).lean<AuditorListingVerificationRecord>().exec();
 }
 
+/** Lấy xác minh theo đúng cặp project/vòng niêm yết để không trộn evidence của vòng lịch sử. */
+export async function findListingVerificationsByProjectRounds(
+  projectRounds: Array<{ projectId: string; round: number }>
+): Promise<AuditorListingVerificationRecord[]> {
+  const normalizedPairs = [...new Map(projectRounds
+    .map(item => ({ projectId: String(item.projectId || '').trim(), round: Number(item.round) }))
+    .filter(item => item.projectId && Number.isInteger(item.round) && item.round >= 1)
+    .map(item => [`${item.projectId}:${item.round}`, item] as const)).values()];
+  if (!normalizedPairs.length) return [];
+  return AuditorListingVerificationMongoModel.find({ $or: normalizedPairs })
+    .sort({ projectId: 1, round: 1, submittedAt: -1 })
+    .lean<AuditorListingVerificationRecord[]>()
+    .exec();
+}
+
+/** Đếm xác minh theo đúng cặp project/vòng để list portal không tải ảnh evidence của từng card. */
+export async function countListingVerificationsByProjectRounds(
+  projectRounds: Array<{ projectId: string; round: number }>
+): Promise<Array<{ projectId: string; round: number; count: number }>> {
+  const normalizedPairs = [...new Map(projectRounds
+    .map(item => ({ projectId: String(item.projectId || '').trim(), round: Number(item.round) }))
+    .filter(item => item.projectId && Number.isInteger(item.round) && item.round >= 1)
+    .map(item => [`${item.projectId}:${item.round}`, item] as const)).values()];
+  if (!normalizedPairs.length) return [];
+  const rows = await AuditorListingVerificationMongoModel.aggregate<{ _id: { projectId: string; round: number }; count: number }>([
+    { $match: { $or: normalizedPairs } },
+    { $group: { _id: { projectId: '$projectId', round: '$round' }, count: { $sum: 1 } } }
+  ]).exec();
+  return rows.map(row => ({ projectId: row._id.projectId, round: row._id.round, count: row.count }));
+}
+
 /** Liệt kê xác minh của chính auditor cho màn hình lịch sử, luôn có trần bản ghi. */
 export async function findListingVerificationsByAuditorUserId(
   auditorUserId: string,

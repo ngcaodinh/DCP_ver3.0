@@ -20,7 +20,13 @@ import { retryFailedProjectActivation } from '../services/projectActivation.serv
 import { submitProjectChallenge } from '../services/projectChallenge.service';
 import { submitAuditorListingVerification } from '../services/auditorListingVerification.service';
 import { updateProjectMilestonePlanForOrganization } from '../services/projectService';
-import { buildExecutiveEvidencePhoto, getExecutiveActiveProjectDetail, listExecutiveActiveProjects } from '../services/executiveProjectMonitoring.service';
+import {
+  buildExecutiveEvidencePhoto,
+  getExecutiveActiveProjectDetail,
+  getExecutivePendingPublicationProjectDetail,
+  listExecutiveActiveProjects,
+  listExecutivePendingPublicationProjects
+} from '../services/executiveProjectMonitoring.service';
 import { sendErrorFromUnknown, sendErrorResponse, sendSuccessResponse } from '../utils/apiResponse';
 import { arbitrationOnChainDecisionRecoverySchema, arbitrationSigningPayloadSchema, arbitrationVoteSchema, auditorListingVerificationSchema, fieldReportSchema, projectChallengeSchema, retryActivationSchema, updateMilestonePlanSchema, validateProjectGovernancePayload } from '../validators/projectGovernanceValidator';
 import { AUDITOR_ROLE } from '../constants/governanceRoles';
@@ -290,6 +296,47 @@ export async function handleGetExecutiveActiveProjectDetail(request: Authenticat
   }
 }
 
+/** Lấy queue dự án chờ công bố, chỉ dành cho Chair/Member và chỉ trả summary đã redacted. */
+export async function handleGetExecutivePendingPublicationProjects(request: AuthenticatedRequest, response: Response): Promise<void> {
+  if (!request.authenticatedUser) {
+    sendErrorResponse(response, 401, 'Bạn chưa đăng nhập.', 'UNAUTHENTICATED');
+    return;
+  }
+  try {
+    const rawCursor = typeof request.query.cursor === 'string' ? request.query.cursor.trim() : '';
+    const rawLimit = Number(request.query.limit || 20);
+    const limitCount = Number.isInteger(rawLimit) && rawLimit >= 1 && rawLimit <= 50 ? rawLimit : 20;
+    sendSuccessResponse(response, 200, 'Đã lấy dự án chờ công bố.', await listExecutivePendingPublicationProjects(
+      rawCursor || null,
+      limitCount,
+      request.authenticatedUser.userId
+    ));
+  } catch (error) {
+    sendErrorFromUnknown(response, error, 'Không thể lấy dự án chờ công bố.');
+  }
+}
+
+/** Lấy chi tiết dự án chờ công bố, từ chối status ngoài phạm vi thay vì làm lộ hồ sơ qua IDOR. */
+export async function handleGetExecutivePendingPublicationProjectDetail(request: AuthenticatedRequest, response: Response): Promise<void> {
+  if (!request.authenticatedUser) {
+    sendErrorResponse(response, 401, 'Bạn chưa đăng nhập.', 'UNAUTHENTICATED');
+    return;
+  }
+  const projectId = String(request.params.projectId || '').trim();
+  if (!projectId) {
+    sendErrorResponse(response, 400, 'projectId là bắt buộc.', 'VALIDATION_ERROR');
+    return;
+  }
+  try {
+    sendSuccessResponse(response, 200, 'Đã lấy hồ sơ dự án chờ công bố.', await getExecutivePendingPublicationProjectDetail(
+      projectId,
+      request.authenticatedUser.userId
+    ));
+  } catch (error) {
+    sendErrorFromUnknown(response, error, 'Không thể lấy hồ sơ dự án chờ công bố.');
+  }
+}
+
 /** Lấy một biên bản nội bộ của auditor, bao gồm GPS khi chính auditor cần đối chiếu. */
 export async function handleGetAuditorFieldReport(request: AuthenticatedRequest, response: Response): Promise<void> {
   if (!request.authenticatedUser) return sendErrorResponse(response, 401, 'Bạn chưa đăng nhập.', 'UNAUTHENTICATED');
@@ -367,7 +414,7 @@ export async function handleGetExecutiveCaseDetail(request: AuthenticatedRequest
       evidencePhotos: (challenge.evidencePhotos || []).map(photo => {
         const evidence = buildExecutiveEvidencePhoto({
           cid: photo.cid,
-          source: 'AUDITOR_FIELD_REPORT',
+          source: 'PROJECT_CHALLENGE',
           gps: { lat: photo.gps.latitude, lng: photo.gps.longitude },
           accuracyMeters: photo.accuracyMeters,
           geofence,

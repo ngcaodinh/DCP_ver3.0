@@ -24,6 +24,7 @@
     "provision:disbursement-signers": "node scripts/provisionDisbursementServiceSigners.js",
     "migrate:governance-seat-slots": "node scripts/migrateGovernanceSeatSlots.js",
     "migrate:project-status-project-id-index": "node scripts/migrateProjectStatusProjectIdIndex.js",
+    "migrate:project-pending-publication-index": "node scripts/migrateProjectPendingPublicationIndex.js",
     "migrate:disbursement-onchain-request-id-index": "node scripts/migrateDisbursementOnChainRequestIdIndex.js",
     "migrate:committee-governance-indexes": "node scripts/migrateCommitteeGovernanceIndexes.js",
     "audit:disbursement-decisions": "node scripts/auditDisbursementDecisions.js",

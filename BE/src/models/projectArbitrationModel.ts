@@ -74,6 +74,15 @@ export interface ProjectArbitrationRecord {
   updatedAt: Date;
 }
 
+/** Projection đủ để tính trạng thái biểu quyết trên card portal, không lộ chữ ký hay lý do phiếu. */
+export type ProjectArbitrationVotingSummaryRecord = Pick<
+  ProjectArbitrationRecord,
+  'arbitrationId' | 'projectId' | 'round' | 'openedByChallengeId' | 'deadlineAt' | 'requiredMemberVotes'
+> & {
+  committeeSnapshot: Array<Pick<CommitteeSnapshotMember, 'userId' | 'role'>>;
+  votes: Array<Pick<ProjectArbitrationVote, 'voterUserId' | 'voterRole' | 'decision'>>;
+};
+
 const committeeMemberSchema = new Schema<CommitteeSnapshotMember>({
   userId: { type: String, required: true }, role: { type: String, enum: [EXECUTIVE_CHAIR_ROLE, EXECUTIVE_MEMBER_ROLE], required: true },
   fullName: { type: String, required: true }, walletAddress: { type: String, required: true }
@@ -129,6 +138,34 @@ export async function findProjectArbitrationById(arbitrationId: string): Promise
 /** Lấy các vụ xét xử còn mở theo deadline cho portal Ủy ban. */
 export async function findPendingProjectArbitrations(committeeUserId?: string): Promise<ProjectArbitrationRecord[]> {
   return ProjectArbitrationMongoModel.find({ status: 'PENDING', ...(committeeUserId ? { 'committeeSnapshot.userId': committeeUserId } : {}) }).sort({ deadlineAt: 1 }).lean<ProjectArbitrationRecord[]>().exec();
+}
+
+/** Lấy case đang mở theo đúng cặp project/vòng để tab niêm yết chỉ ghép case hiện hành. */
+export async function findPendingProjectArbitrationsByProjectRounds(
+  projectRounds: Array<{ projectId: string; round: number }>
+): Promise<ProjectArbitrationVotingSummaryRecord[]> {
+  const normalizedPairs = [...new Map(projectRounds
+    .map(item => ({ projectId: String(item.projectId || '').trim(), round: Number(item.round) }))
+    .filter(item => item.projectId && Number.isInteger(item.round) && item.round >= 1)
+    .map(item => [`${item.projectId}:${item.round}`, item] as const)).values()];
+  if (!normalizedPairs.length) return [];
+  return ProjectArbitrationMongoModel.find({ status: 'PENDING', $or: normalizedPairs }, {
+    _id: 0,
+    arbitrationId: 1,
+    projectId: 1,
+    round: 1,
+    openedByChallengeId: 1,
+    deadlineAt: 1,
+    requiredMemberVotes: 1,
+    'committeeSnapshot.userId': 1,
+    'committeeSnapshot.role': 1,
+    'votes.voterUserId': 1,
+    'votes.voterRole': 1,
+    'votes.decision': 1
+  })
+    .sort({ deadlineAt: 1 })
+    .lean<ProjectArbitrationVotingSummaryRecord[]>()
+    .exec();
 }
 
 /** Lấy các vụ còn mở đã vượt quá deadline để worker fail-closed. */
