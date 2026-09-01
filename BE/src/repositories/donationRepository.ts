@@ -1,5 +1,6 @@
 import {
   aggregateDonationSummaryByProjectId,
+  aggregateDonationSummariesByProjectIds,
   countDonations,
   findDonationsByProjectId,
   findDonationsByProjectIdPaginated,
@@ -29,6 +30,8 @@ export async function findPublicCampaignByProjectId(projectId: string): Promise<
 export async function findDonationHistoryByProjectId(projectId: string, limitCount: number): Promise<DonationRecord[]> { return findDonationsByProjectId(projectId, limitCount); }
 /** Hàm lấy tổng hợp donation theo projectId. Mục đích: trả tổng số tiền và số lượt donate cho card thống kê chiến dịch. */
 export async function findDonationSummaryByProjectId(projectId: string): Promise<{ totalAmount: number; donationCount: number }> { return aggregateDonationSummaryByProjectId(projectId); }
+/** Tổng hợp donation đã INDEXED của nhiều project để portal quản trị không gọi từng hồ sơ. */
+export async function findDonationSummariesByProjectIds(projectIds: string[]): Promise<Map<string, { totalAmount: number; donationCount: number }>> { return aggregateDonationSummariesByProjectIds(projectIds); }
 /** Hàm lấy thời gian donation gần nhất theo projectId. Mục đích: trả lastDonationAt thay vì updatedAt của project record cho modal chi tiết. */
 export async function findLatestDonationTimestampByProjectIdFromRepository(projectId: string): Promise<Date | null> { return findLatestDonationTimestampByProjectId(projectId); }
 

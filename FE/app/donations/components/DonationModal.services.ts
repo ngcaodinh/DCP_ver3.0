@@ -5,6 +5,7 @@
  */
 import { ApiErrorResponse, buildApiUrl, fetchApi } from '../../utils/apiClient';
 import { resolveRelayProjectId } from './DonationModal.helpers';
+import type { RecordDonationResponse } from './DonationModal.types';
 
 /* ============================================================
  * AUTHENTICATED DONATION — ONE-CLICK FLOW
@@ -57,13 +58,13 @@ export async function recordDonationByTransactionHash(
   accessToken: string,
   projectId: string,
   transactionHash: string,
-): Promise<void> {
+): Promise<RecordDonationResponse> {
   const normalizedProjectId = resolveRelayProjectId(projectId);
   if (!normalizedProjectId) {
     throw { statusCode: 400, errorCode: 'VALIDATION_ERROR', message: 'Mã dự án không hợp lệ để ghi nhận giao dịch.' } as ApiErrorResponse;
   }
 
-  await fetchApi<{ transactionHash: string }>(buildApiUrl('/donations/record'), {
+  const response = await fetchApi<RecordDonationResponse>(buildApiUrl('/donations/record'), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -71,4 +72,5 @@ export async function recordDonationByTransactionHash(
     },
     body: JSON.stringify({ projectId: normalizedProjectId, transactionHash, isAnonymous: false }),
   });
+  return response.data;
 }

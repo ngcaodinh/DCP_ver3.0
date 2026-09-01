@@ -19,7 +19,20 @@ vi.mock('@/app/utils/authSession', () => ({
 
 vi.mock('@/app/donations/components/DonationModal.services', () => ({
   executeOneClickDonationRequest: vi.fn(() => Promise.resolve('0xtxhash123')),
-  recordDonationByTransactionHash: vi.fn(() => Promise.resolve()),
+  recordDonationByTransactionHash: vi.fn(() => Promise.resolve({
+    transactionHash: '0xtxhash123',
+    projectId: '1001',
+    amount: 1000,
+    timestamp: '2026-08-31T00:00:00.000Z',
+    isAnonymous: false,
+    certificate: {
+      certificateId: 'DCP-2026-0123456789ABCDEF0123456789ABCDEF',
+      issuanceStatus: 'PENDING_FINALITY',
+      finalityMode: 'RPC_FINALIZED',
+      fallbackConfirmations: 12,
+      verificationUrl: '/donations/verify/DCP-2026-0123456789ABCDEF0123456789ABCDEF',
+    },
+  })),
 }));
 
 vi.mock('@/app/utils/guestPayosClient', () => ({

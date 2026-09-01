@@ -45,6 +45,8 @@ import { ensureRootAdminWallets } from './services/authService';
 import { reconcileGovernanceAtStartup } from './services/governanceSeatStartup.service';
 import { isAddress } from 'ethers';
 import { validateAdminLoginWalletConfiguration } from './config/adminAccess';
+import { startDonationCertificateWorker, stopDonationCertificateWorker } from './workers/donationCertificateWorker';
+import { sendDonationCertificateIssuedEmail, sendDonationCertificateRevokedEmail } from './services/donationCertificateEmail.service';
 
 const logger = getLogger();
 
@@ -140,6 +142,7 @@ function startBackgroundWorkers(): void {
   // Trust Score Scheduler (G1): tính lại trust score cho toàn bộ donor mỗi 24 giờ
   startTrustScoreScheduler();
   startProjectActivationWorker();
+  startDonationCertificateWorker({ sendIssuedEmail: sendDonationCertificateIssuedEmail, sendRevokedEmail: sendDonationCertificateRevokedEmail });
 }
 
 /**
@@ -202,6 +205,7 @@ async function startServer(): Promise<void> {
       stopFeedbackPurgeWorker();
       await stopEventLoggerWorker();
       stopEventRetentionWorker();
+      await stopDonationCertificateWorker();
     } catch (error) {
       logger.error('Lỗi khi shutdown workers.', {
         errorMessage: (error as Error).message

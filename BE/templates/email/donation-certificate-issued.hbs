@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="vi">
+  <body style="margin:0;padding:0;background:#F1F5F9;color:#0F172A;font-family:Arial,Helvetica,sans-serif;line-height:1.5">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F1F5F9;padding:24px 10px">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="680" cellpadding="0" cellspacing="0" style="width:100%;max-width:680px;background:#FFFFFF;border:1px solid #E2E8F0;border-radius:10px;overflow:hidden">
+            <tr>
+              <td style="padding:22px 28px;background:#042F2E;color:#FFFFFF">
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td style="font-size:21px;font-weight:800;letter-spacing:1px">DCP</td>
+                    <td align="right" style="font-size:12px;color:#99F6E4">NỀN TẢNG MINH BẠCH ĐÓNG GÓP</td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:30px 36px 34px">
+                <div style="display:inline-block;padding:6px 14px;border:1px solid #99F6E4;border-radius:999px;background:#F0FDFA;color:#0F766E;font-size:12px;font-weight:700">✓ {{statusLabel}}</div>
+                <h1 style="margin:18px 0 4px;color:#042F2E;font-family:Georgia,'Times New Roman',serif;font-size:30px;line-height:1.15;letter-spacing:.5px">GIẤY XÁC NHẬN ĐÓNG GÓP</h1>
+                <p style="margin:0 0 24px;color:#9A721D;font-family:Georgia,'Times New Roman',serif;font-size:15px;font-style:italic">Donation Acknowledgement</p>
+
+                <p style="margin:0 0 12px;color:#334155;font-size:16px">Trân trọng cảm ơn và xác nhận khoản đóng góp của:</p>
+                <div style="display:inline-block;padding:5px 16px;border:1px solid #FDE68A;border-radius:999px;background:#FFFBEB;color:#9A721D;font-size:12px;font-weight:700;letter-spacing:.5px">★ ĐÓNG GÓP CỘNG ĐỒNG · COMMUNITY SUPPORTER</div>
+                <div style="margin:15px 0 8px;color:#064E3B;font-family:Georgia,'Times New Roman',serif;font-size:30px;font-weight:700;letter-spacing:1px;text-transform:uppercase">{{donorName}}</div>
+                <div style="display:inline-block;padding:5px 12px;border:1px solid #CBD5E1;border-radius:6px;background:#F8FAFC;color:#64748B;font-family:'Courier New',monospace;font-size:12px">Mã chứng nhận: {{certificateId}}</div>
+
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:18px;border:1px solid #D4A72C;border-radius:10px;background:#F0FDFA">
+                  <tr>
+                    <td align="center" style="padding:14px 12px 4px;color:#334155;font-size:15px">Giá trị đóng góp đã ghi nhận:</td>
+                  </tr>
+                  <tr>
+                    <td align="center" style="padding:0 12px;color:#042F2E;font-size:28px;font-weight:800">{{amountVndFormatted}} <span style="color:#9A721D;font-size:17px">{{currencyCode}}</span></td>
+                  </tr>
+                  <tr>
+                    <td align="center" style="padding:2px 12px 14px;color:#64748B;font-size:12px">Phương thức: {{paymentMethodLabel}} · Trạng thái thanh toán: Thành công</td>
+                  </tr>
+                </table>
+
+                <p style="margin:18px 0 4px;text-align:center;color:#334155;font-size:16px">Đóng góp cho: <strong style="color:#0F766E">{{projectName}}</strong></p>
+                <p style="margin:0;text-align:center;color:#334155;font-size:16px">Đơn vị tiếp nhận: <strong>{{organizationName}}</strong></p>
+                <div style="margin:16px 0;padding:7px 12px;border:1px solid #A7F3D0;border-radius:8px;background:#ECFDF5;color:#0F766E;text-align:center;font-size:12px;font-weight:700">✓ Thông tin được lưu để hỗ trợ tra cứu trạng thái, theo dõi tiến độ và đối soát công khai</div>
+                <p style="margin:0;text-align:center;color:#64748B;font-family:Georgia,'Times New Roman',serif;font-size:14px;font-style:italic">“Mỗi đóng góp là một niềm tin. DCP cam kết hỗ trợ người đóng góp theo dõi thông tin đã công bố một cách rõ ràng và thuận tiện.”</p>
+                <p style="margin:8px 0 0;text-align:center;color:#64748B;font-family:Georgia,'Times New Roman',serif;font-size:13px;font-style:italic">Hà Nội, {{issuedAtVietnam}}</p>
+
+                <table role="presentation" cellpadding="0" cellspacing="0" style="margin:24px auto 10px">
+                  <tr>
+                    <td style="padding-right:8px"><a href="{{pdfUrl}}" style="display:inline-block;padding:11px 18px;border-radius:7px;background:#0F766E;color:#FFFFFF;font-size:13px;font-weight:700;text-decoration:none">TẢI PDF CHỨNG NHẬN</a></td>
+                    <td style="padding-left:8px"><a href="{{verificationUrl}}" style="display:inline-block;padding:10px 18px;border:1px solid #0F766E;border-radius:7px;color:#0F766E;font-size:13px;font-weight:700;text-decoration:none">MỞ TRANG XÁC MINH</a></td>
+                  </tr>
+                </table>
+                <p style="margin:0;text-align:center;color:#64748B;font-size:12px">Bản PDF chính thức đã được đính kèm trong email này.</p>
+
+                <h2 style="margin:28px 0 10px;color:#0F766E;font-family:Georgia,'Times New Roman',serif;font-size:19px">Thông tin đối soát</h2>
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #E2E8F0;border-radius:7px;overflow:hidden;font-size:12px">
+                  <tr><td width="34%" style="padding:8px;background:#F1F5F9;color:#334155;font-weight:700">Mã giao dịch</td><td style="padding:8px;word-break:break-all;color:#0F766E;font-family:'Courier New',monospace">{{transactionHash}}</td></tr>
+                  <tr><td style="padding:8px;background:#F1F5F9;color:#334155;font-weight:700">Mạng blockchain</td><td style="padding:8px">{{networkName}} · Chain ID: {{chainId}}</td></tr>
+                  <tr><td style="padding:8px;background:#F1F5F9;color:#334155;font-weight:700">Khối xác nhận</td><td style="padding:8px;word-break:break-all">#{{blockNumber}} · {{blockHash}}</td></tr>
+                  <tr><td style="padding:8px;background:#F1F5F9;color:#334155;font-weight:700">Finality</td><td style="padding:8px">{{finalityModeLabel}}</td></tr>
+                  <tr><td style="padding:8px;background:#F1F5F9;color:#334155;font-weight:700">Thời gian ghi nhận</td><td style="padding:8px">{{donatedAtVietnam}}</td></tr>
+                </table>
+
+                <p style="margin:18px 0 0;padding:10px 12px;border-left:3px solid #0F766E;background:#F0FDFA;color:#475569;font-size:12px">DCP không bao giờ yêu cầu private key hoặc seed phrase. Email này là thông báo giao dịch, không chứa yêu cầu tiếp thị.</p>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:14px 28px;border-top:1px solid #E2E8F0;background:#F8FAFC;color:#64748B;font-size:11px">Mã chứng nhận: {{certificateId}} · Tra cứu: <a href="{{verificationUrl}}" style="color:#0F766E">{{verificationUrl}}</a></td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

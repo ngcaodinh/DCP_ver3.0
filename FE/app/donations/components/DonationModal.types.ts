@@ -23,7 +23,13 @@ export type DonationHistoryItem = {
 };
 
 /** Trạng thái giao dịch cho authenticated user donation flow. */
-export type TransactionStatus = 'idle' | 'processing' | 'submitted' | 'success' | 'failed';
+export type TransactionStatus = 'idle' | 'processing' | 'submitted' | 'finalizing' | 'success' | 'failed';
+
+/** Reference certificate trả từ backend sau khi record event on-chain. */
+export type DonationCertificateReference = { certificateId: string; issuanceStatus: 'PENDING_FINALITY' | 'ISSUED' | 'REVOKED' | 'BLOCKED'; finalityMode: 'RPC_FINALIZED' | 'CONFIRMATION_FALLBACK'; fallbackConfirmations: 12; verificationUrl: string; };
+
+/** Response record donation dùng cho UX finality thay vì fire-and-forget API. */
+export type RecordDonationResponse = { transactionHash: string; projectId: string; amount: number; timestamp: string; isAnonymous: boolean; certificate: DonationCertificateReference | null; };
 
 /** Trạng thái hiển thị cho guest donation flow — ánh xạ từ GuestDonationStatus. */
 export type GuestTransactionStatus = 'idle' | 'decrypting' | 'building' | 'paymaster' | 'submitting' | 'indexing' | 'success' | 'failed';

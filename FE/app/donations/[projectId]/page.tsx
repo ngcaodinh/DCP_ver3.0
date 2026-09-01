@@ -15,6 +15,7 @@ import {
 } from '../components/DonationModal.helpers';
 import IpfsEvidencePreviewCard from '../../components/common/IpfsEvidencePreviewCard';
 import { GeofenceMapLazy } from '../../components/oracle/GeofenceMapLazy';
+import ProjectImpactNftSection from '../../components/impactSbt/ProjectImpactNftSection';
 import { buildIpfsGatewayUrl, getIpfsContentType, resolveIpfsPreviewKind } from '../../utils/ipfs';
 import {
   MIN_AMOUNT_PER_DONATION,
@@ -1363,6 +1364,7 @@ export default function DonationProjectDetailPage() {
             <ProjectInfoSection project={projectDetail} />
             <ProjectLocationSection project={projectDetail} />
             <ProjectProgressSection project={projectDetail} />
+            <ProjectImpactNftSection projectId={projectDetail.projectId} />
             <EvidenceSection project={projectDetail} />
 
             <Link

@@ -24,6 +24,7 @@ import { updateAuditByTransactionHash } from '../repositories/anonymousDonationA
 import { incrementSessionDonationCounters } from '../repositories/guestWalletSessionRepository';
 import { recordDonationMetrics } from '../utils/donationMetrics';
 import * as eventLoggerService from './event-logger.service';
+import { createDonationCertificateCandidate, type DonationCertificateReference } from './donationCertificateIssuance.service';
 
 const logger = getLogger();
 
@@ -664,7 +665,7 @@ function isValidTransactionHash(transactionHashValue: string): boolean {
 }
 
 /** Hàm ghi nhận donation từ transaction hash của người dùng. Mục đích: xác minh event on-chain rồi upsert lịch sử donation công khai. */
-export async function recordDonationFromTransactionHash(authenticatedUserId: string, projectId: string, transactionHash: string, isAnonymous: boolean) {
+export async function recordDonationFromTransactionHash(authenticatedUserId: string, projectId: string, transactionHash: string, isAnonymous: boolean): Promise<{ transactionHash: string; projectId: string; amount: number; timestamp: string; isAnonymous: boolean; certificate: DonationCertificateReference | null }> {
   const normalizedAuthenticatedUserId = authenticatedUserId.trim();
   const normalizedProjectId = projectId.trim();
   const normalizedTransactionHash = transactionHash.trim();
@@ -706,6 +707,7 @@ export async function recordDonationFromTransactionHash(authenticatedUserId: str
 
   const eventInterface = new ethers.Interface(donationReceivedEventAbi);
   let donationEventRecord: DonationEventLog | null = null;
+  let donationAmountRaw = '';
 
   for (const receiptLog of transactionReceipt.logs) {
     if (String(receiptLog.address).toLowerCase() !== donationRankingContractAddress.toLowerCase()) {
@@ -761,6 +763,7 @@ export async function recordDonationFromTransactionHash(authenticatedUserId: str
       createdAt: now,
       updatedAt: now
     };
+    donationAmountRaw = parsedLog.args.amount.toString();
 
     break;
   }
@@ -800,11 +803,25 @@ export async function recordDonationFromTransactionHash(authenticatedUserId: str
     donationEventRecord.donorAddress
   );
 
+  // Candidate chỉ nhận dữ liệu event on-chain; request body không được dùng làm nguồn amount hay donor.
+  const certificate = donationEventRecord.isAnonymous
+    ? null
+    : await createDonationCertificateCandidate({
+      transactionHash: donationEventRecord.transactionHash,
+      donorUserId: normalizedAuthenticatedUserId,
+      expectedProjectId: donationEventRecord.projectId,
+      expectedDonorAddress: donationEventRecord.donorAddress,
+      expectedAmountRaw: donationAmountRaw,
+      expectedIsAnonymous: false,
+      observedAt: donationEventRecord.timestamp
+    });
+
   return {
     transactionHash: donationEventRecord.transactionHash,
     projectId: donationEventRecord.projectId,
     amount: donationEventRecord.amount,
     timestamp: donationEventRecord.timestamp.toISOString(),
-    isAnonymous: donationEventRecord.isAnonymous
+    isAnonymous: donationEventRecord.isAnonymous,
+    certificate
   };
 }

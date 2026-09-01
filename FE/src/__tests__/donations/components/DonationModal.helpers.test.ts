@@ -135,6 +135,11 @@ describe('DonationModal.helpers', () => {
       expect(result).toBe('Đã gửi giao dịch');
     });
 
+    it('should map finalizing status', () => {
+      const result = mapTransactionStatusToVietnamese('finalizing');
+      expect(result).toBe('Đang chờ blockchain finality');
+    });
+
     it('should map success status', () => {
       const result = mapTransactionStatusToVietnamese('success');
       expect(result).toBe('Thành công');

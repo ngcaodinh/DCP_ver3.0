@@ -134,6 +134,14 @@ export const donationAmountVnd = new Histogram({
   registers: [metricsRegistry]
 });
 
+/** Các metric certificate không chứa mã certificate, txHash, email hay userId trong label. */
+export const donationCertificateIssuedTotal = new Counter({ name: 'donation_certificate_issued_total', help: 'Tổng certificate đã phát hành.', labelNames: ['finality_mode'], registers: [metricsRegistry] });
+export const donationCertificateRevokedTotal = new Counter({ name: 'donation_certificate_revoked_total', help: 'Tổng certificate đã thu hồi.', labelNames: ['reason_code'], registers: [metricsRegistry] });
+export const donationCertificateEmailTotal = new Counter({ name: 'donation_certificate_email_total', help: 'Tổng kết quả gửi email certificate.', labelNames: ['status'], registers: [metricsRegistry] });
+export const donationCertificatePipelineDurationSeconds = new Histogram({ name: 'donation_certificate_pipeline_duration_seconds', help: 'Thời lượng từng stage pipeline certificate.', labelNames: ['stage'], buckets: HTTP_REQUEST_DURATION_BUCKETS, registers: [metricsRegistry] });
+export const donationCertificatePendingAgeSeconds = new Gauge({ name: 'donation_certificate_pending_age_seconds', help: 'Tuổi certificate đang chờ finality.', registers: [metricsRegistry] });
+export const donationCertificateRpcUnavailableTotal = new Counter({ name: 'donation_certificate_rpc_unavailable_total', help: 'Tổng lỗi RPC tạm thời của certificate pipeline.', registers: [metricsRegistry] });
+
 /** Counter đếm feedback đã quá hạn lưu trữ và bị purge cứng khỏi MongoDB. */
 export const feedbackHardPurgedTotal = new Counter({
   name: 'dcp_feedback_hard_purged_total',

@@ -92,6 +92,12 @@ const nextConfig = {
   async headers() {
     return [
       {
+        source: '/donations/verify/:path*',
+        headers: [
+          { key: 'Cache-Control', value: 'no-store' }
+        ]
+      },
+      {
         // Không áp dụng policy cấm thiết bị lên /auditor để tránh browser nhận hai Permissions-Policy mâu thuẫn.
         source: '/((?!auditor(?:/|$)).*)',
         headers: [
@@ -173,7 +179,7 @@ const nextConfig = {
       {
         // Static pages — không bao gồm /donate vì donate có wallet state (không nên cache trên CDN)
         // Tunnel không được dính Cache-Control public vì đây là endpoint ingest động.
-        source: '/((?!api|_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml|donate|feedback|sentry-tunnel).*)',
+        source: '/((?!api|_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml|donate|donations/verify|feedback|sentry-tunnel).*)',
         headers: [
           {
             key: 'Cache-Control',

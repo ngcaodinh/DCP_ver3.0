@@ -24,6 +24,13 @@ import type { DeliveryResult, DispatchContext } from './types/delivery.types';
  */
 const EMAIL_SEND_TIMEOUT_MS = 30_000;
 
+/** Tệp đính kèm nhị phân được phép gửi trong email transactional. */
+export interface EmailAttachment {
+  filename: string;
+  content: Buffer;
+  contentType: string;
+}
+
 const logger = getLogger();
 
 /**
@@ -46,6 +53,16 @@ function escapeHtmlEntities(value: unknown): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
+}
+
+/** Làm sạch đệ quy context template để payload lồng nhau cũng không thể chèn HTML. */
+function sanitizeTemplateContext(value: unknown): unknown {
+  if (typeof value === 'string') return escapeHtmlEntities(value);
+  if (Array.isArray(value)) return value.map(sanitizeTemplateContext);
+  if (value && typeof value === 'object' && !(value instanceof Date)) {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, nestedValue]) => [key, sanitizeTemplateContext(nestedValue)]));
+  }
+  return value;
 }
 
 // Cache compiled templates để không phải compile lại mỗi lần gửi.
@@ -195,11 +212,7 @@ function renderTemplate(templateName: string, context: Record<string, unknown>):
   const template = loadTemplate(templateName);
   // Escape HTML entities cho tất cả giá trị string trong context.
   // Đảm bảo content/title không inject được HTML vào email ngay cả khi template dùng triple-brace.
-  const sanitizedContext: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(context)) {
-    sanitizedContext[key] = typeof value === 'string' ? escapeHtmlEntities(value) : value;
-  }
-  return template(sanitizedContext) as string;
+  return template(sanitizeTemplateContext(context) as Record<string, unknown>) as string;
 }
 
 /**
@@ -213,6 +226,7 @@ async function sendEmailOnce(options: {
   to: string;
   subject: string;
   html: string;
+  attachments?: EmailAttachment[];
 }): Promise<DeliveryResult> {
   const tp = getTransporter();
   if (!tp) {
@@ -246,6 +260,7 @@ async function sendEmailOnce(options: {
         subject: options.subject,
         html: options.html,
         text: options.html.replace(/<[^>]+>/g, ''), // Plain text fallback
+        ...(options.attachments?.length ? { attachments: options.attachments } : {}),
         headers: {
           'X-Mailer': 'DCP-Notification-System'
         }
@@ -319,6 +334,7 @@ export async function sendEmailWithRetry(options: {
   to: string;
   subject: string;
   html: string;
+  attachments?: EmailAttachment[];
 }): Promise<DeliveryResult> {
   // Một lần gửi duy nhất — Bull queue xử lý retry nếu cần (không block worker)
   const result = await sendEmailOnce(options);
@@ -345,26 +361,30 @@ export async function sendEmail(options: {
   templateName: string;
   subject: string;
   templateContext: Record<string, unknown>;
+  attachments?: EmailAttachment[];
   unsubscribeToken?: string;
+  includeUnsubscribeLink?: boolean;
 }): Promise<DeliveryResult> {
   try {
     // Resolve unsubscribe base URL: production BẮT BUỘC có FRONTEND_URL env var
     // (helper này throw nếu thiếu trong production — không fallback về localhost).
-    const unsubscribeBaseUrl = getResolvedUnsubscribeBaseUrl();
-    const unsubscribeUrl = options.unsubscribeToken
-      ? `${unsubscribeBaseUrl}?token=${options.unsubscribeToken}`
-      : `${unsubscribeBaseUrl}`;
+    const includeUnsubscribeLink = options.includeUnsubscribeLink !== false;
+    const unsubscribeBaseUrl = includeUnsubscribeLink ? getResolvedUnsubscribeBaseUrl() : '';
+    const unsubscribeUrl = includeUnsubscribeLink
+      ? options.unsubscribeToken ? `${unsubscribeBaseUrl}?token=${options.unsubscribeToken}` : unsubscribeBaseUrl
+      : '';
 
     const html = renderTemplate(options.templateName, {
       ...options.templateContext,
-      unsubscribeUrl,
+      ...(includeUnsubscribeLink ? { unsubscribeUrl } : {}),
       year: new Date().getFullYear()
     });
 
     return await sendEmailWithRetry({
       to: options.to,
       subject: options.subject,
-      html
+      html,
+      attachments: options.attachments
     });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);

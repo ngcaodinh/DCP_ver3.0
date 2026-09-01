@@ -47,6 +47,12 @@ vi.mock('@/app/components/oracle/GeofenceMapLazy', () => ({
   ),
 }));
 
+vi.mock('@/app/components/impactSbt/ProjectImpactNftSection', () => ({
+  default: ({ projectId }: { projectId: string }) => (
+    <div data-testid="project-impact-nft-section-stub">{projectId}</div>
+  ),
+}));
+
 vi.mock('@/app/donations/components/DonationModal.services', () => ({
   executeOneClickDonationRequest: vi.fn(),
 }));
@@ -183,6 +189,13 @@ describe('DonationProjectDetailPage', () => {
     await waitFor(() => {
       expect(container.querySelector('a[href="/feedback/project-001"]')).toBeInTheDocument();
     });
+    const impactSection = screen.getByTestId('project-impact-nft-section-stub');
+    const progressHeading = screen.getByRole('heading', { name: 'Tiến độ gây quỹ' });
+    const evidenceHeading = screen.getByRole('heading', { name: 'Bằng chứng minh bạch' });
+
+    expect(impactSection).toHaveTextContent('project-001');
+    expect(progressHeading.compareDocumentPosition(impactSection)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(impactSection.compareDocumentPosition(evidenceHeading)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   });
 
   it('hiển thị tên vùng, Google Maps và bản đồ ranh giới từ dữ liệu public', async () => {

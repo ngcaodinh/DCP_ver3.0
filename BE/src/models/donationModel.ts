@@ -119,7 +119,7 @@ export async function findDonationsByDonorAddress(donorAddress: string): Promise
 /** Hàm lấy tổng donation theo project. Mục đích: trả về số tiền đã quyên góp để hiển thị ở danh sách và trang chi tiết. */
 export async function aggregateDonationSummaryByProjectId(projectId: string): Promise<{ totalAmount: number; donationCount: number }> {
   const aggregateResult = await DonationMongoModel.aggregate<{ totalAmount: number; donationCount: number }>([
-    { $match: { projectId } },
+    { $match: { projectId, donationStatus: 'INDEXED' } },
     { $group: { _id: null, totalAmount: { $sum: '$amount' }, donationCount: { $sum: 1 } } }
   ]);
 
@@ -128,6 +128,17 @@ export async function aggregateDonationSummaryByProjectId(projectId: string): Pr
   }
 
   return { totalAmount: aggregateResult[0].totalAmount, donationCount: aggregateResult[0].donationCount };
+}
+
+/** Tổng hợp donation INDEXED cho nhiều project trong một query để read model Ủy ban không bị N+1. */
+export async function aggregateDonationSummariesByProjectIds(projectIds: string[]): Promise<Map<string, { totalAmount: number; donationCount: number }>> {
+  const normalizedProjectIds = [...new Set(projectIds.map(projectId => String(projectId || '').trim()).filter(Boolean))];
+  if (!normalizedProjectIds.length) return new Map();
+  const aggregateResult = await DonationMongoModel.aggregate<{ _id: string; totalAmount: number; donationCount: number }>([
+    { $match: { projectId: { $in: normalizedProjectIds }, donationStatus: 'INDEXED' } },
+    { $group: { _id: '$projectId', totalAmount: { $sum: '$amount' }, donationCount: { $sum: 1 } } }
+  ]);
+  return new Map(aggregateResult.map(item => [item._id, { totalAmount: item.totalAmount, donationCount: item.donationCount }]));
 }
 
 /** Hàm lấy block lớn nhất đã index. Mục đích: hỗ trợ endpoint sync event chỉ đọc block mới. */

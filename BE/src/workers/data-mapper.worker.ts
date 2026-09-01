@@ -33,6 +33,8 @@ import {
 import { upsertDonationByTransactionHash } from '../models/donationModel';
 import type { UnifiedTransaction } from '../models/unifiedTransactionModel';
 import { sanitizeProviderError } from '../utils/sanitizeProviderError';
+import { findUserByWalletAddress } from '../models/authModel';
+import { createDonationCertificateCandidate } from '../services/donationCertificateIssuance.service';
 
 const logger = getLogger();
 
@@ -506,6 +508,13 @@ async function persistBlockchainDonationEvent(
         updatedAt: indexedAt
       });
       donationWriteSucceeded = true;
+      // Data mapper là recovery path; candidate vẫn idempotent theo chain/transaction.
+      if (!Boolean(parsed.args.isAnonymous)) {
+        const donorUser = await findUserByWalletAddress(donorAddress);
+        if (donorUser) {
+          await createDonationCertificateCandidate({ transactionHash: txHash, donorUserId: donorUser.id, expectedProjectId: projectId, expectedDonorAddress: donorAddress, expectedAmountRaw: parsed.args.amount.toString(), expectedIsAnonymous: false, observedAt: eventTimestamp });
+        }
+      }
     } catch (err) {
       logger.error('[DataMapper] lỗi khi upsert donation record.', {
         transactionHash: txHash,

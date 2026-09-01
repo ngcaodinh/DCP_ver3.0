@@ -52,6 +52,7 @@ export default function DonationModal({ campaignItem, onClose, onDonationSuccess
   const [successNoticeMessage, setSuccessNoticeMessage] = useState('');
   const [isSuccessNoticeVisible, setIsSuccessNoticeVisible] = useState(false);
   const [historyList, setHistoryList] = useState<DonationHistoryItem[]>([]);
+  const [certificateVerificationUrl, setCertificateVerificationUrl] = useState<string | null>(null);
 
   // PayOS donation state
   const [payosOrderCode, setPayosOrderCode] = useState<string | null>(null);
@@ -184,7 +185,7 @@ export default function DonationModal({ campaignItem, onClose, onDonationSuccess
   // ============================================================
 
   /** Xử lý hiển thị thành công sau khi blockchain confirm — tách riêng để dễ đọc. */
-  const handleAuthDonationSuccess = useCallback((
+  const handleAuthDonationSuccess = useCallback(async (
     transactionHash: string,
     projectId: string,
     accessToken: string,
@@ -193,12 +194,20 @@ export default function DonationModal({ campaignItem, onClose, onDonationSuccess
     setTransactionStatus('submitted');
     setStatusMessage(`Đã gửi giao dịch lên blockchain (${shortenedTransactionHash}). Đang ghi nhận vào hệ thống...`);
 
-    recordDonationByTransactionHash(accessToken, projectId, transactionHash).catch(err => {
-      console.warn('[DonationModal] recordDonationByTransactionHash thất bại (backend đã ghi nền):', (err as ApiErrorResponse)?.message);
-    });
-
-    setTransactionStatus('success');
-    setStatusMessage('Giao dịch quyên góp đã được xác nhận thành công trên blockchain.');
+    setTransactionStatus('finalizing');
+    try {
+      const record = await recordDonationByTransactionHash(accessToken, projectId, transactionHash);
+      setCertificateVerificationUrl(record.certificate?.verificationUrl ?? null);
+      setTransactionStatus('success');
+      setStatusMessage(record.certificate
+        ? 'Giao dịch đã được blockchain ghi nhận. Chứng nhận đang chờ finality và thường được gửi qua email trong 5–20 giây.'
+        : 'Giao dịch quyên góp đã được blockchain ghi nhận thành công.');
+    } catch {
+      setTransactionStatus('failed');
+      setCertificateVerificationUrl(null);
+      setStatusMessage(`Không thể ghi nhận giao dịch lúc này. Bạn vẫn có thể tự kiểm tra tx: ${shortenedTransactionHash}`);
+      return;
+    }
     setSuccessNoticeMessage('Quyên góp thành công! Cảm ơn bạn vì tấm lòng sẻ chia.');
     setIsSuccessNoticeVisible(true);
 
@@ -256,7 +265,7 @@ export default function DonationModal({ campaignItem, onClose, onDonationSuccess
         false,
       );
 
-      void handleAuthDonationSuccess(transactionHash, campaignItem.projectId, token);
+      await handleAuthDonationSuccess(transactionHash, campaignItem.projectId, token);
     } catch (error) {
       void handleAuthDonationError(error);
     } finally {
@@ -355,6 +364,7 @@ export default function DonationModal({ campaignItem, onClose, onDonationSuccess
         successNoticeMessage={successNoticeMessage}
         isSuccessNoticeVisible={isSuccessNoticeVisible}
         historyList={historyList}
+        certificateVerificationUrl={certificateVerificationUrl}
         onOpenConfirmModal={() => handleOpenConfirmModal(
           campaignItem.minDonation,
           campaignItem.maxDonation,
@@ -420,6 +430,7 @@ interface AuthenticatedDonationViewProps {
   successNoticeMessage: string;
   isSuccessNoticeVisible: boolean;
   historyList: DonationHistoryItem[];
+  certificateVerificationUrl: string | null;
   onOpenConfirmModal: () => void;
   onCloseConfirmModal: () => void;
   onConfirmSubmit: () => void;
@@ -438,6 +449,7 @@ function AuthenticatedDonationView({
   successNoticeMessage,
   isSuccessNoticeVisible,
   historyList,
+  certificateVerificationUrl,
   onOpenConfirmModal,
   onCloseConfirmModal,
   onConfirmSubmit,
@@ -501,6 +513,11 @@ function AuthenticatedDonationView({
           Trạng thái: {mapTransactionStatusToVietnamese(transactionStatus)}
         </p>
         <p className="mt-1 text-sm text-[#374151]">{statusMessage}</p>
+        {certificateVerificationUrl && (
+          <a className="mt-2 inline-block text-sm font-medium text-[#0e7c6b] underline" href={certificateVerificationUrl}>
+            Theo dõi trạng thái chứng nhận
+          </a>
+        )}
 
         <div className="mt-4 space-y-2">
           {historyList.length === 0 && (

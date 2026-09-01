@@ -1,0 +1,10 @@
+import type { Request, Response } from 'express';
+import { CERTIFICATE_ID_PATTERN, getPublicDonationCertificate } from '../services/donationCertificatePublic.service';
+import { findDonationCertificateById } from '../repositories/donationCertificateRepository';
+import { DonationCertificatePdfError, renderDonationCertificatePdf } from '../services/donationCertificatePdf.service';
+
+/** Trả JSON verify công khai với cache no-store để không phát lại trạng thái blockchain cũ. */
+export async function handleGetDonationCertificate(request: Request, response: Response): Promise<void> { const certificate = await getPublicDonationCertificate(String(request.params.certificateId ?? '')); response.setHeader('Cache-Control', 'no-store'); if (!certificate) { response.status(404).json({ success: false, message: 'Không tìm thấy chứng nhận', errorCode: 'NOT_FOUND' }); return; } response.status(200).json({ success: true, message: '', data: certificate, correlationId: null }); }
+
+/** Tải PDF attachment chỉ từ snapshot ISSUED/REVOKED, không cache ở browser/CDN. */
+export async function handleDownloadDonationCertificatePdf(request: Request, response: Response): Promise<void> { const certificateId = String(request.params.certificateId ?? ''); if (!CERTIFICATE_ID_PATTERN.test(certificateId)) { response.status(404).json({ success: false, message: 'Không tìm thấy chứng nhận', errorCode: 'NOT_FOUND' }); return; } const certificate = await findDonationCertificateById(certificateId); if (!certificate) { response.status(404).json({ success: false, message: 'Không tìm thấy chứng nhận', errorCode: 'NOT_FOUND' }); return; } try { const pdf = await renderDonationCertificatePdf(certificate); response.status(200).setHeader('Content-Type', 'application/pdf').setHeader('Content-Disposition', `attachment; filename="DCP-Certificate-${certificateId}.pdf"`).setHeader('X-Content-Type-Options', 'nosniff').setHeader('Cache-Control', 'no-store').send(pdf); } catch (error) { if (error instanceof DonationCertificatePdfError) { response.status(409).json({ success: false, message: 'Chứng nhận chưa được phát hành', errorCode: error.message }); return; } throw error; } }

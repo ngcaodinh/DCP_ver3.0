@@ -44,6 +44,7 @@ export function mapTransactionStatusToVietnamese(statusValue: TransactionStatus)
     case 'idle': return 'Sẵn sàng';
     case 'processing': return 'Đang xử lý';
     case 'submitted': return 'Đã gửi giao dịch';
+    case 'finalizing': return 'Đang chờ blockchain finality';
     case 'success': return 'Thành công';
     case 'failed': return 'Thất bại';
   }

@@ -10,6 +10,10 @@ import {
   handleStreamPublicLiveFeed,
   handleSyncDonationEventsFromBlockchain
 } from '../controllers/donationController';
+import {
+  handleDownloadDonationCertificatePdf,
+  handleGetDonationCertificate
+} from '../controllers/donationCertificateController';
 import { createAuthenticationMiddleware } from '../middleware/authenticationMiddleware';
 import { attachRequestMetadata } from '../middleware/ipMetadataMiddleware';
 import { createRateLimitMiddleware } from '../middleware/rateLimitMiddleware';
@@ -22,6 +26,8 @@ export function createDonationRoutes(): Router {
   const adminAuthorizationMiddleware = createRoleAuthorizationMiddleware(['admin']);
   const getCampaignRateLimit = createRateLimitMiddleware(80, 60 * 1000, { bucketName: 'donation:get-campaign' });
   const getHistoryRateLimit = createRateLimitMiddleware(100, 60 * 1000, { bucketName: 'donation:get-history' });
+  const getCertificateRateLimit = createRateLimitMiddleware(60, 60 * 1000, { bucketName: 'donation:get-certificate' });
+  const getCertificatePdfRateLimit = createRateLimitMiddleware(20, 60 * 1000, { bucketName: 'donation:get-certificate-pdf' });
   const syncEventsRateLimit = createRateLimitMiddleware(10, 60 * 1000, { bucketName: 'donation:sync-events' });
 
   router.get('/campaigns', attachRequestMetadata(), getCampaignRateLimit, handleGetPublicDonationCampaigns);
@@ -30,6 +36,8 @@ export function createDonationRoutes(): Router {
   router.get('/donors', attachRequestMetadata(), getHistoryRateLimit, handleGetPublicDonorList);
   router.get('/live-feed', attachRequestMetadata(), getHistoryRateLimit, handleGetPublicLiveFeed);
   router.get('/live-feed/stream', attachRequestMetadata(), getHistoryRateLimit, handleStreamPublicLiveFeed);
+  router.get('/certificates/:certificateId/pdf', attachRequestMetadata(), getCertificatePdfRateLimit, handleDownloadDonationCertificatePdf);
+  router.get('/certificates/:certificateId', attachRequestMetadata(), getCertificateRateLimit, handleGetDonationCertificate);
   router.post('/one-click', attachRequestMetadata(), authenticationMiddleware, getHistoryRateLimit, handleOneClickDonation);
   router.post('/record', attachRequestMetadata(), authenticationMiddleware, getHistoryRateLimit, handleRecordDonationFromTransactionHash);
 

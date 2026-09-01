@@ -2482,6 +2482,9 @@ export default function HomePage() {
                 <a href="/pending-projects">Dự án đang niêm yết chờ kích hoạt</a>
               </li>
               <li>
+                <a href="/impact-gallery">Impact NFT Gallery</a>
+              </li>
+              <li>
                 <a href="#">Bảng xếp hạng QF</a>
               </li>
               <li>
