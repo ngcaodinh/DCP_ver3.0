@@ -65,7 +65,7 @@ describe('email.service transactional certificate delivery', () => {
     expect(message.attachments).toEqual([{ filename: 'DCP-Certificate-DCP-TEST-2026-0001.pdf', content: pdf, contentType: 'application/pdf' }]);
   });
 
-  it('escape dữ liệu donor trước khi chèn vào HTML email và vẫn gửi thành công', async () => {
+  it('escape dữ liệu donor đúng một lần qua cơ chế mặc định của Handlebars', async () => {
     sendMailMock.mockResolvedValue({ messageId: 'gmail-message-2' });
 
     const result = await sendEmail({
@@ -79,6 +79,22 @@ describe('email.service transactional certificate delivery', () => {
     expect(result.success).toBe(true);
     const message = sendMailMock.mock.calls[0][0] as { html: string };
     expect(message.html).not.toContain('<img src=x onerror=alert(1)>');
-    expect(message.html).toContain('&amp;lt;img');
+    expect(message.html).toContain('&lt;img');
+  });
+
+  it('hiển thị đúng ký tự ampersand trong tên tổ chức mà không double-escape', async () => {
+    sendMailMock.mockResolvedValue({ messageId: 'gmail-message-3' });
+
+    await sendEmail({
+      to: 'donor@example.com',
+      templateName: 'donation-certificate-issued',
+      subject: 'DCP – Certificate',
+      templateContext: createTemplateContext({ organizationName: 'Quỹ Bảo trợ & Người khuyết tật' }),
+      includeUnsubscribeLink: false
+    });
+
+    const message = sendMailMock.mock.calls[0][0] as { html: string };
+    expect(message.html).toContain('Quỹ Bảo trợ &amp; Người khuyết tật');
+    expect(message.html).not.toContain('&amp;amp;');
   });
 });

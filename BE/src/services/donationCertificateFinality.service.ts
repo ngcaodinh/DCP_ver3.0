@@ -6,6 +6,8 @@ import { findProjectByProjectId } from '../models/projectModel';
 
 const DONATION_RECEIVED_ABI = ['event DonationReceived(address indexed donor, uint256 indexed projectId, uint256 amount, uint256 timestamp, bool isAnonymous)'];
 
+class InvalidDonationCertificateProviderConfigurationError extends Error {}
+
 export type DonationFinalityVerdict =
   | { status: 'PENDING'; finalityMode: DonationCertificateFinalityMode; currentConfirmations: number; finalizedBlockNumber: number | null }
   | { status: 'VERIFIED'; finalityMode: DonationCertificateFinalityMode; currentConfirmations: number; finalizedBlockNumber: number | null; snapshot: DonationCertificateSnapshot }
@@ -29,23 +31,50 @@ function classifyRpcFailure(error: unknown): DonationFinalityVerdict['status'] |
 /** Tạo provider có kiểm tra chain trước khi tin dữ liệu receipt/event. */
 async function getConfiguredProviders(): Promise<ethers.JsonRpcProvider[]> {
   const urls = [process.env.BLOCKCHAIN_RPC_URL, process.env.BLOCKCHAIN_RPC_FALLBACK_URL].map(value => String(value ?? '').trim()).filter(Boolean);
-  if (!urls.length) throw new Error('Missing RPC URL');
+  if (!urls.length) throw new InvalidDonationCertificateProviderConfigurationError('Missing RPC URL');
   const config = getDonationCertificateConfig();
   const providers: ethers.JsonRpcProvider[] = [];
+  let lastProviderError: unknown = null;
   for (const url of [...new Set(urls)]) {
-    const provider = new ethers.JsonRpcProvider(url);
-    const network = await provider.getNetwork();
-    if (Number(network.chainId) === config.chainId) providers.push(provider);
+    try {
+      const provider = new ethers.JsonRpcProvider(url);
+      const network = await provider.getNetwork();
+      if (Number(network.chainId) === config.chainId) providers.push(provider);
+    } catch (error) {
+      lastProviderError = error;
+    }
   }
-  if (!providers.length) throw new Error('Configured RPC does not match chain ID');
+  if (lastProviderError) throw lastProviderError;
+  if (!providers.length) throw new InvalidDonationCertificateProviderConfigurationError('Configured RPC does not match chain ID');
   return providers;
+}
+
+/** Lấy block hiện tại từ các RPC hợp lệ để worker quét cửa sổ reorg theo bounded batch. */
+export async function getCurrentDonationCertificateBlockNumber(): Promise<number | null> {
+  try {
+    const providers = await getConfiguredProviders();
+    for (const provider of providers) {
+      try {
+        return await provider.getBlockNumber();
+      } catch {
+        // Thử provider kế tiếp để scheduler không bị dừng khi RPC chính tạm thời lỗi.
+      }
+    }
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 /** Xác minh receipt, event và finality để dựng snapshot bất biến từ canonical chain. */
 export async function verifyDonationCertificateFinality(input: DonationCertificateVerificationInput): Promise<DonationFinalityVerdict> {
   let config: ReturnType<typeof getDonationCertificateConfig>;
   let providers: ethers.JsonRpcProvider[];
-  try { config = getDonationCertificateConfig(); providers = await getConfiguredProviders(); } catch { return { status: 'BLOCKED', reasonCode: 'INVALID_CONFIGURATION' }; }
+  try { config = getDonationCertificateConfig(); } catch { return { status: 'BLOCKED', reasonCode: 'INVALID_CONFIGURATION' }; }
+  try { providers = await getConfiguredProviders(); } catch (error) {
+    if (error instanceof InvalidDonationCertificateProviderConfigurationError) return { status: 'BLOCKED', reasonCode: 'INVALID_CONFIGURATION' };
+    return { status: 'UNAVAILABLE', retryAfterMs: config.pollIntervalMs, errorCode: classifyRpcFailure(error) === 'UNAVAILABLE' ? 'RPC_RATE_LIMITED' : 'RPC_UNAVAILABLE' };
+  }
   let receipt: ethers.TransactionReceipt | null = null;
   let provider: ethers.JsonRpcProvider | null = null;
   let transientFailure: DonationFinalityVerdict | null = null;

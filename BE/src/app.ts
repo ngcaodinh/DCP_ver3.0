@@ -177,7 +177,11 @@ function registerRoutes(): void {
   application.use('/api/deposit', createDepositRoutes());
   application.use('/api/auditor-onboarding', createAuditorOnboardingRoutes());
   application.use('/projects', createProjectRoutes());
-  application.use('/donations', createDonationRoutes());
+  // Dùng cùng một router cho URL legacy và URL /api mà Next.js rewrite từ frontend.
+  // Giữ /donations để không phá các client hiện hữu, đồng thời bảo đảm link verify/PDF same-origin hoạt động.
+  const donationRoutes = createDonationRoutes();
+  application.use('/donations', donationRoutes);
+  application.use('/api/donations', donationRoutes);
   application.use('/rankings', createRankingRoutes());
   application.use('/api/sybil', createSybilRoutes());
   application.use('/api/disbursement', createDisbursementRoutes());

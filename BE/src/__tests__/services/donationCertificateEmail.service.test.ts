@@ -6,7 +6,6 @@ const mocks = vi.hoisted(() => ({
   updateDonationCertificateEmailState: vi.fn(),
   findUserById: vi.fn(),
   sendEmail: vi.fn(),
-  renderDonationCertificatePdf: vi.fn(),
   getDonationCertificateConfig: vi.fn()
 }));
 
@@ -21,10 +20,6 @@ vi.mock('../../models/authModel', () => ({
 
 vi.mock('../../services/email.service', () => ({
   sendEmail: mocks.sendEmail
-}));
-
-vi.mock('../../services/donationCertificatePdf.service', () => ({
-  renderDonationCertificatePdf: mocks.renderDonationCertificatePdf
 }));
 
 vi.mock('../../config/donationCertificateConfig', () => ({
@@ -92,7 +87,6 @@ describe('donationCertificateEmail.service', () => {
       frontendUrl: 'https://dcp.example',
       explorerTransactionBaseUrl: 'https://explorer.example/tx'
     });
-    mocks.renderDonationCertificatePdf.mockResolvedValue(Buffer.from('%PDF-demo'));
   });
 
   it('không gửi email phát hành khi certificate đã bị thu hồi trước lúc worker xử lý job', async () => {
@@ -134,7 +128,7 @@ describe('donationCertificateEmail.service', () => {
     expect(mocks.sendEmail).not.toHaveBeenCalled();
   });
 
-  it('gửi email phát hành kèm PDF và context hiển thị VNĐ cùng phương thức chuyển khoản ngân hàng', async () => {
+  it('gửi email phát hành dạng link-only cùng context hiển thị VNĐ và phương thức chuyển khoản ngân hàng', async () => {
     const certificate = createCertificate();
     mocks.findDonationCertificateById.mockResolvedValue(certificate);
     mocks.findUserById.mockResolvedValue({ email: 'donor@example.com', isEmailVerified: true });
@@ -143,20 +137,71 @@ describe('donationCertificateEmail.service', () => {
 
     await expect(sendDonationCertificateIssuedEmail(certificate.certificateId)).resolves.toMatchObject({ success: true });
 
-    expect(mocks.renderDonationCertificatePdf).toHaveBeenCalledWith(certificate);
     expect(mocks.sendEmail).toHaveBeenCalledWith(expect.objectContaining({
       to: 'donor@example.com',
       templateName: 'donation-certificate-issued',
-      attachments: [expect.objectContaining({
-        filename: expect.stringMatching(/^DCP-Certificate-.*\.pdf$/),
-        content: Buffer.from('%PDF-demo'),
-        contentType: 'application/pdf'
-      })],
       templateContext: expect.objectContaining({
         amountVndFormatted: '1.000',
         currencyCode: 'VNĐ',
         paymentMethodLabel: 'Chuyển khoản ngân hàng'
       })
     }));
+    expect(mocks.sendEmail.mock.calls[0][0]).not.toHaveProperty('attachments');
+  });
+
+  it('lưu RETRYING và tăng attemptCount khi SMTP trả lỗi có thể retry', async () => {
+    const certificate = createCertificate();
+    mocks.findDonationCertificateById.mockResolvedValue(certificate);
+    mocks.findUserById.mockResolvedValue({ email: 'donor@example.com', isEmailVerified: true });
+    mocks.updateDonationCertificateEmailState.mockResolvedValueOnce(true).mockResolvedValueOnce(true);
+    mocks.sendEmail.mockResolvedValue({ success: false, channel: 'EMAIL', retryable: true, errorMessage: 'SMTP timeout' });
+
+    await expect(sendDonationCertificateIssuedEmail(certificate.certificateId)).resolves.toMatchObject({ success: false, retryable: true });
+
+    expect(mocks.updateDonationCertificateEmailState).toHaveBeenLastCalledWith(
+      certificate.certificateId,
+      'ISSUANCE',
+      'RETRYING',
+      'RETRYING',
+      { attemptCount: 1, lastErrorCode: 'SMTP timeout' }
+    );
+  });
+
+  it('không gửi SMTP khi claim delivery CAS bị worker khác lấy trước', async () => {
+    const certificate = createCertificate();
+    mocks.findDonationCertificateById.mockResolvedValue(certificate);
+    mocks.findUserById.mockResolvedValue({ email: 'donor@example.com', isEmailVerified: true });
+    mocks.updateDonationCertificateEmailState.mockResolvedValue(null);
+
+    await expect(sendDonationCertificateIssuedEmail(certificate.certificateId)).resolves.toMatchObject({ success: true });
+
+    expect(mocks.sendEmail).not.toHaveBeenCalled();
+    expect(mocks.updateDonationCertificateEmailState).toHaveBeenCalledTimes(1);
+  });
+
+  it('gửi thành công email REVOCATION bằng template và trạng thái CAS riêng', async () => {
+    const certificate = createCertificate({
+      issuanceStatus: 'REVOKED',
+      revokedAt: new Date('2026-08-31T00:03:00.000Z')
+    });
+    mocks.findDonationCertificateById.mockResolvedValue(certificate);
+    mocks.findUserById.mockResolvedValue({ email: 'donor@example.com', isEmailVerified: true });
+    mocks.updateDonationCertificateEmailState.mockResolvedValue(true);
+    mocks.sendEmail.mockResolvedValue({ success: true, channel: 'EMAIL', providerMessageId: 'message-revoked' });
+
+    await expect(sendDonationCertificateRevokedEmail(certificate.certificateId)).resolves.toMatchObject({ success: true });
+
+    expect(mocks.sendEmail).toHaveBeenCalledWith(expect.objectContaining({
+      templateName: 'donation-certificate-revoked',
+      subject: expect.stringContaining('Đính chính trạng thái chứng nhận')
+    }));
+    expect(mocks.sendEmail.mock.calls[0][0]).not.toHaveProperty('attachments');
+    expect(mocks.updateDonationCertificateEmailState).toHaveBeenLastCalledWith(
+      certificate.certificateId,
+      'REVOCATION',
+      'RETRYING',
+      'SENT',
+      expect.objectContaining({ attemptCount: 1, providerMessageId: 'message-revoked' })
+    );
   });
 });

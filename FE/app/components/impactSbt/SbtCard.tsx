@@ -6,11 +6,13 @@ import type { ImpactSbtGalleryEntry } from '@/app/types/impactSbt';
 
 interface SbtCardProps {
   entry: ImpactSbtGalleryEntry;
+  headingLevel?: 'h2' | 'h3';
 }
 
 /** Card hiển thị một Impact SBT và chỉ tạo link detail khi tokenId đã có trên chain. */
-export default function SbtCard({ entry }: SbtCardProps) {
+export default function SbtCard({ entry, headingLevel = 'h2' }: SbtCardProps) {
   const projectDisplayName = entry.projectName ?? entry.projectId;
+  const ProjectHeading = headingLevel;
   const card = (
     <article
       data-testid="sbt-card"
@@ -24,7 +26,7 @@ export default function SbtCard({ entry }: SbtCardProps) {
       <div className="space-y-3 p-4">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <h2 className="truncate text-base font-semibold text-slate-900">{projectDisplayName}</h2>
+            <ProjectHeading className="truncate text-base font-semibold text-slate-900">{projectDisplayName}</ProjectHeading>
             <p className="mt-1 truncate font-mono text-xs text-slate-500">{entry.projectId}</p>
           </div>
           {entry.onChainTokenStatus === 'FROZEN' && (

@@ -4,6 +4,7 @@ import { findDonationCertificateById } from '../repositories/donationCertificate
 import { reverifyIssuedDonationCertificate } from './donationCertificateIssuance.service';
 
 const CERTIFICATE_ID_PATTERN = /^DCP-\d{4}-[A-F0-9]{32}$/;
+const PUBLIC_REVERIFY_CACHE_TTL_MS = 30_000;
 
 /** Xây explorer URL từ snapshot đã phát hành và base URL cấu hình an toàn. */
 function buildExplorerUrl(transactionHash: string): string { const config = getDonationCertificateConfig(); return new URL(transactionHash, `${config.explorerTransactionBaseUrl}/`).toString(); }
@@ -22,6 +23,14 @@ function projectPublicCertificate(certificate: NonNullable<Awaited<ReturnType<ty
   };
 }
 
+/** Kiểm tra snapshot đã đủ mới hoặc đã chốt cửa sổ reorg để bỏ qua RPC public. */
+function canUsePublicVerificationSnapshot(certificate: NonNullable<Awaited<ReturnType<typeof findDonationCertificateById>>>): boolean {
+  if (certificate.reverificationCompletedAt) return true;
+  if (!certificate.lastVerificationAt) return false;
+  const verificationAge = Date.now() - certificate.lastVerificationAt.getTime();
+  return verificationAge >= 0 && verificationAge < PUBLIC_REVERIFY_CACHE_TTL_MS;
+}
+
 /** Trả public verification state sau khi tái kiểm tra live khi certificate đã phát hành. */
 export async function getPublicDonationCertificate(certificateId: string): Promise<DonationCertificatePublicResponse | null> {
   if (!CERTIFICATE_ID_PATTERN.test(certificateId)) return null;
@@ -30,6 +39,7 @@ export async function getPublicDonationCertificate(certificateId: string): Promi
   if (certificate.issuanceStatus === 'PENDING_FINALITY') return projectPublicCertificate(certificate, 'PENDING');
   if (certificate.issuanceStatus === 'BLOCKED') return projectPublicCertificate(certificate, 'UNAVAILABLE');
   if (certificate.issuanceStatus === 'REVOKED') return projectPublicCertificate(certificate, 'REVOKED');
+  if (canUsePublicVerificationSnapshot(certificate)) return projectPublicCertificate(certificate, 'VERIFIED');
   const result = await reverifyIssuedDonationCertificate(certificateId);
   if (result === 'REVOKED') { const revoked = await findDonationCertificateById(certificateId); return revoked ? projectPublicCertificate(revoked, 'REVOKED') : null; }
   return projectPublicCertificate(certificate, result === 'UNAVAILABLE' ? 'UNAVAILABLE' : 'VERIFIED');

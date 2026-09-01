@@ -201,6 +201,11 @@ const nextConfig = {
   async rewrites() {
     return [
       {
+        // Donation routes của backend dùng prefix /donations, còn browser gọi same-origin /api/donations.
+        source: '/api/donations/:path*',
+        destination: `${apiOrigin}/donations/:path*`
+      },
+      {
         source: '/api/:path*',
         destination: `${apiOrigin}/api/:path*`
       }

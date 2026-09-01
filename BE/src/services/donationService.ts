@@ -103,26 +103,35 @@ const donationContractAbi = [
 
 /** Hàm tạo thông báo quyên góp cho tổ chức. Mục đích: báo realtime khi dự án của tổ chức nhận donation mới. */
 async function createDonationReceivedNotification(donationEventRecord: DonationEventLog): Promise<void> {
-  const projectRecord = await findProjectByProjectId(donationEventRecord.projectId);
-  if (!projectRecord) {
-    logger.warn(`Không tạo được thông báo quyên góp vì không tìm thấy dự án. projectId=${donationEventRecord.projectId} transactionHash=${donationEventRecord.transactionHash}`);
-    return;
-  }
-
-  await createUserNotification({
-    userId: projectRecord.organizationId,
-    notificationType: 'DONATION_RECEIVED',
-    title: 'Dự án vừa nhận quyên góp',
-    content: `Dự án ${projectRecord.name} vừa nhận ${donationEventRecord.amount.toLocaleString('vi-VN')} token quyên góp.`,
-    deduplicationKey: `DONATION_RECEIVED:${donationEventRecord.transactionHash}`,
-    metadata: {
-      projectId: donationEventRecord.projectId,
-      projectName: projectRecord.name,
-      amount: donationEventRecord.amount,
-      transactionHash: donationEventRecord.transactionHash,
-      donorAddress: donationEventRecord.isAnonymous ? null : donationEventRecord.donorAddress
+  try {
+    const projectRecord = await findProjectByProjectId(donationEventRecord.projectId);
+    if (!projectRecord) {
+      logger.warn(`Không tạo được thông báo quyên góp vì không tìm thấy dự án. projectId=${donationEventRecord.projectId} transactionHash=${donationEventRecord.transactionHash}`);
+      return;
     }
-  });
+
+    await createUserNotification({
+      userId: projectRecord.organizationId,
+      notificationType: 'DONATION_RECEIVED',
+      title: 'Dự án vừa nhận quyên góp',
+      content: `Dự án ${projectRecord.name} vừa nhận ${donationEventRecord.amount.toLocaleString('vi-VN')} token quyên góp.`,
+      deduplicationKey: `DONATION_RECEIVED:${donationEventRecord.transactionHash}`,
+      metadata: {
+        projectId: donationEventRecord.projectId,
+        projectName: projectRecord.name,
+        amount: donationEventRecord.amount,
+        transactionHash: donationEventRecord.transactionHash,
+        donorAddress: donationEventRecord.isAnonymous ? null : donationEventRecord.donorAddress
+      }
+    });
+  } catch (error) {
+    // Notification là side effect phụ; không được chặn metrics hoặc phát hành certificate đã xác minh.
+    logger.warn('Không thể tạo thông báo donation, tiếp tục xử lý donation chính.', {
+      projectId: donationEventRecord.projectId,
+      transactionHash: donationEventRecord.transactionHash,
+      errorMessage: error instanceof Error ? error.message : String(error)
+    });
+  }
 }
 
 /** Hàm tạo thông báo quyên góp sau khi submit giao dịch. Mục đích: báo cho tổ chức ngay cả khi bước index chạy nền chưa hoàn tất. */

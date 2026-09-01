@@ -85,13 +85,12 @@ export const NOTIFICATION_PUBLIC_PROJECTION = {
   createdAt: 1
 } as const;
 
-const channelDeliveryStatusSchema = new Schema(
-  {
-    channel: { type: String, required: true, enum: ['IN_APP', 'EMAIL', 'PUSH', 'SMS'] },
-    status: { type: String, required: true, enum: ['PENDING', 'SENT', 'FAILED', 'SKIPPED'], default: 'PENDING' }
-  },
-  { _id: false }
-);
+const channelDeliveryStatusField = {
+  type: String,
+  required: true,
+  enum: ['PENDING', 'SENT', 'FAILED', 'SKIPPED'] as const,
+  default: 'PENDING'
+};
 
 const notificationSchema = new Schema<Notification>(
   {
@@ -117,10 +116,10 @@ const notificationSchema = new Schema<Notification>(
       index: true
     },
     deliveryStatus: {
-      IN_APP: { type: channelDeliveryStatusSchema, required: true },
-      EMAIL: { type: channelDeliveryStatusSchema, required: true },
-      PUSH: { type: channelDeliveryStatusSchema, required: true },
-      SMS: { type: channelDeliveryStatusSchema, required: true }
+      IN_APP: channelDeliveryStatusField,
+      EMAIL: channelDeliveryStatusField,
+      PUSH: channelDeliveryStatusField,
+      SMS: channelDeliveryStatusField
     },
     deliveryState: {
       type: String,

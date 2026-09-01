@@ -38,33 +38,6 @@ const logger = getLogger();
  * Project dùng CommonJS module (tsconfig module: commonjs) nên __dirname có sẵn natively.
  */
 const EMAIL_TEMPLATES_DIR = path.resolve(__dirname, '../../templates/email');
-/**
- * Chuyển đổi HTML special characters thành entities.
- * Dùng làm sanitize trước khi render vào email template — phòng trường hợp
- * template dùng triple-brace `{{{content}}}` (không escape) hoặc nội dung
- * từ nguồn không đáng tin cậy (blockchain event, external API).
- */
-function escapeHtmlEntities(value: unknown): string {
-  if (value == null) return '';
-  const str = String(value);
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
-}
-
-/** Làm sạch đệ quy context template để payload lồng nhau cũng không thể chèn HTML. */
-function sanitizeTemplateContext(value: unknown): unknown {
-  if (typeof value === 'string') return escapeHtmlEntities(value);
-  if (Array.isArray(value)) return value.map(sanitizeTemplateContext);
-  if (value && typeof value === 'object' && !(value instanceof Date)) {
-    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, nestedValue]) => [key, sanitizeTemplateContext(nestedValue)]));
-  }
-  return value;
-}
-
 // Cache compiled templates để không phải compile lại mỗi lần gửi.
 const templateCache = new Map<string, HandlebarsTemplateDelegate<Record<string, unknown>>>();
 
@@ -210,9 +183,8 @@ function loadTemplate(templateName: string): HandlebarsTemplateDelegate<Record<s
  */
 function renderTemplate(templateName: string, context: Record<string, unknown>): string {
   const template = loadTemplate(templateName);
-  // Escape HTML entities cho tất cả giá trị string trong context.
-  // Đảm bảo content/title không inject được HTML vào email ngay cả khi template dùng triple-brace.
-  return template(sanitizeTemplateContext(context) as Record<string, unknown>) as string;
+  // Handlebars tự escape double-brace; không pre-escape context để tránh double-escape.
+  return template(context) as string;
 }
 
 /**

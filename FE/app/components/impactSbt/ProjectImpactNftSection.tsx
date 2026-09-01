@@ -28,7 +28,7 @@ export default function ProjectImpactNftSection({ projectId }: ProjectImpactNftS
       <h2 className="project-detail-section-title">Bằng chứng tác động on-chain</h2>
 
       {isGalleryLoading ? (
-        <div data-testid="project-impact-nft-skeletons" className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div data-testid="project-impact-nft-skeletons" className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: PROJECT_IMPACT_NFT_SKELETON_COUNT }, (_, index) => (
             <SbtCardSkeleton key={index} />
           ))}
@@ -49,7 +49,7 @@ export default function ProjectImpactNftSection({ projectId }: ProjectImpactNftS
       ) : entries.length === 0 ? (
         <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-6 text-center">
           <p className="text-sm font-semibold text-slate-700">
-            Dự án này chưa có mốc nào được xác minh on-chain.
+            Hiện chưa có bằng chứng on-chain nào được hiển thị cho dự án này.
           </p>
           <p className="mt-2 text-sm text-slate-500">
             Bằng chứng sẽ hiển thị tại đây khi có xác minh thực địa.
@@ -57,9 +57,13 @@ export default function ProjectImpactNftSection({ projectId }: ProjectImpactNftS
         </div>
       ) : (
         <>
-          <div data-testid="project-impact-nft-grid" className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div data-testid="project-impact-nft-grid" className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {previewEntries.map((entry, index) => (
-              <SbtCard key={`${entry.projectId}-${entry.onChainTokenId ?? `pending-${index}`}`} entry={entry} />
+              <SbtCard
+                key={`${entry.projectId}-${entry.onChainTokenId ?? `pending-${index}`}`}
+                entry={entry}
+                headingLevel="h3"
+              />
             ))}
           </div>
           {total > PROJECT_IMPACT_NFT_PREVIEW_COUNT && (

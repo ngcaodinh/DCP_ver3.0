@@ -47,4 +47,11 @@ describe('SbtCard', () => {
     expect(card.className).toContain('hover:shadow-cyan-500/20');
     expect(card.className).toContain('transition-[transform,box-shadow]');
   });
+
+  it('uses a level-three heading when nested inside a detail section', () => {
+    render(<SbtCard entry={makeEntry()} headingLevel="h3" />);
+
+    expect(screen.getByRole('heading', { level: 3, name: 'Dự án mẫu' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { level: 2, name: 'Dự án mẫu' })).not.toBeInTheDocument();
+  });
 });

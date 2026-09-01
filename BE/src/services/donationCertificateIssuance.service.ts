@@ -1,6 +1,6 @@
 import { getDonationCertificateConfig } from '../config/donationCertificateConfig';
 import type { DonationCertificateFinalityMode, DonationCertificateRecord } from '../models/donationCertificateModel';
-import { claimDonationCertificateIssuance, findDonationCertificateById, markDonationCertificateBlocked, markDonationCertificateRevoked, scheduleDonationCertificateFinalityCheck, switchDonationCertificateToConfirmationFallback, upsertPendingDonationCertificate } from '../repositories/donationCertificateRepository';
+import { claimDonationCertificateIssuance, findDonationCertificateById, markDonationCertificateBlocked, markDonationCertificateRevoked, markDonationCertificateReverificationCompleted, markDonationCertificateVerified, scheduleDonationCertificateFinalityCheck, switchDonationCertificateToConfirmationFallback, upsertPendingDonationCertificate } from '../repositories/donationCertificateRepository';
 import { enqueueDonationCertificateJob } from '../queues/donationCertificateQueue';
 import { verifyDonationCertificateFinality } from './donationCertificateFinality.service';
 
@@ -41,5 +41,12 @@ export async function reverifyIssuedDonationCertificate(certificateId: string): 
   const snapshot = certificate.snapshot;
   const verdict = await verifyDonationCertificateFinality({ transactionHash: snapshot.transactionHash, donorUserId: certificate.donorUserId, expectedProjectId: snapshot.projectId, expectedDonorAddress: snapshot.donorAddress, expectedAmountRaw: snapshot.amountRaw, expectedIsAnonymous: false, requestedMode: snapshot.finalityMode });
   if (verdict.status === 'REVOKED') { const revoked = await markDonationCertificateRevoked(certificateId, verdict.reasonCode, new Date()); if (revoked?.issuedAt) await enqueueDonationCertificateJob({ kind: 'SEND_REVOKED_EMAIL', certificateId, attemptNumber: 1 }, 0); return 'REVOKED'; }
-  return verdict.status === 'UNAVAILABLE' ? 'UNAVAILABLE' : 'VERIFIED';
+  if (verdict.status !== 'VERIFIED') return 'UNAVAILABLE';
+  await markDonationCertificateVerified(certificateId, new Date());
+  return 'VERIFIED';
+}
+
+/** Chốt certificate đã qua cửa sổ reorg để public verify chỉ dùng snapshot bất biến. */
+export async function completeDonationCertificateReverificationWindow(certificateId: string): Promise<void> {
+  await markDonationCertificateReverificationCompleted(certificateId, new Date());
 }

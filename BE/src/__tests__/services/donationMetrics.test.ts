@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => ({
   findPublicCampaigns: vi.fn(),
   getLatestIndexedBlockNumberFromRepository: vi.fn(),
   createUserNotification: vi.fn(),
+  createDonationCertificateCandidate: vi.fn(),
   logEvent: vi.fn(),
   jsonRpcProvider: vi.fn(),
   interfaceConstructor: vi.fn()
@@ -37,6 +38,9 @@ vi.mock('../../config/logger', () => ({
 
 vi.mock('../../services/notificationService', () => ({
   createUserNotification: mocks.createUserNotification
+}));
+vi.mock('../../services/donationCertificateIssuance.service', () => ({
+  createDonationCertificateCandidate: mocks.createDonationCertificateCandidate
 }));
 vi.mock('../../config/zeroDev', () => ({
   getZeroDevConfig: vi.fn()
@@ -126,6 +130,7 @@ describe('donation Prometheus metrics', () => {
     mocks.applyDonationToMetrics.mockResolvedValue(undefined);
     mocks.incrementSessionDonationCounters.mockResolvedValue(null);
     mocks.createUserNotification.mockResolvedValue(null);
+    mocks.createDonationCertificateCandidate.mockResolvedValue(null);
     mocks.findProjectByProjectId.mockResolvedValue(null);
     mocks.logEvent.mockReset();
   });
@@ -184,6 +189,40 @@ describe('donation Prometheus metrics', () => {
     expect(metrics).toMatch(/^donation_events_total(?:\{[^}]*\})? 0$/m);
     expect(metrics).not.toContain('donation_amount_vnd_count');
     expect(mocks.applyDonationToMetrics).toHaveBeenCalledWith('123', 50, DONOR_ADDRESS);
+  });
+
+  it('không chặn metrics và certificate khi notification phụ bị lỗi', async () => {
+    process.env.BLOCKCHAIN_RPC_URL = 'https://rpc.test';
+    process.env.DONATION_RANKING_CONTRACT_ADDRESS = '0x1111111111111111111111111111111111111111';
+    process.env.BLOCKCHAIN_CHAIN_ID = '80002';
+    mocks.findUserById.mockResolvedValue({ walletAddress: DONOR_ADDRESS });
+    mocks.upsertDonationRecordByTransactionHash.mockResolvedValue(undefined);
+    mocks.findProjectByProjectId.mockRejectedValue(new Error('notification storage unavailable'));
+    mocks.createDonationCertificateCandidate.mockResolvedValue({ certificateId: 'DCP-2026-CERT', issuanceStatus: 'PENDING_FINALITY' });
+    mocks.jsonRpcProvider.mockImplementation(() => ({
+      getNetwork: vi.fn().mockResolvedValue({ chainId: 80002n }),
+      waitForTransaction: vi.fn().mockResolvedValue({
+        status: 1,
+        blockNumber: 123,
+        logs: [{
+          address: process.env.DONATION_RANKING_CONTRACT_ADDRESS,
+          topics: ['0xtopic'],
+          data: '0xdata'
+        }]
+      })
+    }));
+    mocks.interfaceConstructor.mockImplementation(() => ({
+      parseLog: vi.fn(() => ({
+        name: 'DonationReceived',
+        args: { projectId: 123n, donor: DONOR_ADDRESS, amount: 50n, timestamp: 1_700_000_000n, isAnonymous: false }
+      }))
+    }));
+
+    const result = await recordDonationFromTransactionHash('user-1', '123', TRANSACTION_HASH, false);
+
+    expect(result.certificate).toMatchObject({ certificateId: 'DCP-2026-CERT' });
+    expect(mocks.applyDonationToMetrics).toHaveBeenCalledWith('123', 50, DONOR_ADDRESS);
+    expect(mocks.createDonationCertificateCandidate).toHaveBeenCalledTimes(1);
   });
 
   it('ghi DONATION_CONFIRMED đủ field trên đường record transaction hash', async () => {

@@ -17,11 +17,11 @@ const GOLD_LIGHT = '#FEF08A';
 const RECEIPT_MARGIN = 51;
 const CERTIFICATE_DISPLAY_CURRENCY = 'VNĐ';
 const CERTIFICATE_PAYMENT_METHOD = 'Chuyển khoản ngân hàng';
-const OPTIONAL_SERIF_BOLD_FONT_PATH = process.env.CERTIFICATE_SERIF_BOLD_FONT_PATH ?? 'C:\\Windows\\Fonts\\cambriab.ttf';
-const OPTIONAL_SERIF_ITALIC_FONT_PATH = process.env.CERTIFICATE_SERIF_ITALIC_FONT_PATH ?? 'C:\\Windows\\Fonts\\cambriai.ttf';
-const HAS_OPTIONAL_SERIF_FONTS = existsSync(OPTIONAL_SERIF_BOLD_FONT_PATH) && existsSync(OPTIONAL_SERIF_ITALIC_FONT_PATH);
-const OPTIONAL_SCRIPT_FONT_PATH = process.env.CERTIFICATE_SCRIPT_FONT_PATH ?? 'C:\\Windows\\Fonts\\segoesc.ttf';
-const HAS_OPTIONAL_SCRIPT_FONT = existsSync(OPTIONAL_SCRIPT_FONT_PATH);
+const OPTIONAL_SERIF_BOLD_FONT_PATH = process.env.CERTIFICATE_SERIF_BOLD_FONT_PATH?.trim();
+const OPTIONAL_SERIF_ITALIC_FONT_PATH = process.env.CERTIFICATE_SERIF_ITALIC_FONT_PATH?.trim();
+const HAS_OPTIONAL_SERIF_FONTS = Boolean(OPTIONAL_SERIF_BOLD_FONT_PATH && OPTIONAL_SERIF_ITALIC_FONT_PATH && existsSync(OPTIONAL_SERIF_BOLD_FONT_PATH) && existsSync(OPTIONAL_SERIF_ITALIC_FONT_PATH));
+const OPTIONAL_SCRIPT_FONT_PATH = process.env.CERTIFICATE_SCRIPT_FONT_PATH?.trim();
+const HAS_OPTIONAL_SCRIPT_FONT = Boolean(OPTIONAL_SCRIPT_FONT_PATH && existsSync(OPTIONAL_SCRIPT_FONT_PATH));
 // SVG frame của HTML nằm trong inset 6mm và dùng viewBox 800x1120.
 // Các hệ số dưới đây chuyển đúng toạ độ viewBox sang khổ A4 PDF (595x842pt).
 const FRAME_INSET_X = 17;
@@ -810,12 +810,12 @@ export async function renderDonationCertificatePdf(certificate: DonationCertific
     .registerFont('BeVietnamLatinExtItalic', italicFontPath('latin-ext'))
     .registerFont('BeVietnamVietnameseItalic', italicFontPath('vietnamese'))
     .font('BeVietnamLatin');
-  if (HAS_OPTIONAL_SERIF_FONTS) {
+  if (HAS_OPTIONAL_SERIF_FONTS && OPTIONAL_SERIF_BOLD_FONT_PATH && OPTIONAL_SERIF_ITALIC_FONT_PATH) {
     document
       .registerFont('CertificateSerifBold', OPTIONAL_SERIF_BOLD_FONT_PATH)
       .registerFont('CertificateSerifItalic', OPTIONAL_SERIF_ITALIC_FONT_PATH);
   }
-  if (HAS_OPTIONAL_SCRIPT_FONT) document.registerFont('CertificateScript', OPTIONAL_SCRIPT_FONT_PATH);
+  if (HAS_OPTIONAL_SCRIPT_FONT && OPTIONAL_SCRIPT_FONT_PATH) document.registerFont('CertificateScript', OPTIONAL_SCRIPT_FONT_PATH);
   const completion = collectPdfBuffer(document);
   drawCertificatePage(document, certificate, qrBuffer, verificationUrl);
   document.addPage();

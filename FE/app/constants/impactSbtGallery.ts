@@ -13,8 +13,8 @@ export const SBT_GALLERY_MAX_PAGE = 500;
 /** Số skeleton hiển thị trong lần tải đầu để giữ ổn định bố cục gallery. */
 export const SBT_GALLERY_SKELETON_COUNT = 8;
 
-/** Số SBT xem trước trên trang chi tiết dự án trước khi đẩy người dùng sang gallery đầy đủ. */
-export const PROJECT_IMPACT_NFT_PREVIEW_COUNT = 4;
+/** Số SBT xem trước trên trang chi tiết, vừa một hàng trong khung nội dung hẹp. */
+export const PROJECT_IMPACT_NFT_PREVIEW_COUNT = 3;
 
 /** Số skeleton của section Impact NFT trong trang chi tiết, nhỏ hơn gallery vì khung hẹp hơn. */
 export const PROJECT_IMPACT_NFT_SKELETON_COUNT = 3;

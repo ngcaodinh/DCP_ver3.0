@@ -69,16 +69,17 @@ describe('ProjectImpactNftSection', () => {
 
     expect(screen.getAllByTestId('sbt-card-skeleton')).toHaveLength(3);
     expect(screen.queryByTestId('sbt-card')).not.toBeInTheDocument();
-    expect(screen.queryByText('Dự án này chưa có mốc nào được xác minh on-chain.')).not.toBeInTheDocument();
+    expect(screen.queryByText('Hiện chưa có bằng chứng on-chain nào được hiển thị cho dự án này.')).not.toBeInTheDocument();
   });
 
-  it('renders only four preview cards and links to the full gallery when more exist', () => {
-    mockQuery({ data: mockData([1, 2, 3, 4].map(makeEntry), 6) });
+  it('renders three preview cards and links to the full gallery when more exist', () => {
+    mockQuery({ data: mockData([1, 2, 3].map(makeEntry), 6) });
 
     render(<ProjectImpactNftSection projectId="project-001" />);
 
     expect(mocks.useGallery).toHaveBeenCalledWith('project-001', 1);
-    expect(screen.getAllByTestId('sbt-card')).toHaveLength(4);
+    expect(screen.getAllByTestId('sbt-card')).toHaveLength(3);
+    expect(screen.getAllByRole('heading', { level: 3 })).toHaveLength(3);
     expect(screen.getByRole('link', { name: 'Xem tất cả trên Impact Gallery' })).toHaveAttribute(
       'href',
       '/impact-gallery?projectId=project-001'
@@ -104,7 +105,7 @@ describe('ProjectImpactNftSection', () => {
     render(<ProjectImpactNftSection projectId="project-001" />);
 
     expect(screen.getByTestId('project-impact-nft-section')).toBeInTheDocument();
-    expect(screen.getByText('Dự án này chưa có mốc nào được xác minh on-chain.')).toBeInTheDocument();
+    expect(screen.getByText('Hiện chưa có bằng chứng on-chain nào được hiển thị cho dự án này.')).toBeInTheDocument();
     expect(screen.queryByTestId('sbt-card')).not.toBeInTheDocument();
   });
 
@@ -132,5 +133,14 @@ describe('ProjectImpactNftSection', () => {
 
     expect(screen.getAllByTestId('sbt-card')).toHaveLength(3);
     expect(screen.queryByRole('link', { name: 'Xem tất cả trên Impact Gallery' })).not.toBeInTheDocument();
+  });
+
+  it('renders a pending entry without a token detail link', () => {
+    mockQuery({ data: mockData([{ ...makeEntry(1), onChainTokenId: null }]) });
+
+    render(<ProjectImpactNftSection projectId="project-001" />);
+
+    expect(screen.getByTestId('sbt-card')).toBeInTheDocument();
+    expect(screen.queryByRole('link')).not.toBeInTheDocument();
   });
 });

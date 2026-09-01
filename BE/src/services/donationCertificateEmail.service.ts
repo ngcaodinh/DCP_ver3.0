@@ -2,7 +2,6 @@ import { findUserById } from '../models/authModel';
 import { findDonationCertificateById, updateDonationCertificateEmailState } from '../repositories/donationCertificateRepository';
 import { getDonationCertificateConfig } from '../config/donationCertificateConfig';
 import { sendEmail } from './email.service';
-import { renderDonationCertificatePdf } from './donationCertificatePdf.service';
 import type { DeliveryResult } from './types/delivery.types';
 
 const CERTIFICATE_PAYMENT_METHOD = 'Chuyển khoản ngân hàng';
@@ -14,12 +13,6 @@ export interface DonationCertificateEmailTemplateContext {
 
 /** Tạo URL public cùng origin cấu hình để email không tin Host header hay request input. */
 function buildPublicUrl(pathname: string): string { return new URL(pathname, getDonationCertificateConfig().frontendUrl).toString(); }
-
-/** Chuẩn hóa tên file đính kèm để certificate ID không thể tạo đường dẫn ngoài dự kiến. */
-function buildCertificatePdfFilename(certificateId: string): string {
-  const safeCertificateId = certificateId.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 80) || 'certificate';
-  return `DCP-Certificate-${safeCertificateId}.pdf`;
-}
 
 /** Định dạng thời gian UTC+7 và amount BigInt mà không mất độ chính xác. */
 function createTemplateContext(certificateId: string, certificate: NonNullable<Awaited<ReturnType<typeof findDonationCertificateById>>>): DonationCertificateEmailTemplateContext {
@@ -51,13 +44,11 @@ async function sendCertificateEmail(certificateId: string, emailKind: 'ISSUANCE'
   const claimed = await updateDonationCertificateEmailState(certificateId, emailKind, statusField.status, 'RETRYING', { attemptCount });
   if (!claimed) return { success: true, channel: 'EMAIL' };
   const context = createTemplateContext(certificateId, certificate);
-  const pdfBuffer = await renderDonationCertificatePdf(certificate);
   const result = await sendEmail({
     to: user.email,
     templateName: emailKind === 'ISSUANCE' ? 'donation-certificate-issued' : 'donation-certificate-revoked',
     subject: emailKind === 'ISSUANCE' ? `DCP – Giấy xác nhận đóng góp ${certificateId}` : `DCP – Đính chính trạng thái chứng nhận ${certificateId}`,
     templateContext: { ...context },
-    attachments: [{ filename: buildCertificatePdfFilename(certificateId), content: pdfBuffer, contentType: 'application/pdf' }],
     includeUnsubscribeLink: false
   });
   await updateDonationCertificateEmailState(certificateId, emailKind, 'RETRYING', result.success ? 'SENT' : attemptCount >= 4 || !result.retryable ? 'FAILED' : 'RETRYING', { attemptCount, ...(result.success ? { acceptedAt: new Date(), providerMessageId: result.providerMessageId } : { lastErrorCode: result.errorMessage?.slice(0, 120) }) });

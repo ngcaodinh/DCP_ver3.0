@@ -66,7 +66,22 @@ export async function findCertificatesNeedingReconciliation(now: Date, limit: nu
 
 /** Lấy certificate ISSUED còn trong cửa sổ reorg để đối chiếu canonical chain. */
 export async function findIssuedCertificatesForReverification(currentBlockNumber: number, limit: number): Promise<DonationCertificateRecord[]> {
-  return DonationCertificateMongoModel.find({ issuanceStatus: 'ISSUED', reverifyUntilBlock: { $gte: currentBlockNumber } }).sort({ reverifyUntilBlock: 1 }).limit(limit).lean<DonationCertificateRecord[]>().exec();
+  return DonationCertificateMongoModel.find({ issuanceStatus: 'ISSUED', reverifyUntilBlock: { $gte: currentBlockNumber }, reverificationCompletedAt: { $exists: false } }).sort({ reverifyUntilBlock: 1 }).limit(limit).lean<DonationCertificateRecord[]>().exec();
+}
+
+/** Lấy certificate đã đi qua cửa sổ reorg để đánh dấu không cần reverify live nữa. */
+export async function findIssuedCertificatesPastReverificationWindow(currentBlockNumber: number, limit: number): Promise<DonationCertificateRecord[]> {
+  return DonationCertificateMongoModel.find({ issuanceStatus: 'ISSUED', reverifyUntilBlock: { $lt: currentBlockNumber }, reverificationCompletedAt: { $exists: false } }).sort({ reverifyUntilBlock: 1 }).limit(limit).lean<DonationCertificateRecord[]>().exec();
+}
+
+/** Ghi nhận lần kiểm tra canonical thành công để public verify dùng cache ngắn hạn an toàn. */
+export async function markDonationCertificateVerified(certificateId: string, verifiedAt: Date): Promise<void> {
+  await DonationCertificateMongoModel.updateOne({ certificateId, issuanceStatus: 'ISSUED' }, { $set: { lastVerificationAt: verifiedAt } }).exec();
+}
+
+/** Chốt cửa sổ reorg bằng CAS để public verify không gọi RPC vô hạn sau khi finality đã đủ sâu. */
+export async function markDonationCertificateReverificationCompleted(certificateId: string, completedAt: Date): Promise<void> {
+  await DonationCertificateMongoModel.updateOne({ certificateId, issuanceStatus: 'ISSUED', reverificationCompletedAt: { $exists: false } }, { $set: { reverificationCompletedAt: completedAt, lastVerificationAt: completedAt } }).exec();
 }
 
 /** Cập nhật lần kiểm tra tiếp theo sau PENDING hoặc RPC tạm thời unavailable. */

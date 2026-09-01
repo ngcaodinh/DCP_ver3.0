@@ -1,7 +1,8 @@
 import { getDonationCertificateConfig } from '../config/donationCertificateConfig';
-import { findCertificatesNeedingReconciliation, findDonationCertificateById } from '../repositories/donationCertificateRepository';
+import { findCertificatesNeedingReconciliation, findIssuedCertificatesForReverification, findIssuedCertificatesPastReverificationWindow } from '../repositories/donationCertificateRepository';
 import { getDonationCertificateQueue, closeDonationCertificateQueues, enqueueDonationCertificateJob, moveDonationCertificateJobToDlq, type DonationCertificateJobData } from '../queues/donationCertificateQueue';
-import { processDonationCertificateFinalityCheck, reverifyIssuedDonationCertificate } from '../services/donationCertificateIssuance.service';
+import { completeDonationCertificateReverificationWindow, processDonationCertificateFinalityCheck, reverifyIssuedDonationCertificate } from '../services/donationCertificateIssuance.service';
+import { getCurrentDonationCertificateBlockNumber } from '../services/donationCertificateFinality.service';
 
 const EMAIL_RETRY_DELAYS_MS = [30_000, 120_000, 300_000] as const;
 const RECONCILIATION_INTERVAL_MS = 60_000;
@@ -25,17 +26,33 @@ async function processEmailJob(data: Extract<DonationCertificateJobData, { kind:
 
 /** Chạy reconciliation bounded để khôi phục job mất giữa issuance và queue enqueue. */
 async function reconcileDonationCertificates(): Promise<void> {
-  const records = await findCertificatesNeedingReconciliation(new Date(), 100);
+  const [records, currentBlockNumber] = await Promise.all([
+    findCertificatesNeedingReconciliation(new Date(), 100),
+    getCurrentDonationCertificateBlockNumber()
+  ]);
   for (const record of records) {
     if (record.issuanceStatus === 'PENDING_FINALITY') await enqueueDonationCertificateJob({ kind: 'VERIFY_AND_ISSUE', certificateId: record.certificateId, checkSequence: record.finalityCheckCount + 1 }, 0);
     if (record.issuanceStatus === 'ISSUED' && ['NOT_QUEUED', 'RETRYING'].includes(record.issuanceEmail.status)) await enqueueDonationCertificateJob({ kind: 'SEND_ISSUED_EMAIL', certificateId: record.certificateId, attemptNumber: getNextEmailAttempt(record.issuanceEmail.attemptCount) }, 0);
     if (record.issuanceStatus === 'REVOKED' && record.issuedAt && ['NOT_QUEUED', 'RETRYING'].includes(record.revocationEmail.status)) await enqueueDonationCertificateJob({ kind: 'SEND_REVOKED_EMAIL', certificateId: record.certificateId, attemptNumber: getNextEmailAttempt(record.revocationEmail.attemptCount) }, 0);
   }
+  if (currentBlockNumber === null) return;
+
+  const [activeReverificationRecords, expiredReverificationRecords] = await Promise.all([
+    findIssuedCertificatesForReverification(currentBlockNumber, 100),
+    findIssuedCertificatesPastReverificationWindow(currentBlockNumber, 100)
+  ]);
+  for (const record of activeReverificationRecords) {
+    await enqueueDonationCertificateJob({ kind: 'REVERIFY_ISSUED', certificateId: record.certificateId, checkSequence: record.finalityCheckCount + 1 }, 0);
+  }
+  for (const record of expiredReverificationRecords) {
+    await completeDonationCertificateReverificationWindow(record.certificateId);
+  }
 }
 
 /** Khởi động consumer chỉ trong worker container và chỉ khi feature flag đã bật. */
 export function startDonationCertificateWorker(emailDelivery: DonationCertificateEmailDelivery): void {
-  if (!getDonationCertificateConfig().enabled || process.env.RUN_WORKERS !== 'true') return;
+  // Đồng bộ với server.ts: chỉ tắt worker khi operator chỉ định rõ RUN_WORKERS=false.
+  if (!getDonationCertificateConfig().enabled || process.env.RUN_WORKERS === 'false') return;
   const queue = getDonationCertificateQueue();
   if (!queue) return;
   queue.process(async job => {
