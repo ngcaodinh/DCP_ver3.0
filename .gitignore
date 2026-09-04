@@ -84,6 +84,14 @@ dcp-terms-of-service.md
 \beginner-docker-vps-deploy-guide.md
 
 docs/*
+!docs/jmeter/
+!docs/jmeter/**
+docs/jmeter/results-*/
+docs/jmeter/smoke-*/
+docs/jmeter/*-backend*.log
+docs/jmeter/*.local.properties
+.jmeter-download-*/
+.jmeter-install-*/
 !docs/elk-integration.md
 !docs/release/
 !docs/release/f4-feedback-release-evidence.md

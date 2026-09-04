@@ -1,0 +1,12 @@
+protocol=http
+host=localhost
+port=4000
+users=200
+loops=100
+rampup=120
+donation_request_count=20000
+donation_amount_per_request=100
+expected_total=2000000
+disbursement_amount=10000
+# Chỉ dùng token ngẫu nhiên do người chạy tự tạo; không commit file .local.properties.
+synthetic_token=REPLACE_WITH_RANDOM_TEST_TOKEN

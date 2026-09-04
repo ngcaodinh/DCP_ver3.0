@@ -1,0 +1,18 @@
+# Copy to dcp-20000-donation-perf.local.properties (file is ignored by git).
+# Backend must run in an isolated perf database with:
+# NODE_ENV=performance
+# SYNTHETIC_DONATION_EXECUTION=true
+# SYNTHETIC_DONATION_ACK=I_UNDERSTAND_SYNTHETIC_DONATIONS
+protocol=http
+host=localhost
+port=4000
+# Use a dedicated ACTIVE project with no prior donations for an exact 20,000-row check.
+project_id=PASTE_ACTIVE_PROJECT_ID
+access_token=PASTE_PERF_DONOR_ACCESS_TOKEN_HERE
+# 20,000 requests × 100 tokens = 2,000,000 tokens; change to 20000 if that is the requested per-request amount.
+donation_amount=100
+users=200
+loops=100
+rampup=120
+expected_count=20000
+expected_total=2000000

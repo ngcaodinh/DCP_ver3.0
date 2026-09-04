@@ -12,6 +12,7 @@ import {
 } from '../services/donationService';
 import { getPublicLiveFeedTransactionList } from '../services/liveFeedService';
 import { sendErrorFromUnknown, sendErrorResponse, sendSuccessResponse } from '../utils/apiResponse';
+import { isSyntheticDonationExecutionEnabled } from '../config/donationPerformance';
 
 const logger = getLogger();
 
@@ -171,12 +172,14 @@ export async function handleOneClickDonation(request: AuthenticatedRequest, resp
     sendSuccessResponse(response, 200, 'Gửi giao dịch one-click donation thành công.', oneClickDonationResult, getCorrelationId(request));
 
     // Ghi chú logic phức tạp: ghi nhận chạy nền để đảm bảo lịch sử vẫn được lưu ngay cả khi FE không kịp gọi /donations/record.
-    triggerAutoRecordDonationInBackground(
-      request.authenticatedUser.userId,
-      normalizedProjectId,
-      oneClickDonationResult.transactionHash,
-      normalizedAnonymousFlag
-    );
+    if (!isSyntheticDonationExecutionEnabled()) {
+      triggerAutoRecordDonationInBackground(
+        request.authenticatedUser.userId,
+        normalizedProjectId,
+        oneClickDonationResult.transactionHash,
+        normalizedAnonymousFlag
+      );
+    }
   } catch (error) {
     logger.error('Gửi giao dịch one-click donation thất bại.', {
       authenticatedUserId: request.authenticatedUser.userId,

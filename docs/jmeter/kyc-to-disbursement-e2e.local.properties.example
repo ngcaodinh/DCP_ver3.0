@@ -1,0 +1,28 @@
+# Copy to kyc-to-disbursement-e2e.local.properties (ignored by git).
+# organization_access_token must be issued AFTER KYC approval because the
+# approval flow intentionally invalidates the old donor session.
+protocol=http
+host=localhost
+port=4000
+repo_root=D:/CODE/DCP_ver3.0
+kyc_access_token=PASTE_DONOR_TOKEN_USED_TO_SUBMIT_KYC
+organization_access_token=PASTE_ORGANIZATION_TOKEN_ISSUED_AFTER_KYC_APPROVAL
+regulatory_access_token=PASTE_REGULATORY_TOKEN
+donor_access_token=PASTE_FUNDED_DONOR_TOKEN
+committee_chair_access_token=PASTE_CHAIR_TOKEN
+committee_member1_access_token=PASTE_MEMBER1_TOKEN
+committee_member2_access_token=PASTE_MEMBER2_TOKEN
+kyc_org_name=DCP E2E Test Organization
+kyc_legal_registration_number=DCP-E2E-UNIQUE-CHANGE-ME
+kyc_file_base64=JVBERi0xLjQK
+bank_account_number=970400000001
+e2e_donation_amount=20000
+e2e_disbursement_amount=10000
+evidence_cid_1=QmYwAPJzv5CZsnAzt8auVZRnqEy1B5HfM9Q5e7vJ6C4abc
+evidence_cid_2=QmYwAPJzv5CZsnAzt8auVZRnqEy1B5HfM9Q5e7vJ6C5def
+evidence_cid_3=QmYwAPJzv5CZsnAzt8auVZRnqEy1B5HfM9Q5e7vJ6C6ghi
+
+# Set these on the machine running JMeter; never commit keys:
+# JMeter_COMMITTEE_CHAIR_PRIVATE_KEY=0x...
+# JMeter_COMMITTEE_MEMBER1_PRIVATE_KEY=0x...
+# JMeter_COMMITTEE_MEMBER2_PRIVATE_KEY=0x...

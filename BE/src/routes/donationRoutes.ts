@@ -18,6 +18,7 @@ import { createAuthenticationMiddleware } from '../middleware/authenticationMidd
 import { attachRequestMetadata } from '../middleware/ipMetadataMiddleware';
 import { createRateLimitMiddleware } from '../middleware/rateLimitMiddleware';
 import { createRoleAuthorizationMiddleware } from '../middleware/roleAuthorizationMiddleware';
+import { getDonationRequestRateLimit } from '../config/donationPerformance';
 
 /** Hàm khởi tạo route cho module donation. Mục đích: gom API campaign public, history và sync blockchain event cho UC3.1. */
 export function createDonationRoutes(): Router {
@@ -25,7 +26,7 @@ export function createDonationRoutes(): Router {
   const authenticationMiddleware = createAuthenticationMiddleware();
   const adminAuthorizationMiddleware = createRoleAuthorizationMiddleware(['admin']);
   const getCampaignRateLimit = createRateLimitMiddleware(80, 60 * 1000, { bucketName: 'donation:get-campaign' });
-  const getHistoryRateLimit = createRateLimitMiddleware(100, 60 * 1000, { bucketName: 'donation:get-history' });
+  const getHistoryRateLimit = createRateLimitMiddleware(getDonationRequestRateLimit(), 60 * 1000, { bucketName: 'donation:get-history' });
   const getCertificateRateLimit = createRateLimitMiddleware(60, 60 * 1000, { bucketName: 'donation:get-certificate' });
   const getCertificatePdfRateLimit = createRateLimitMiddleware(20, 60 * 1000, { bucketName: 'donation:get-certificate-pdf' });
   const syncEventsRateLimit = createRateLimitMiddleware(10, 60 * 1000, { bucketName: 'donation:sync-events' });

@@ -25,6 +25,11 @@ import { incrementSessionDonationCounters } from '../repositories/guestWalletSes
 import { recordDonationMetrics } from '../utils/donationMetrics';
 import * as eventLoggerService from './event-logger.service';
 import { createDonationCertificateCandidate, type DonationCertificateReference } from './donationCertificateIssuance.service';
+import { createHash, randomUUID } from 'node:crypto';
+import {
+  isSyntheticDonationExecutionEnabled,
+  isSyntheticDonationExecutionMisconfigured
+} from '../config/donationPerformance';
 
 const logger = getLogger();
 
@@ -184,6 +189,19 @@ export async function executeOneClickDonation(authenticatedUserId: string, proje
   if (!authenticatedUser) {
     throw new ApplicationError('Không tìm thấy người dùng đăng nhập.', 404, 'NOT_FOUND');
   }
+
+  if (isSyntheticDonationExecutionMisconfigured()) {
+    throw new ApplicationError(
+      'Synthetic donation chỉ được phép trong NODE_ENV=test|performance và phải có mã xác nhận.',
+      503,
+      'PERFORMANCE_MODE_MISCONFIGURED'
+    );
+  }
+
+  if (isSyntheticDonationExecutionEnabled()) {
+    return executeSyntheticDonation(authenticatedUser, projectId, normalizedAmount, Boolean(isAnonymous));
+  }
+
   if (!authenticatedUser.smartAccountOwnerEncryptedPrivateKey) {
     throw new ApplicationError('Tài khoản chưa sẵn sàng cho luồng one-click donation.', 400, 'VALIDATION_ERROR');
   }
@@ -380,6 +398,56 @@ export async function executeOneClickDonation(authenticatedUserId: string, proje
     projectId: projectIdAsBigInt.toString(),
     amount: Number(donationAmountAsBigInt),
     isAnonymous: Boolean(isAnonymous)
+  };
+}
+
+/**
+ * Ghi nhận donation INDEXED giả lập cho perf-stage.
+ * Mục đích: đo throughput/API và truy vấn tổng hợp với 20.000 request mà không gửi
+ * 20.000 giao dịch blockchain hoặc tạo side effect PayOS.
+ */
+async function executeSyntheticDonation(
+  authenticatedUser: { id: string; walletAddress?: string | null },
+  projectId: string,
+  amount: number,
+  isAnonymous: boolean
+) {
+  const normalizedProjectId = projectId.trim();
+  const projectRecord = await findProjectByProjectId(normalizedProjectId);
+  if (!projectRecord) {
+    throw new ApplicationError('Không tìm thấy dự án quyên góp.', 404, 'NOT_FOUND');
+  }
+  if (projectRecord.status !== 'ACTIVE') {
+    throw new ApplicationError('Dự án chưa ở trạng thái ACTIVE để nhận quyên góp.', 409, 'PROJECT_NOT_ACTIVE');
+  }
+
+  const timestamp = new Date();
+  const transactionHash = `0x${createHash('sha256').update(`${authenticatedUser.id}:${normalizedProjectId}:${timestamp.toISOString()}:${randomUUID()}`).digest('hex')}`;
+  const donorAddress = String(authenticatedUser.walletAddress || '0x0000000000000000000000000000000000000000').trim().toLowerCase();
+  const donationEventRecord: DonationEventLog = {
+    transactionHash,
+    projectId: normalizedProjectId,
+    donorAddress,
+    amount,
+    timestamp,
+    isAnonymous,
+    blockNumber: 0,
+    donationStatus: 'INDEXED',
+    onChainConfirmedAt: timestamp,
+    indexedAt: timestamp,
+    correlationId: generateDonationCorrelationId(transactionHash),
+    createdAt: timestamp,
+    updatedAt: timestamp
+  };
+
+  await upsertDonationRecordByTransactionHash(donationEventRecord);
+  recordDonationMetrics(amount);
+
+  return {
+    transactionHash,
+    projectId: normalizedProjectId,
+    amount,
+    isAnonymous
   };
 }
 

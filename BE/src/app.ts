@@ -30,6 +30,7 @@ import { createTrustScoreRoutes } from './routes/trustScoreRoutes';
 import { createProjectGovernanceRoutes } from './routes/projectGovernanceRoutes';
 import { createGovernanceSeatRoutes } from './routes/governanceSeatRoutes';
 import { createAuditorOnboardingRoutes } from './routes/auditorOnboardingRoutes';
+import { createSyntheticE2eRoutes } from './routes/syntheticE2eRoutes';
 import { validateGuestJwtConfig } from './config/guestJsonWebToken';
 import { applySeoAndCacheHeaders } from './middleware/seoCacheMiddleware';
 import { API_GUEST_PREFIX } from './config/apiPrefixes';
@@ -200,6 +201,7 @@ function registerRoutes(): void {
   application.use('/api/feedback', createPublicFeedbackRoutes());
   application.use('/api/foundation-kyc', createFoundationKycRoutes());
   application.use('/api/tiles', createTileProxyRoutes()); // [A-NEW3 fix] Tile proxy để tránh lộ GPS ra third-party
+  application.use('/api/test/synthetic-e2e', createSyntheticE2eRoutes());
   application.use('/api/location-search', createLocationSearchRoutes());
   application.use('/api/trust-score', createTrustScoreRoutes());
   application.use(API_GUEST_PREFIX, createGuestRoutes());
